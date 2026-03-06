@@ -65,7 +65,7 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 ### EEGManager — Signal Processing
 
 - **EEG bands**: rolling 256-sample buffer, Hann window + DFT (1 Hz bins, 1–50 Hz). Outputs normalized `bandPower { delta, theta, alpha, beta, gamma }` (relative power, sum = 1).
-- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), look-back peak detector with adaptive threshold (mean + 0.3σ), 300 ms refractory. Median filter (kernel=5) on IBIs → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape).
+- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz) → rolling 6-second buffer → **MSPTDfast v2** batch detector (re-run every ~1 s). Downsamples to ~21 Hz (DS_FACTOR=3), builds multi-scale Local Maxima/Minima Scalograms, finds optimal scale lambda, intersects all rows to identify peaks, refines back to original 64 Hz resolution. Median IBI across all peak pairs in the window → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape). Reference: `refs/msptdfastv2_beat_detector.m`.
 - **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians.
 - `enablePpg = true` must be set on `MuseClient` before `connect()` — already handled in `EEGManager.connect()`.
 
@@ -74,6 +74,10 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 - **PARTICLES**: Start Color, End Color
 - **VISUALIZER**: Auto Mix (geometry swap on beat), Auto Rotate (GSAP rotation on beat), Head Control (IMU) — routes pitch/roll to `holderObjects.rotation`, Reset Cylinder
 - **INFLUENCE**: EEG Strength, HR Strength, IMU Strength (all 0–3×)
+
+### Standing Rules
+
+- **After any algorithm or signal-processing change, update `docs/algorithms.md`** to match the new implementation. Keep constants, stage descriptions, and pseudocode in sync with the code.
 
 ### Build Notes
 

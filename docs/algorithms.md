@@ -112,9 +112,9 @@ Rather than an FFT, a **direct DFT** is computed for integer bins 1–50 Hz. Thi
 
 ## 4. PPG Heart Rate Detection
 
-**File:** `src/js/managers/EEGManager.js`, `_processPPGSample()` / `update()`
+**File:** `src/js/managers/EEGManager.js`, `_processPPGSample()` / `_runMSPTD()` / `update()`
 
-The Muse's infrared PPG sensor (channel 1) streams raw photodiode counts at 64 Hz. The pipeline converts these into a heart rate in BPM and a smooth 0–1 pulse oscillator.
+The Muse's infrared PPG sensor (channel 1) streams raw photodiode counts at 64 Hz. The pipeline converts these into a heart rate in BPM and a smooth 0–1 pulse oscillator using the **MSPTDfast v2** algorithm (port of `msptdpcref_beat_detector.m`).
 
 ### Stage 1 — IIR bandpass filter
 
@@ -132,28 +132,34 @@ hp[n] = α_HP · (hp[n-1] + raw[n] - raw[n-1])
 lp[n] = (1 - α_LP) · lp[n-1] + α_LP · hp[n]
 ```
 
-The filtered output is kept in a 6-second ring buffer (384 samples).
+Filtered samples accumulate in a rolling 6-second ring buffer (384 samples at 64 Hz). The MSPTDfast batch detector is re-run every `PPG_RUN_STEP = 64` new samples (~1 s).
 
-### Stage 2 — Look-back peak detection
+### Stage 2 — MSPTDfast v2 batch peak detection
 
-A peak at buffer position `p` is declared only after 5 more samples arrive (LOOKAHEAD=5), confirming it is a local maximum. This avoids spurious early triggers.
+When triggered, the full 6-second buffer is processed in a batch:
 
-A candidate peak must pass three gates:
-1. **Local maximum:** strictly greater than its 2 nearest neighbours on each side
-2. **Adaptive threshold:** value > mean + 0.3σ of the most recent 4-second window — adapts to signal amplitude
-3. **Refractory period:** at least 300 ms (19 samples at 64 Hz) since the last accepted peak — enforces a 200 BPM maximum
+**Downsample** — the buffer is decimated by `DS_FACTOR = 3` to ~21 Hz before scalogram analysis. The bandpass already prevents aliasing.
+
+**Detrend** — a best-fit linear trend is subtracted from the downsampled signal (mirrors MATLAB `detrend`), removing any residual DC offset.
+
+**Multi-scale Local Maxima Scalogram (LMS)** — for each scale `k = 1…λ_max`, a binary matrix `mMax[k][i]` is set to 1 if sample `i` is a local maximum at scale `k` (i.e. `x[i] > x[i-k]` and `x[i] > x[i+k]`). The maximum scale is capped to plausible heart rates (≥ `HR_MIN/60` Hz), excluding physiologically impossible slow periods.
+
+**Optimal scale λ** — the scale with the highest row-sum (most detections) is selected as `λ_max`. This is the scale that best matches the dominant periodicity in the signal.
+
+**Peak intersection** — columns where all rows `0…λ_max` agree (every scale marks a local maximum) are declared peaks. This intersection step is the key insight of MSPTD: only true cardiac peaks survive consistently across all scales, while noise peaks appear only at one or a few scales.
+
+**Refine to original resolution** — each downsampled peak index is mapped back to the 64 Hz buffer (multiply by `DS_FACTOR`), then a local search within ±`REFINE_TOL = 4` samples finds the true maximum. A 300 ms refractory period (19 samples) is then enforced to eliminate duplicates.
 
 ### Stage 3 — IBI → heart rate
 
-On each valid peak, the inter-beat interval (IBI) in seconds is:
+IBIs are computed from all consecutive peak pairs in the 6-second window:
 ```
-IBI = (currentPeakSample - lastPeakSample) / 64
-instantHR = 60 / IBI
+IBI = (peaks[i] - peaks[i-1]) / 64
 ```
 
-Valid beats (30–200 BPM range) are appended to a 5-sample IBI history. The **median** of this history is used (not the mean) to reject outlier IBIs from motion artifacts:
+Only IBIs corresponding to 30–200 BPM are kept. The **median** IBI across all valid pairs is used (not the mean) for robustness against outliers:
 ```
-heartRate = round(60 / median(ibiHistory))
+heartRate = round(60 / median(ibis))
 ```
 
 ### Stage 4 — Heartbeat oscillator
