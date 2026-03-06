@@ -1,0 +1,27 @@
+node_modules
+dist
+.cache
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/
+
+# Demo audio track — place your own royalty-free MP3 at public/audio/demo.mp3
+public/audio/demo.mp3

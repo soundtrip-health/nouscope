@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" class="no-js">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nouscope</title>
+    <meta
+      name="description"
+      content="An audio-reactive 3D particle visualizer with optional Muse EEG biometric integration, built with Three.js and WebGL."
+    />
+    <meta name="author" content="Soundtrip" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="Nouscope" />
+    <meta
+      property="og:description"
+      content="Audio-reactive 3D particle system with optional Muse EEG/PPG/IMU integration — built with Three.js and WebGL."
+    />
+    <meta property="og:type" content="website" />
+
+    <link rel="shortcut icon" href="favicon.ico" />
+    <link rel="stylesheet" href="/src/scss/style.scss" />
+    <script>
+      document.documentElement.className = 'js'
+    </script>
+    <script type="module" src="/src/js/index.js"></script>
+  </head>
+  <body class="demo-1">
+    <main>
+      <div class="content"></div>
+      <div class="eeg-controls" id="eeg-controls">
+        <span class="eeg-status" id="eeg-status"></span>
+        <button id="eeg-connect">Connect EEG</button>
+        <span class="heart-rate-display" id="heart-rate"></span>
+      </div>
+      <div class="user_interaction">
+        <p class="user_interaction__label">Click to start</p>
+        <p class="demo-hint">No EEG headset? The visualizer works great with audio only.</p>
+        <label class="upload-btn">
+          Upload your own audio file
+          <input type="file" id="audio-upload" accept="audio/*" />
+        </label>
+      </div>
+      <!-- Shown only in browsers that lack Web Bluetooth (Firefox, Safari) -->
+      <div class="browser-warning" id="bt-warning" hidden>
+        EEG requires Chrome or Edge (Web Bluetooth API).
+        The visualizer works without EEG in any modern browser.
+      </div>
+    </main>
+    <script>
+      if (!navigator.bluetooth) {
+        document.getElementById('bt-warning').hidden = false
+      }
+    </script>
+  </body>
+</html>

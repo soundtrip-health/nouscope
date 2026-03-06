@@ -1,0 +1,40 @@
+{
+  "name": "nouscope",
+  "version": "0.1.0",
+  "description": "An audio-reactive 3D particle visualizer with optional Muse EEG/PPG/IMU biometric integration, built with Three.js and WebGL.",
+  "author": "Soundtrip",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "three.js",
+    "webgl",
+    "audio-reactive",
+    "eeg",
+    "particles",
+    "web-bluetooth",
+    "muse",
+    "visualizer"
+  ],
+  "contributors": [
+    "Bob Dougherty <bob@soundtrip.com> EEG integration, visualizer updates",
+    "Tiago Canzian <tiago.canzian@arkx.cc> (original Codrops tutorial)"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "glslify": "^7.1.1",
+    "rollup-plugin-glslify": "^1.3.1",
+    "sass": "^1.69.5",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "dat.gui": "^0.7.9",
+    "gsap": "^3.12.2",
+    "muse-js": "github:soundtrip-health/muse-js#muse3",
+    "three": "^0.174.0",
+    "web-audio-beat-detector": "^8.1.56"
+  }
+}
