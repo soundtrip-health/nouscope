@@ -18,14 +18,16 @@ No test suite is configured.
 
 ### Entry Point & Boot Sequence
 
-`src/js/index.js` instantiates `App`. `App.js` waits for a user interaction (click for demo track, or file upload), then:
-1. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
-2. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
-3. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
-4. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI
+`src/js/index.js` instantiates `App`. The `App` constructor immediately:
+1. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI (so EEG can connect before music starts)
+
+Then on user interaction (click for demo track, or file upload via the Track button in the controls bar):
+2. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
+3. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
+4. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
 5. `update()` render loop starts
 
-If `demo.mp3` is absent, the UI prompts for file upload. Audio can always be replaced by uploading a file.
+If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time by clicking the Track button in the controls bar. When EEG connects (before or after music), `autoMix` and `autoRotate` are set to `false` and `headControl` to `true`.
 
 ### Key Modules
 

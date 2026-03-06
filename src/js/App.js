@@ -29,10 +29,14 @@ export default class App {
     const overlay = document.querySelector('.user_interaction')
     const input = document.getElementById('audio-upload')
 
-    // File upload: use the uploaded file directly
+    // File upload: first load initializes everything; subsequent uploads swap the track
     input.addEventListener('change', (e) => {
       const file = e.target.files[0]
-      if (file) {
+      if (!file) return
+      e.target.value = '' // allow re-selecting the same file
+      if (this.renderer) {
+        this._swapAudio(file)
+      } else {
         overlay.removeEventListener('click', this._overlayClickHandler)
         this.init(file)
       }
@@ -40,12 +44,12 @@ export default class App {
 
     // Click anywhere on overlay: load demo track
     this._overlayClickHandler = (e) => {
-      // Ignore clicks on the file input label (let the browser handle those)
-      if (e.target.closest('.upload-btn')) return
       overlay.removeEventListener('click', this._overlayClickHandler)
       this.init(DEMO_TRACK_URL)
     }
     overlay.addEventListener('click', this._overlayClickHandler)
+
+    this._setupEEG()
   }
 
   /**
@@ -54,7 +58,6 @@ export default class App {
    */
   init(source) {
     document.querySelector('.user_interaction__label').textContent = 'Loading...'
-    document.querySelector('.upload-btn').style.display = 'none'
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -95,12 +98,10 @@ export default class App {
       App.audioManager = new AudioManager()
       await App.audioManager.loadAudioBuffer(source)
     } catch (err) {
-      // Demo track missing or fetch failed — prompt the user to upload
+      // Demo track missing or fetch failed — user can upload via the Track button
       console.error('Audio load failed:', err)
       document.querySelector('.user_interaction__label').textContent =
-        'Could not load demo track. Please upload an audio file.'
-      document.querySelector('.upload-btn').style.display = ''
-      // Re-attach overlay click handler for the file-upload path only
+        'Could not load demo track. Upload a file using the Track button.'
       return
     }
 
@@ -117,7 +118,12 @@ export default class App {
     this.particles = new ReativeParticles()
     this.particles.init()
 
-    this._setupEEG()
+    // If EEG was connected before music started, apply EEG-active defaults
+    if (App.eegManager?.isConnected) {
+      this.particles.properties.autoMix = false
+      this.particles.properties.autoRotate = false
+      this.particles.properties.headControl = true
+    }
 
     this.update()
   }
@@ -168,6 +174,12 @@ export default class App {
           btn.disabled = false
           dot.classList.add('connected')
           toggleBtn.hidden = false
+          // Switch to EEG-driven defaults: head control on, auto-mix/rotate off
+          if (this.particles) {
+            this.particles.properties.autoMix = false
+            this.particles.properties.autoRotate = false
+            this.particles.properties.headControl = true
+          }
           // Init plots on first connect; reset read pointers on subsequent connects
           if (!this._bioDisplay) {
             this._bioDisplay = new BioDataDisplay()
@@ -182,6 +194,21 @@ export default class App {
         }
       }
     })
+  }
+
+  /** Swap in a new audio track while the visualizer is running. */
+  async _swapAudio(file) {
+    if (App.audioManager.isPlaying) {
+      App.audioManager.audio.stop()
+      App.audioManager.isPlaying = false
+    }
+    try {
+      await App.audioManager.loadAudioBuffer(file)
+      await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
+      App.audioManager.play()
+    } catch (err) {
+      console.error('Audio swap failed:', err)
+    }
   }
 
   /** Update signal quality dots, bio-panel HR readout, and plots each frame. */

@@ -63,15 +63,15 @@
         <span class="eeg-status" id="eeg-status"></span>
         <button id="eeg-connect">Connect EEG</button>
         <span class="heart-rate-display" id="heart-rate"></span>
-        <button class="bio-toggle" id="bio-toggle" hidden title="Show live data">◉</button>
+        <button class="bio-toggle" id="bio-toggle" hidden title="Click to show/hide raw bio data">◉</button>
+        <label class="controls-upload-btn" title="Upload audio file">
+          ↑ Track
+          <input type="file" id="audio-upload" accept="audio/*" />
+        </label>
       </div>
       <div class="user_interaction">
         <p class="user_interaction__label">Click to start</p>
         <p class="demo-hint">No EEG headset? The visualizer works great with audio only.</p>
-        <label class="upload-btn">
-          Upload your own audio file
-          <input type="file" id="audio-upload" accept="audio/*" />
-        </label>
       </div>
       <!-- Shown only in browsers that lack Web Bluetooth (Firefox, Safari) -->
       <div class="browser-warning" id="bt-warning" hidden>

@@ -168,11 +168,11 @@ a:focus-visible {
 }
 
 .eeg-controls {
-  display: none;
+  display: flex;
   position: fixed;
   bottom: 1.5rem;
   left: 1.5rem;
-  z-index: 100;
+  z-index: 1001;  // above the overlay so EEG can connect before music starts
   align-items: center;
   gap: 0.6rem;
 
@@ -196,6 +196,25 @@ a:focus-visible {
       opacity: 0.5;
       cursor: default;
     }
+  }
+}
+
+.controls-upload-btn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+
+  input[type='file'] { display: none; }
+
+  &:hover {
+    border-color: var(--color-text);
+    background: rgba(255, 255, 255, 0.1);
   }
 }
 
