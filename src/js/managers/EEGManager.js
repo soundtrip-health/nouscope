@@ -2,10 +2,10 @@ import { MuseClient, zipSamples } from 'muse-js'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PPG_FS = 64
+const PPG_FS       = 64
 const PPG_INFRARED = 1          // ppgChannel 1 = infrared, best cardiac signal
-const PPG_BUF_SECS = 6          // seconds of PPG history to keep
-const PPG_BUF_MAX = PPG_FS * PPG_BUF_SECS
+const PPG_WIN_SAMP = PPG_FS * 6 // 6-second MSPTDfast analysis window = 384 samples
+const PPG_RUN_STEP = PPG_FS     // re-run MSPTD every ~1 s of new data
 
 // Online IIR bandpass (HP 0.5 Hz + LP 3.5 Hz) — covers 30–210 BPM
 // First-order high-pass: α = 1 / (1 + 2π·fc/fs)
@@ -13,18 +13,101 @@ const HP_ALPHA = 1 / (1 + (2 * Math.PI * 0.5) / PPG_FS)    // ≈ 0.953
 // First-order low-pass: α = 2π·fc/fs / (1 + 2π·fc/fs)
 const LP_ALPHA = ((2 * Math.PI * 3.5) / PPG_FS) / (1 + (2 * Math.PI * 3.5) / PPG_FS) // ≈ 0.255
 
-// Peak detection
-const MIN_PEAK_DIST = Math.round(0.3 * PPG_FS)  // 300 ms min = ~200 BPM max ≈ 19 samples
-const LOOKAHEAD = 5             // look-back window for online peak detection
-const HR_MIN = 30
-const HR_MAX = 200
-const IBI_MEDIAN_SIZE = 5       // median filter kernel (must be odd)
+// MSPTDfast v2 downsampling (ds_freq = 20 Hz)
+const DS_FACTOR = Math.floor(PPG_FS / 20)   // 3 — decimation factor
+const DS_FS     = PPG_FS / DS_FACTOR        // ≈ 21.33 Hz for analysis
+
+// Plausible heart rate bounds
+const HR_MIN = 30    // bpm
+const HR_MAX = 200   // bpm
+
+// Peak refinement tolerance after upsampling (tol_durn = 0.05 s, ds_fs ≥ 20 Hz)
+const REFINE_TOL    = Math.ceil(PPG_FS * 0.05)   // 4 samples
+// Refractory: reject peaks closer than 300 ms (mirrors MIN_PEAK_DIST in original)
+const MIN_PEAK_DIST = Math.round(0.3 * PPG_FS)   // 19 samples
 
 // Accelerometer head-pose smoothing
 const ACC_ALPHA = 0.08           // low-pass coefficient — keeps only slow head movements
 
 // EEG spectral analysis
 const EEG_BUF_SIZE = 256
+
+// ── MSPTDfast v2 helpers ───────────────────────────────────────────────────────
+
+/** Remove best-fit linear trend from a signal (mirrors MATLAB detrend). */
+function _detrend(sig) {
+  const N = sig.length
+  if (N < 2) return sig.slice()
+  let sumX = 0, sumY = 0, sumXX = 0, sumXY = 0
+  for (let i = 0; i < N; i++) {
+    sumX += i; sumY += sig[i]; sumXX += i * i; sumXY += i * sig[i]
+  }
+  const denom = N * sumXX - sumX * sumX
+  if (denom === 0) return sig.slice()
+  const slope     = (N * sumXY - sumX * sumY) / denom
+  const intercept = (sumY - slope * sumX) / N
+  return sig.map((v, i) => v - (slope * i + intercept))
+}
+
+/**
+ * MSPTDfast v2 core detector (port of msptdpcref_beat_detector).
+ * Detects peaks and onsets in a short PPG window via multi-scale scalograms.
+ *
+ * @param {number[]} sig     — bandpass-filtered PPG samples
+ * @param {number}   fs      — sampling frequency of sig (Hz)
+ * @param {number}   minHrHz — lower HR bound in Hz (default 30 bpm → 0.5 Hz)
+ * @returns {{ peaks: number[], onsets: number[] }} — 0-based indices
+ */
+function _msptdDetect(sig, fs, minHrHz = HR_MIN / 60) {
+  const N = sig.length
+  if (N < 4) return { peaks: [], onsets: [] }
+
+  const L      = Math.ceil(N / 2) - 1
+  const durn   = N / fs
+
+  // Limit scales to those representing plausible HRs (use_reduced_lms_scales=true)
+  // Scale k corresponds to frequency (L/k)/durn Hz; keep where that >= minHrHz
+  // → k <= L / (durn * minHrHz)
+  const maxScale = Math.min(L, Math.floor(L / (durn * minHrHz)))
+  if (maxScale < 1) return { peaks: [], onsets: [] }
+
+  // Detrend (Step 1 of MSPTD)
+  const x = _detrend(sig)
+
+  // Build Local Maxima/Minima Scalograms as flat Uint8Arrays [maxScale × N]
+  const mMax = new Uint8Array(maxScale * N)
+  const mMin = new Uint8Array(maxScale * N)
+  for (let k = 1; k <= maxScale; k++) {
+    const row = (k - 1) * N
+    for (let i = k; i < N - k; i++) {
+      const xi = x[i], xL = x[i - k], xR = x[i + k]
+      if (xi > xL && xi > xR) mMax[row + i] = 1
+      if (xi < xL && xi < xR) mMin[row + i] = 1
+    }
+  }
+
+  // Step 2: find scale lambda with maximum row-sum (most detections)
+  let lambdaMax = 0, lambdaMin = 0, bestMax = 0, bestMin = 0
+  for (let k = 0; k < maxScale; k++) {
+    const row = k * N
+    let sMax = 0, sMin = 0
+    for (let i = 0; i < N; i++) { sMax += mMax[row + i]; sMin += mMin[row + i] }
+    if (sMax > bestMax) { bestMax = sMax; lambdaMax = k }
+    if (sMin > bestMin) { bestMin = sMin; lambdaMin = k }
+  }
+
+  // Steps 3–4: collect columns where ALL rows 0..lambda agree (intersection)
+  const peaks = [], onsets = []
+  for (let i = 0; i < N; i++) {
+    let isPk = true, isTr = true
+    for (let k = 0; k <= lambdaMax && isPk; k++) { if (!mMax[k * N + i]) isPk = false }
+    for (let k = 0; k <= lambdaMin && isTr; k++) { if (!mMin[k * N + i]) isTr = false }
+    if (isPk) peaks.push(i)
+    if (isTr) onsets.push(i)
+  }
+
+  return { peaks, onsets }
+}
 
 export default class EEGManager {
   // Public state
@@ -46,13 +129,11 @@ export default class EEGManager {
   _eegBuffer = []
 
   // PPG / heart rate
-  _ppgBuffer      = []           // ring buffer of bandpass-filtered samples
+  _ppgBuffer      = []           // rolling buffer of bandpass-filtered samples
+  _ppgStepCount   = 0            // samples since last MSPTD run
   _hpPrevX        = 0            // high-pass: previous raw input
   _hpPrevY        = 0            // high-pass: previous output
   _lpPrevY        = 0            // low-pass: previous output
-  _ppgCount       = 0            // global sample counter (for peak distance)
-  _lastPeakCount  = -MIN_PEAK_DIST
-  _ibiHistory     = []           // recent valid IBIs (seconds) for median filter
 
   // Heart-pulse oscillator
   _heartPhase    = 0
@@ -140,11 +221,9 @@ export default class EEGManager {
   // ── Private helpers ──────────────────────────────────────────────────────────
 
   _resetState() {
-    this._eegBuffer     = []
-    this._ppgBuffer     = []
-    this._ppgCount      = 0
-    this._lastPeakCount = -MIN_PEAK_DIST
-    this._ibiHistory    = []
+    this._eegBuffer    = []
+    this._ppgBuffer    = []
+    this._ppgStepCount = 0
     this._hpPrevX = this._hpPrevY = this._lpPrevY = 0
     this.bandPower  = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
     this.heartRate  = 70
@@ -214,16 +293,17 @@ export default class EEGManager {
   // ── PPG / heart rate ──────────────────────────────────────────────────────
 
   /**
-   * Process one raw PPG sample through the filter pipeline.
+   * Process one raw PPG sample through the filter pipeline, then trigger
+   * MSPTDfast v2 batch detection every PPG_RUN_STEP samples.
    *
-   * Pipeline (mirrors utils.py _bandpass_filter_ppg + detect_ppg_peaks):
+   * Pipeline:
    *   1. First-order IIR high-pass  @ 0.5 Hz — removes DC & baseline wander
    *   2. First-order IIR low-pass   @ 3.5 Hz — removes motion artifacts
-   *   3. Local-maximum peak detection with adaptive threshold
-   *   4. Median filter (kernel=5) on inter-beat intervals
+   *   3. Accumulate into rolling 6-second buffer
+   *   4. Every ~1 second, run MSPTDfast on the buffer to update heartRate
    */
   _processPPGSample(raw) {
-    // 1. High-pass (detrend baseline)
+    // 1. High-pass (remove DC & baseline wander)
     const hp = HP_ALPHA * (this._hpPrevY + raw - this._hpPrevX)
     this._hpPrevX = raw
     this._hpPrevY = hp
@@ -232,61 +312,70 @@ export default class EEGManager {
     const lp = (1 - LP_ALPHA) * this._lpPrevY + LP_ALPHA * hp
     this._lpPrevY = lp
 
-    // Maintain ring buffer
+    // Rolling 6-second window
     this._ppgBuffer.push(lp)
-    if (this._ppgBuffer.length > PPG_BUF_MAX) {
-      this._ppgBuffer.shift()
-      this._lastPeakCount--   // keep relative to current buffer tail
+    if (this._ppgBuffer.length > PPG_WIN_SAMP) this._ppgBuffer.shift()
+
+    // Run MSPTDfast every PPG_RUN_STEP new samples once the window is full
+    this._ppgStepCount++
+    if (this._ppgStepCount >= PPG_RUN_STEP) {
+      this._ppgStepCount = 0
+      this._runMSPTD()
     }
+  }
 
-    this._ppgCount++
+  /**
+   * Run MSPTDfast v2 on the current 6-second PPG buffer.
+   * Downsamples to ~20 Hz, detects peaks, corrects back to original fs,
+   * then computes heart rate from the median inter-beat interval.
+   */
+  _runMSPTD() {
+    if (this._ppgBuffer.length < PPG_WIN_SAMP) return
 
-    const bufLen = this._ppgBuffer.length
-    if (bufLen < PPG_FS * 2) return   // need at least 2 seconds before detecting
+    const win = this._ppgBuffer.slice(-PPG_WIN_SAMP)
 
-    // 3. Look-back peak detection
-    //    We declare a peak at index (bufLen-1-LOOKAHEAD) once LOOKAHEAD newer
-    //    samples have arrived, so we can confirm it's a local maximum.
-    const peakBufIdx = bufLen - 1 - LOOKAHEAD
-    if (peakBufIdx < LOOKAHEAD) return
+    // Downsample: simple decimation (bandpass already limits aliasing)
+    const ds = []
+    for (let i = 0; i < win.length; i += DS_FACTOR) ds.push(win[i])
 
-    const v = this._ppgBuffer[peakBufIdx]
+    // Detect peaks in downsampled signal
+    const { peaks: dsPeaks } = _msptdDetect(ds, DS_FS)
+    if (dsPeaks.length < 2) return
 
-    // Must be strictly greater than nearest 2 neighbours on each side
-    if (!(v > this._ppgBuffer[peakBufIdx - 1] &&
-          v > this._ppgBuffer[peakBufIdx + 1] &&
-          v > this._ppgBuffer[peakBufIdx - 2] &&
-          v > this._ppgBuffer[peakBufIdx + 2])) return
-
-    // Adaptive threshold: mean + 0.3σ over the last 4 seconds
-    const win4 = this._ppgBuffer.slice(-PPG_FS * 4)
-    const mean = win4.reduce((s, x) => s + x, 0) / win4.length
-    const std  = Math.sqrt(win4.reduce((s, x) => s + (x - mean) ** 2, 0) / win4.length)
-    if (v < mean + 0.3 * std) return
-
-    // Minimum refractory distance from previous peak
-    const globalPeakIdx = this._ppgCount - LOOKAHEAD
-    if (globalPeakIdx - this._lastPeakCount < MIN_PEAK_DIST) return
-
-    // 4. Valid peak — compute IBI and update HR estimate
-    if (this._lastPeakCount > 0) {
-      const ibi    = (globalPeakIdx - this._lastPeakCount) / PPG_FS  // seconds
-      const instHR = 60 / ibi
-
-      if (instHR >= HR_MIN && instHR <= HR_MAX) {
-        this._ibiHistory.push(ibi)
-        if (this._ibiHistory.length > IBI_MEDIAN_SIZE) this._ibiHistory.shift()
-
-        // Median filter to reject outlier beats (e.g. from motion artifact)
-        if (this._ibiHistory.length >= 3) {
-          const sorted = [...this._ibiHistory].sort((a, b) => a - b)
-          const medianIBI = sorted[Math.floor(sorted.length / 2)]
-          this.heartRate = Math.round(60 / medianIBI)
-        }
+    // Upsample indices and refine to true local maximum in original-fs window
+    const refined = dsPeaks.map(p => {
+      const center = p * DS_FACTOR
+      const lo = Math.max(0, center - REFINE_TOL)
+      const hi = Math.min(win.length - 1, center + REFINE_TOL)
+      let maxVal = -Infinity, maxIdx = center
+      for (let i = lo; i <= hi; i++) {
+        if (win[i] > maxVal) { maxVal = win[i]; maxIdx = i }
       }
+      return maxIdx
+    })
+
+    // Sort and enforce refractory period (removes duplicates from refinement)
+    refined.sort((a, b) => a - b)
+    const peaks = [refined[0]]
+    for (let i = 1; i < refined.length; i++) {
+      if (refined[i] - peaks[peaks.length - 1] >= MIN_PEAK_DIST) peaks.push(refined[i])
     }
 
-    this._lastPeakCount = globalPeakIdx
+    if (peaks.length < 2) return
+
+    // Compute IBIs from all consecutive peak pairs in this window
+    const ibis = []
+    for (let i = 1; i < peaks.length; i++) {
+      const ibi = (peaks[i] - peaks[i - 1]) / PPG_FS
+      const hr  = 60 / ibi
+      if (hr >= HR_MIN && hr <= HR_MAX) ibis.push(ibi)
+    }
+    if (ibis.length === 0) return
+
+    // Median IBI → stable heart rate estimate
+    const sorted = [...ibis].sort((a, b) => a - b)
+    const medIBI = sorted[Math.floor(sorted.length / 2)]
+    this.heartRate = Math.round(60 / medIBI)
   }
 
   // ── IMU / head pose ──────────────────────────────────────────────────────
