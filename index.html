@@ -28,10 +28,42 @@
   <body class="demo-1">
     <main>
       <div class="content"></div>
+      <div class="bio-panel" id="bio-panel" hidden>
+        <div class="bio-section">
+          <div class="bio-section-header">
+            <span class="bio-label">EEG</span>
+            <div class="eeg-quality-dots" id="eeg-quality-dots">
+              <span class="quality-dot" data-ch="0" title="TP9"></span>
+              <span class="quality-dot" data-ch="1" title="AF7"></span>
+              <span class="quality-dot" data-ch="2" title="AF8"></span>
+              <span class="quality-dot" data-ch="3" title="TP10"></span>
+            </div>
+          </div>
+          <canvas id="eeg-canvas" width="280" height="90"></canvas>
+        </div>
+        <div class="bio-section">
+          <div class="bio-section-header">
+            <span class="bio-label">PPG</span>
+            <span class="bio-hr" id="bio-hr"></span>
+          </div>
+          <canvas id="ppg-canvas" width="280" height="60"></canvas>
+        </div>
+        <div class="bio-section">
+          <div class="bio-section-header">
+            <span class="bio-label">IMU</span>
+            <span class="bio-imu-legend">
+              <span style="color:#4fc3f7">A</span>
+              <span style="color:#ef9a9a">G</span>
+            </span>
+          </div>
+          <canvas id="imu-canvas" width="280" height="60"></canvas>
+        </div>
+      </div>
       <div class="eeg-controls" id="eeg-controls">
         <span class="eeg-status" id="eeg-status"></span>
         <button id="eeg-connect">Connect EEG</button>
         <span class="heart-rate-display" id="heart-rate"></span>
+        <button class="bio-toggle" id="bio-toggle" hidden title="Show live data">◉</button>
       </div>
       <div class="user_interaction">
         <p class="user_interaction__label">Click to start</p>

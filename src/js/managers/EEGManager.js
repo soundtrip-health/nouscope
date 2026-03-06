@@ -32,6 +32,15 @@ const ACC_ALPHA = 0.08           // low-pass coefficient — keeps only slow hea
 // EEG spectral analysis
 const EEG_BUF_SIZE = 256
 
+// Display ring-buffer lengths
+const EEG_DISPLAY_LEN = 256 * 4    // 4 s of raw EEG at 256 Hz
+const IMU_DISPLAY_LEN = 52 * 4     // 4 s of IMU at ~52 Hz
+
+// Signal quality RMS thresholds (µV, after mean subtraction)
+const SQ_WIN  = 256   // samples per RMS window
+const SQ_LOW  = 50     // below → 'good'
+const SQ_HIGH = 100    // above → 'poor'; in between → 'marginal'
+
 // ── MSPTDfast v2 helpers ───────────────────────────────────────────────────────
 
 /** Remove best-fit linear trend from a signal (mirrors MATLAB detrend). */
@@ -119,11 +128,23 @@ export default class EEGManager {
 
   onDisconnected = null          // optional callback
 
+  // Display buffers — raw data for live plots (populated only when connected)
+  eegChannels   = [[], [], [], []]        // per-channel raw EEG, rolling EEG_DISPLAY_LEN
+  accelDisplay  = { x: [], y: [], z: [] } // rolling IMU_DISPLAY_LEN
+  gyroDisplay   = { x: [], y: [], z: [] } // rolling IMU_DISPLAY_LEN
+  signalQuality = ['poor', 'poor', 'poor', 'poor'] // per EEG channel
+
+  // Monotonically increasing sample counters — never reset by the rolling window
+  eegSampleCount  = 0
+  ppgSampleCount  = 0
+  imuSampleCount  = 0
+
   // ── Private ─────────────────────────────────────────────────────────────────
   _client    = null
   _eegSub    = null
   _ppgSub    = null
   _accelSub  = null
+  _gyroSub   = null
 
   // EEG
   _eegBuffer = []
@@ -142,7 +163,13 @@ export default class EEGManager {
   // Accelerometer (head pose)
   _accSmooth = { x: 0, y: 0, z: 1 }  // starts pointing down (gravity reference)
 
+  // Signal quality update counter
+  _sqSampleCount = 0
+
   // ── Public API ───────────────────────────────────────────────────────────────
+
+  /** Filtered PPG waveform for display — same rolling buffer used by MSPTD. */
+  get ppgDisplay() { return this._ppgBuffer }
 
   /**
    * Connect to a Muse headset via Web Bluetooth and start streaming.
@@ -177,6 +204,11 @@ export default class EEGManager {
       this._processAccel(accel.samples)
     })
 
+    // IMU — gyroscope
+    this._gyroSub = this._client.gyroscopeData.subscribe((gyro) => {
+      this._processGyro(gyro.samples)
+    })
+
     // Detect hardware-initiated disconnects
     this._client.connectionStatus.subscribe((connected) => {
       if (!connected && this.isConnected) this._handleDisconnect()
@@ -191,6 +223,7 @@ export default class EEGManager {
     this._eegSub?.unsubscribe()
     this._ppgSub?.unsubscribe()
     this._accelSub?.unsubscribe()
+    this._gyroSub?.unsubscribe()
     this._client?.disconnect()
     this._handleDisconnect()
   }
@@ -225,10 +258,18 @@ export default class EEGManager {
     this._ppgBuffer    = []
     this._ppgStepCount = 0
     this._hpPrevX = this._hpPrevY = this._lpPrevY = 0
-    this.bandPower  = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
-    this.heartRate  = 70
-    this.heartPulse = 0
-    this.headPose   = { pitch: 0, roll: 0 }
+    this._sqSampleCount = 0
+    this.bandPower    = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
+    this.heartRate    = 70
+    this.heartPulse   = 0
+    this.headPose     = { pitch: 0, roll: 0 }
+    this.eegChannels   = [[], [], [], []]
+    this.accelDisplay  = { x: [], y: [], z: [] }
+    this.gyroDisplay   = { x: [], y: [], z: [] }
+    this.signalQuality = ['poor', 'poor', 'poor', 'poor']
+    this.eegSampleCount = 0
+    this.ppgSampleCount = 0
+    this.imuSampleCount = 0
   }
 
   _handleDisconnect() {
@@ -240,6 +281,24 @@ export default class EEGManager {
   // ── EEG spectral band powers ──────────────────────────────────────────────
 
   _processEEGSample(channelData) {
+    // Per-channel display buffers (raw µV)
+    this.eegSampleCount++
+    for (let ch = 0; ch < 4; ch++) {
+      const v = channelData[ch]
+      if (!isNaN(v)) {
+        this.eegChannels[ch].push(v)
+        if (this.eegChannels[ch].length > EEG_DISPLAY_LEN) this.eegChannels[ch].shift()
+      }
+    }
+
+    // Update signal quality ~4× per second (every 64 samples at 256 Hz)
+    this._sqSampleCount++
+    if (this._sqSampleCount >= 64) {
+      this._sqSampleCount = 0
+      this._updateSignalQuality()
+    }
+
+    // Spectral analysis on averaged signal
     const avg = (channelData[0] + channelData[1] + channelData[2] + channelData[3]) / 4
     if (isNaN(avg)) return
 
@@ -247,6 +306,20 @@ export default class EEGManager {
     if (this._eegBuffer.length >= EEG_BUF_SIZE) {
       this._computeBandPower()
       this._eegBuffer = this._eegBuffer.slice(EEG_BUF_SIZE / 2)  // 50% overlap
+    }
+  }
+
+  _updateSignalQuality() {
+    for (let ch = 0; ch < 4; ch++) {
+      const buf = this.eegChannels[ch]
+      const n = Math.min(buf.length, SQ_WIN)
+      if (n < 10) { this.signalQuality[ch] = 'poor'; continue }
+      const slice = buf.slice(-n)
+      const mean = slice.reduce((a, b) => a + b, 0) / n
+      const rms = Math.sqrt(slice.reduce((s, v) => s + (v - mean) ** 2, 0) / n)
+      if (rms < SQ_LOW)       this.signalQuality[ch] = 'good'
+      else if (rms < SQ_HIGH) this.signalQuality[ch] = 'marginal'
+      else                    this.signalQuality[ch] = 'poor'
     }
   }
 
@@ -313,6 +386,7 @@ export default class EEGManager {
     this._lpPrevY = lp
 
     // Rolling 6-second window
+    this.ppgSampleCount++
     this._ppgBuffer.push(lp)
     if (this._ppgBuffer.length > PPG_WIN_SAMP) this._ppgBuffer.shift()
 
@@ -396,6 +470,17 @@ export default class EEGManager {
     ay /= samples.length
     az /= samples.length
 
+    // Push raw average to display buffer
+    this.imuSampleCount++
+    this.accelDisplay.x.push(ax)
+    this.accelDisplay.y.push(ay)
+    this.accelDisplay.z.push(az)
+    if (this.accelDisplay.x.length > IMU_DISPLAY_LEN) {
+      this.accelDisplay.x.shift()
+      this.accelDisplay.y.shift()
+      this.accelDisplay.z.shift()
+    }
+
     // Exponential moving average — only slow head movements pass through
     this._accSmooth.x = (1 - ACC_ALPHA) * this._accSmooth.x + ACC_ALPHA * ax
     this._accSmooth.y = (1 - ACC_ALPHA) * this._accSmooth.y + ACC_ALPHA * ay
@@ -405,6 +490,23 @@ export default class EEGManager {
     this.headPose = {
       pitch: Math.atan2(-x, Math.sqrt(y * y + z * z)),
       roll:  Math.atan2(y, z),
+    }
+  }
+
+  _processGyro(samples) {
+    let gx = 0, gy = 0, gz = 0
+    for (const s of samples) { gx += s.x; gy += s.y; gz += s.z }
+    gx /= samples.length
+    gy /= samples.length
+    gz /= samples.length
+
+    this.gyroDisplay.x.push(gx)
+    this.gyroDisplay.y.push(gy)
+    this.gyroDisplay.z.push(gz)
+    if (this.gyroDisplay.x.length > IMU_DISPLAY_LEN) {
+      this.gyroDisplay.x.shift()
+      this.gyroDisplay.y.shift()
+      this.gyroDisplay.z.shift()
     }
   }
 }

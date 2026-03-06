@@ -4,6 +4,7 @@ import * as dat from 'dat.gui'
 import BPMManager from './managers/BPMManager'
 import AudioManager from './managers/AudioManager'
 import EEGManager from './managers/EEGManager'
+import BioDataDisplay from './ui/BioDataDisplay'
 
 const DEMO_TRACK_URL = './audio/demo.mp3'
 
@@ -125,17 +126,34 @@ export default class App {
   _setupEEG() {
     App.eegManager = new EEGManager()
 
-    const controls = document.getElementById('eeg-controls')
-    const btn = document.getElementById('eeg-connect')
-    const dot = document.getElementById('eeg-status')
-    this._hrDisplay = document.getElementById('heart-rate')
+    const controls    = document.getElementById('eeg-controls')
+    const btn         = document.getElementById('eeg-connect')
+    const dot         = document.getElementById('eeg-status')
+    const toggleBtn   = document.getElementById('bio-toggle')
+    const panel       = document.getElementById('bio-panel')
+    this._hrDisplay   = document.getElementById('heart-rate')
+    this._bioHr       = document.getElementById('bio-hr')
+    this._qualityDots = document.querySelectorAll('.quality-dot')
+    this._bioPanel    = panel
+    this._bioToggle   = toggleBtn
+    this._bioVisible  = false
 
     controls.style.display = 'flex'
+
+    toggleBtn.addEventListener('click', () => {
+      this._bioVisible = !this._bioVisible
+      panel.hidden = !this._bioVisible
+      toggleBtn.classList.toggle('active', this._bioVisible)
+    })
 
     App.eegManager.onDisconnected = () => {
       btn.textContent = 'Connect EEG'
       btn.disabled = false
       dot.classList.remove('connected')
+      toggleBtn.hidden = true
+      panel.hidden = true
+      this._bioVisible = false
+      toggleBtn.classList.remove('active')
     }
 
     btn.addEventListener('click', async () => {
@@ -149,6 +167,14 @@ export default class App {
           btn.textContent = 'Disconnect EEG'
           btn.disabled = false
           dot.classList.add('connected')
+          toggleBtn.hidden = false
+          // Init plots on first connect; reset read pointers on subsequent connects
+          if (!this._bioDisplay) {
+            this._bioDisplay = new BioDataDisplay()
+            this._bioDisplay.init()
+          } else {
+            this._bioDisplay.resetIndices()
+          }
         } catch (err) {
           console.error('EEG connect failed:', err)
           btn.textContent = 'Connect EEG'
@@ -156,6 +182,25 @@ export default class App {
         }
       }
     })
+  }
+
+  /** Update signal quality dots, bio-panel HR readout, and plots each frame. */
+  _updateBioPanel() {
+    if (!App.eegManager?.isConnected) return
+
+    // Signal quality dots (always update when connected, even if panel hidden)
+    const sq = App.eegManager.signalQuality
+    this._qualityDots.forEach((dot, i) => {
+      dot.classList.remove('good', 'marginal', 'poor')
+      dot.classList.add(sq[i])
+    })
+
+    // HR in panel
+    const hr = App.eegManager.heartRate
+    if (this._bioHr) this._bioHr.textContent = hr > 0 ? `${Math.round(hr)} bpm` : ''
+
+    // Plots — only render when panel is visible
+    if (this._bioVisible) this._bioDisplay?.update()
   }
 
   /** Handle window resize — update camera aspect and renderer size. */
@@ -178,6 +223,8 @@ export default class App {
       const hr = App.eegManager.heartRate
       this._hrDisplay.textContent = hr > 0 ? `♥ ${Math.round(hr)} bpm` : ''
     }
+
+    this._updateBioPanel()
 
     this.particles?.update(
       App.eegManager?.bandPower,
