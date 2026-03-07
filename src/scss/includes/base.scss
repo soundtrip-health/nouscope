@@ -168,11 +168,11 @@ a:focus-visible {
 }
 
 .eeg-controls {
-  display: none;
+  display: flex;
   position: fixed;
   bottom: 1.5rem;
   left: 1.5rem;
-  z-index: 100;
+  z-index: 1001;  // above the overlay so EEG can connect before music starts
   align-items: center;
   gap: 0.6rem;
 
@@ -199,6 +199,25 @@ a:focus-visible {
   }
 }
 
+.controls-upload-btn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+
+  input[type='file'] { display: none; }
+
+  &:hover {
+    border-color: var(--color-text);
+    background: rgba(255, 255, 255, 0.1);
+  }
+}
+
 .heart-rate-display {
   font-size: 0.75rem;
   letter-spacing: 0.04em;
@@ -219,6 +238,106 @@ a:focus-visible {
     box-shadow: 0 0 6px #00e676;
   }
 }
+
+// ── Bio data panel ────────────────────────────────────────────────────────────
+
+.bio-panel {
+  position: fixed;
+  bottom: 4rem;   // sits above .eeg-controls
+  left: 1.5rem;
+  z-index: 100;
+  width: 296px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  &[hidden] { display: none; }
+}
+
+.bio-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.bio-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bio-label {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.bio-hr {
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 0.04em;
+}
+
+.bio-imu-legend {
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.bio-section canvas {
+  display: block;
+  width: 280px;
+  height: auto;
+}
+
+.eeg-quality-dots {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.quality-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  transition: background 0.4s;
+
+  &.good     { background: #00e676; box-shadow: 0 0 4px #00e676; }
+  &.marginal { background: #ffee58; box-shadow: 0 0 4px #ffee58; }
+  &.poor     { background: #ef5350; box-shadow: 0 0 4px #ef5350; }
+}
+
+.bio-toggle {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  line-height: 1;
+  transition: color 0.2s, border-color 0.2s;
+
+  &[hidden] { display: none; }
+
+  &:hover {
+    color: var(--color-text);
+    border-color: rgba(255, 255, 255, 0.6);
+  }
+
+  &.active {
+    color: #00e676;
+    border-color: #00e676;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 .demo-hint {
   font-size: 0.8rem;
