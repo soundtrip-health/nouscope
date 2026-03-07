@@ -18,14 +18,16 @@ No test suite is configured.
 
 ### Entry Point & Boot Sequence
 
-`src/js/index.js` instantiates `App`. `App.js` waits for a user interaction (click for demo track, or file upload), then:
-1. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
-2. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
-3. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
-4. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI
+`src/js/index.js` instantiates `App`. The `App` constructor immediately:
+1. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI (so EEG can connect before music starts)
+
+Then on user interaction (click for demo track, or file upload via the Track button in the controls bar):
+2. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
+3. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
+4. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
 5. `update()` render loop starts
 
-If `demo.mp3` is absent, the UI prompts for file upload. Audio can always be replaced by uploading a file.
+If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time by clicking the Track button in the controls bar. When EEG connects (before or after music), `autoMix` and `autoRotate` are set to `false` and `headControl` to `true`.
 
 ### Key Modules
 
@@ -34,7 +36,8 @@ If `demo.mp3` is absent, the UI prompts for file upload. Audio can always be rep
 | `src/js/App.js` | Scene, camera, renderer, resize, render loop, coordinates all managers |
 | `src/js/managers/AudioManager.js` | Audio loading (File or URL), Three.js AudioListener/AudioAnalyser, normalized `{ low, mid, high }` frequency bands |
 | `src/js/managers/BPMManager.js` | BPM detection, beat event dispatch via Three.js EventDispatcher |
-| `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose |
+| `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
+| `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; signal quality dots |
 | `src/js/entities/ReactiveParticles.js` | Particle geometry (box/cylinder), ShaderMaterial uniforms, GSAP beat reactions, EEG/HR/IMU integration, dat.GUI |
 | `src/js/entities/glsl/vertex.glsl` | Simplex noise + curl force field for particle displacement, amplitude modulation |
 | `src/js/entities/glsl/fragment.glsl` | Circular point shape, distance-based color gradient, heartPulse warm flush |
@@ -65,9 +68,18 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 ### EEGManager — Signal Processing
 
 - **EEG bands**: rolling 256-sample buffer, Hann window + DFT (1 Hz bins, 1–50 Hz). Outputs normalized `bandPower { delta, theta, alpha, beta, gamma }` (relative power, sum = 1).
-- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz) → rolling 6-second buffer → **MSPTDfast v2** batch detector (re-run every ~1 s). Downsamples to ~21 Hz (DS_FACTOR=3), builds multi-scale Local Maxima/Minima Scalograms, finds optimal scale lambda, intersects all rows to identify peaks, refines back to original 64 Hz resolution. Median IBI across all peak pairs in the window → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape). Reference: `refs/msptdfastv2_beat_detector.m`.
-- **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians.
+- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape).
+- **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians. Gyroscope also subscribed.
 - `enablePpg = true` must be set on `MuseClient` before `connect()` — already handled in `EEGManager.connect()`.
+- **Display buffers**: `eegChannels[4]` (1024-sample rolling), `ppgDisplay` getter (384-sample rolling), `accelDisplay`/`gyroDisplay` ({x,y,z} rolling). Monotonic counters `eegSampleCount`, `ppgSampleCount`, `imuSampleCount` allow consumers to detect new samples even after buffers reach capacity.
+- **Signal quality**: `signalQuality[4]` — per-channel RMS after mean subtraction, updated ~4×/s. `'good'` (rms < 10 µV), `'marginal'` (10–50 µV), `'poor'` (> 50 µV).
+
+### BioDataDisplay — Live Data Panel
+
+- Toggle button `◉` appears in `#eeg-controls` once EEG connects; opens `#bio-panel` above controls.
+- Three `WebglLineRoll` plots (webgl-plot library): EEG 4-channel stacked, PPG single trace (auto-scaled), IMU accel+gyro 6 lines.
+- Signal quality shown as colored dots (green/yellow/red) per EEG channel.
+- Panel and toggle hidden when EEG is disconnected.
 
 ### dat.GUI Structure (ReactiveParticles.addGUI)
 
