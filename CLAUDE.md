@@ -87,6 +87,10 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 - **VISUALIZER**: Auto Mix (geometry swap on beat), Auto Rotate (GSAP rotation on beat), Head Control (IMU) — routes pitch/roll to `holderObjects.rotation`, Reset Cylinder
 - **INFLUENCE**: EEG Strength, HR Strength, IMU Strength (all 0–3×)
 
+### Standing Rules
+
+- **After any algorithm or signal-processing change, update `docs/algorithms.md`** to match the new implementation. Keep constants, stage descriptions, and pseudocode in sync with the code.
+
 ### Build Notes
 
 - Vite config uses `rollup-plugin-glslify` for GLSL imports; `@` alias resolves to `src/`
