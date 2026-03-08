@@ -201,43 +201,51 @@ Both are in radians. At rest (headset upright), pitch ≈ 0 and roll ≈ 0. The 
 
 **File:** `src/js/entities/ReactiveParticles.js`, `update()`
 
-All EEG values are relative band powers (0–1, sum = 1). Each is multiplied by an influence strength scalar (default 1.0, user-adjustable 0–3× in the GUI).
+### Audio baseline (with per-band gain)
 
-### Audio-only baseline
+Each audio band has a gain slider (0–2, default 1.0 = original behavior):
 
 ```js
-amplitude   = 0.8 + mapLinear(audio.high, 0, 0.6, -0.1, 0.2)
-            // ≈ 0.7–1.0 range driven by high-frequency energy
-offsetGain  = audio.mid * 0.6
-            // 0–0.6 driven by mid-frequency energy
-size        = BASE_SIZE  (1.1)
-maxDistance = BASE_MAX_DISTANCE  (1.8)
+amplitude  = 0.8 + mapLinear(audio.high, 0, 0.6, -0.1, 0.2) * audioGains.high
+           // ≈ 0.7–1.0 baseline driven by high-frequency energy
+offsetGain = audio.mid * 0.6 * audioGains.mid
+           // 0–0.6 baseline driven by mid-frequency energy
+size        = BASE_SIZE  (1.1)   // audio has no size baseline
+maxDistance = BASE_MAX_DISTANCE  (1.8)  // audio has no maxDistance baseline
 ```
 
 `time` is incremented each frame at a rate driven by `audio.low`:
 ```js
-t = mapLinear(audio.low, 0.6, 1.0, 0.2, 0.5)   // low-freq → time speed
-time += clamp(t, 0.2, 0.5)
+t = mapLinear(audio.low, 0.6, 1.0, 0.2, 0.5)
+time += max(0.1, clamp(t, 0.2, 0.5) * audioGains.bass)
 ```
-Higher bass → faster overall animation speed.
+Higher bass → faster overall animation speed. Floor of 0.1 keeps animation ticking at zero gain.
 
-### EEG additions (additive on top of audio baseline)
+### Bio mapping (user-configurable)
 
-| EEG band | Formula | Rationale |
-|----------|---------|-----------|
-| theta (4–8 Hz) | `size += theta * 2 * eegStr` | Theta is drowsy/relaxed — larger, softer particles |
-| alpha (8–13 Hz) | `maxDistance += alpha * 1.8 * eegStr` | Alpha is calm/idle — wider particle spread |
-| beta (13–30 Hz) | `offsetGain += beta * 0.5 * eegStr` | Beta is focused/alert — more turbulence |
-| gamma (30–50 Hz) | `amplitude += gamma * 0.3 * eegStr` | Gamma is high cognition — sharper displacement |
-| delta (1–4 Hz) | *(not currently mapped)* | — |
-
-### Heart rate pulse
+Each viz parameter has an independently configurable bio source and weight:
 
 ```js
-heartPulse_uniform = heartPulse * hrStrength
+sources = { none:0, delta, theta, alpha, beta, gamma, hr: heartPulse }
+
+amplitude   += sources[mapping.amplitude.source]   * mapping.amplitude.weight
+offsetGain  += sources[mapping.offsetGain.source]  * mapping.offsetGain.weight
+size        += sources[mapping.size.source]        * mapping.size.weight
+maxDistance += sources[mapping.maxDistance.source] * mapping.maxDistance.weight
+heartPulse_uniform = sources[mapping.heartPulse.source] * mapping.heartPulse.weight
 ```
 
-`heartPulse` is the cubed-sine oscillator from `EEGManager.update()`. At full strength (1.0×) and peak pulse (1.0), this adds `0.35 × pulseWarm` to the fragment color (see §8).
+**Default mapping** (preserves the original hardcoded behavior at default weight):
+
+| Viz parameter | Default source | Weight range | Default weight | Notes |
+|---------------|---------------|--------------|----------------|-------|
+| Amplitude     | gamma         | 0.0 – 0.6   | 0.3            | High cognition → sharper displacement |
+| Turbulence    | beta          | 0.0 – 1.0   | 0.5            | Focus/alert → more churn |
+| Particle Size | theta         | 0.0 – 4.0   | 2.0            | Drowsy/relaxed → larger particles |
+| Spread Radius | alpha         | 0.0 – 3.6   | 1.8            | Calm/idle → wider spread |
+| Color Flush   | hr            | 0.0 – 2.0   | 1.0            | Heart rate → warm reddish pulse |
+
+Weight slider: `min` = no contribution, `max` = 2× default effect. Any source can be routed to any parameter — e.g. mapping `hr` to `amplitude` makes particles pulse with each heartbeat, or mapping `alpha` to `heartPulse` flushes color with calm mental states. `delta` is available as a source but has no default mapping.
 
 ### IMU head control
 
@@ -246,7 +254,7 @@ When `headControl` is enabled:
 holderObjects.rotation.x = headPose.pitch * imuStrength * 0.8
 holderObjects.rotation.y = headPose.roll  * imuStrength * 0.8
 ```
-Any active GSAP rotation tweens are killed immediately. Disabling head control triggers a 1.5 s ease-out tween back to zero rotation.
+Any active GSAP rotation tweens are killed immediately. Disabling head control triggers a 1.5 s ease-out tween back to zero rotation. `imuStrength` is a 0–3 slider in the VISUALIZER GUI folder.
 
 ---
 
