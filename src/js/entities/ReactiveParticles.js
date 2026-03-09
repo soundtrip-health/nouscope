@@ -13,6 +13,46 @@ const CAMERA_Z = 10          // nominal camera depth (for z-position tweens)
 const CAMERA_Z_RANGE = 1     // ±range for random z placement
 
 /**
+ * Bio feature sources available for mapping to viz parameters.
+ * EEG band values are relative powers (0–1, sum = 1).
+ * 'hr' is the heart-rate phase oscillator (0–1, cubed-sine shape).
+ * 'none' produces zero contribution.
+ */
+const BIO_SOURCES = ['none', 'delta', 'theta', 'alpha', 'beta', 'gamma', 'hr']
+
+/**
+ * Per viz-parameter bio mapping ranges.
+ *   min     — weight slider left edge  (no contribution)
+ *   max     — weight slider right edge (maximum contribution)
+ *   default — midpoint; preserves the original hardcoded behavior
+ *
+ * Formula each frame:  uniform += sources[source] * weight
+ */
+const BIO_RANGE = {
+  amplitude:   { min: 0.0, max: 0.6, default: 0.3 },  // was: gamma * 0.3
+  offsetGain:  { min: 0.0, max: 1.0, default: 0.5 },  // was: beta  * 0.5
+  size:        { min: 0.0, max: 4.0, default: 2.0 },  // was: theta * 2.0
+  maxDistance: { min: 0.0, max: 3.6, default: 1.8 },  // was: alpha * 1.8
+  heartPulse:  { min: 0.0, max: 2.0, default: 1.0 },  // was: hr    * 1.0
+}
+
+/**
+ * Per-band audio gain ranges.
+ *   min     — slider left  (silence the band's contribution)
+ *   max     — slider right (2× the default contribution)
+ *   default — 1.0 = original hardcoded behavior
+ *
+ * bass → animation speed (time increment)
+ * mid  → turbulence (offsetGain baseline)
+ * high → displacement amplitude baseline
+ */
+const AUDIO_RANGE = {
+  bass: { min: 0.0, max: 2.0, default: 1.0 },
+  mid:  { min: 0.0, max: 2.0, default: 1.0 },
+  high: { min: 0.0, max: 2.0, default: 1.0 },
+}
+
+/**
  * ReactiveParticles
  *
  * A Three.js Object3D that renders an audio-reactive particle system.
@@ -35,11 +75,24 @@ export default class ReactiveParticles extends THREE.Object3D {
       autoMix: true,
       autoRotate: true,
       headControl: false,
+      imuStrength: 1.0,
     }
-    this.influences = {
-      eeg: 1.0,
-      hr: 1.0,
-      imu: 1.0,
+
+    // Per-band audio gain: 1.0 = default behavior; slider range defined in AUDIO_RANGE
+    this.audioGains = {
+      bass: AUDIO_RANGE.bass.default,
+      mid:  AUDIO_RANGE.mid.default,
+      high: AUDIO_RANGE.high.default,
+    }
+
+    // Bio→viz mapping: source selects the input signal; weight scales its contribution.
+    // Defaults preserve the original hardcoded behavior (weight = BIO_RANGE[param].default).
+    this.bioMapping = {
+      amplitude:   { source: 'gamma', weight: BIO_RANGE.amplitude.default },
+      offsetGain:  { source: 'beta',  weight: BIO_RANGE.offsetGain.default },
+      size:        { source: 'theta', weight: BIO_RANGE.size.default },
+      maxDistance: { source: 'alpha', weight: BIO_RANGE.maxDistance.default },
+      heartPulse:  { source: 'hr',    weight: BIO_RANGE.heartPulse.default },
     }
   }
 
@@ -189,36 +242,43 @@ export default class ReactiveParticles extends THREE.Object3D {
 
   /**
    * Update shader uniforms from audio and EEG data. Called every frame.
-   * @param {object|null} eegBands — { delta, theta, alpha, beta, gamma } (0–1 each), or null
-   * @param {number} heartPulse — heart-rate oscillator value (0–1)
-   * @param {object|null} headPose — { pitch, roll } in radians, or null
+   * @param {object|null} eegBands  — { delta, theta, alpha, beta, gamma } (0–1 each), or null
+   * @param {number}      heartPulse — heart-rate oscillator value (0–1)
+   * @param {object|null} headPose  — { pitch, roll } in radians, or null
    */
   update(eegBands = null, heartPulse = 0, headPose = null) {
+    // Build bio source lookup once; used in both the audio and heartPulse paths below
+    const sources = {
+      none:  0,
+      delta: eegBands?.delta ?? 0,
+      theta: eegBands?.theta ?? 0,
+      alpha: eegBands?.alpha ?? 0,
+      beta:  eegBands?.beta  ?? 0,
+      gamma: eegBands?.gamma ?? 0,
+      hr:    heartPulse,
+    }
+
     if (App.audioManager?.isPlaying) {
-      let amplitude   = 0.8 + THREE.MathUtils.mapLinear(App.audioManager.frequencyData.high, 0, 0.6, -0.1, 0.2)
-      let offsetGain  = App.audioManager.frequencyData.mid * 0.6
+      // Audio baseline — audioGains scale each band's contribution (0 = none, 1 = default, 2 = double)
+      let amplitude   = 0.8 + THREE.MathUtils.mapLinear(App.audioManager.frequencyData.high, 0, 0.6, -0.1, 0.2) * this.audioGains.high
+      let offsetGain  = App.audioManager.frequencyData.mid * 0.6 * this.audioGains.mid
       let size        = BASE_SIZE
       let maxDistance = BASE_MAX_DISTANCE
 
-      if (eegBands) {
-        const eegStr = this.influences.eeg
-        // theta → particle size (drowsy/relaxed = larger, softer particles)
-        size        += eegBands.theta * 2   * eegStr
-        // alpha → ring radius (calm/idle state = wider spread)
-        maxDistance += eegBands.alpha * 1.8 * eegStr
-        // beta → turbulence (focused = more churn)
-        offsetGain  += eegBands.beta  * 0.5 * eegStr
-        // gamma → amplitude boost (high cognition = intense reactivity)
-        amplitude   += eegBands.gamma * 0.3 * eegStr
-      }
+      // Bio additive contributions — each viz parameter takes one source signal × weight
+      amplitude   += sources[this.bioMapping.amplitude.source]   * this.bioMapping.amplitude.weight
+      offsetGain  += sources[this.bioMapping.offsetGain.source]  * this.bioMapping.offsetGain.weight
+      size        += sources[this.bioMapping.size.source]        * this.bioMapping.size.weight
+      maxDistance += sources[this.bioMapping.maxDistance.source] * this.bioMapping.maxDistance.weight
 
       this.material.uniforms.amplitude.value   = amplitude
       this.material.uniforms.offsetGain.value  = offsetGain
       this.material.uniforms.size.value        = size
       this.material.uniforms.maxDistance.value = maxDistance
 
+      // Bass gain scales animation speed; floor of 0.1 keeps animation ticking at low gain
       const t = THREE.MathUtils.mapLinear(App.audioManager.frequencyData.low, 0.6, 1, 0.2, 0.5)
-      this.time += THREE.MathUtils.clamp(t, 0.2, 0.5)
+      this.time += Math.max(0.1, THREE.MathUtils.clamp(t, 0.2, 0.5) * this.audioGains.bass)
     } else {
       this.material.uniforms.frequency.value   = 0.8
       this.material.uniforms.amplitude.value   = 1
@@ -227,14 +287,15 @@ export default class ReactiveParticles extends THREE.Object3D {
       this.time += 0.2
     }
 
-    // Heart-rate pulse colour modulation
-    this.material.uniforms.heartPulse.value = heartPulse * this.influences.hr
+    // Color flush — driven by bio mapping, applied regardless of audio state
+    this.material.uniforms.heartPulse.value =
+      sources[this.bioMapping.heartPulse.source] * this.bioMapping.heartPulse.weight
 
     // Head-control mode: map IMU pitch/roll directly onto geometry orientation,
     // overriding any GSAP auto-rotate tweens
     if (this.properties.headControl && headPose) {
       gsap.killTweensOf(this.holderObjects.rotation)
-      const imuStr = this.influences.imu * 0.8
+      const imuStr = this.properties.imuStrength * 0.8
       this.holderObjects.rotation.x = headPose.pitch * imuStr
       this.holderObjects.rotation.y = headPose.roll  * imuStr
     }
@@ -244,6 +305,7 @@ export default class ReactiveParticles extends THREE.Object3D {
 
   addGUI() {
     const gui = App.gui
+
     const particlesFolder = gui.addFolder('PARTICLES')
     particlesFolder
       .addColor(this.properties, 'startColor')
@@ -252,7 +314,6 @@ export default class ReactiveParticles extends THREE.Object3D {
       .onChange((e) => {
         this.material.uniforms.startColor.value = new THREE.Color(e)
       })
-
     particlesFolder
       .addColor(this.properties, 'endColor')
       .listen()
@@ -273,7 +334,7 @@ export default class ReactiveParticles extends THREE.Object3D {
           gsap.to(this.holderObjects.rotation, { duration: 1.5, x: 0, y: 0, ease: 'power2.out' })
         }
       })
-
+    visualizerFolder.add(this.properties, 'imuStrength', 0, 3).name('IMU Strength')
     const buttonShowCylinder = {
       showCylinder: () => {
         this.destroyMesh()
@@ -283,9 +344,24 @@ export default class ReactiveParticles extends THREE.Object3D {
     }
     visualizerFolder.add(buttonShowCylinder, 'showCylinder').name('Reset Cylinder')
 
-    const influenceFolder = gui.addFolder('INFLUENCE')
-    influenceFolder.add(this.influences, 'eeg', 0, 3).name('EEG Strength')
-    influenceFolder.add(this.influences, 'hr',  0, 3).name('HR Strength')
-    influenceFolder.add(this.influences, 'imu', 0, 3).name('IMU Strength')
+    const audioFolder = gui.addFolder('AUDIO')
+    audioFolder.add(this.audioGains, 'bass', AUDIO_RANGE.bass.min, AUDIO_RANGE.bass.max).name('Bass Gain')
+    audioFolder.add(this.audioGains, 'mid',  AUDIO_RANGE.mid.min,  AUDIO_RANGE.mid.max).name('Mid Gain')
+    audioFolder.add(this.audioGains, 'high', AUDIO_RANGE.high.min, AUDIO_RANGE.high.max).name('High Gain')
+
+    // MAPPING — one sub-folder per viz parameter with source dropdown + weight slider
+    const mappingFolder = gui.addFolder('MAPPING')
+    const paramLabels = {
+      amplitude:   'Amplitude',
+      offsetGain:  'Turbulence',
+      size:        'Particle Size',
+      maxDistance: 'Spread Radius',
+      heartPulse:  'Color Flush',
+    }
+    for (const [param, label] of Object.entries(paramLabels)) {
+      const sub = mappingFolder.addFolder(label)
+      sub.add(this.bioMapping[param], 'source', BIO_SOURCES).name('Source')
+      sub.add(this.bioMapping[param], 'weight', BIO_RANGE[param].min, BIO_RANGE[param].max).name('Weight')
+    }
   }
 }
