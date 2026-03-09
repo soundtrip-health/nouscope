@@ -3,8 +3,8 @@
 ## Dev Setup
 
 ```bash
-git clone <repo-url>
-cd interactive-particles-music-visualizer
+git clone https://github.com/soundtrip-health/nouscope.git
+cd nouscope
 npm install
 npm run dev
 ```
@@ -14,8 +14,8 @@ Open `http://localhost:5173` in Chrome or Edge (required for Web Bluetooth / EEG
 ## Branch Convention
 
 - `main` — stable, release-ready
-- `feature/<name>` — new features
-- `fix/<name>` — bug fixes
+- `feat-<name>` — new features
+- `fix-<name>` — bug fixes
 
 ## Submitting a PR
 
