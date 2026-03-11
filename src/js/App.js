@@ -5,6 +5,8 @@ import BPMManager from './managers/BPMManager'
 import AudioManager from './managers/AudioManager'
 import EEGManager from './managers/EEGManager'
 import BioDataDisplay from './ui/BioDataDisplay'
+import JellyfinManager from './managers/JellyfinManager'
+import JellyfinBrowser from './ui/JellyfinBrowser'
 
 const DEMO_TRACK_URL = './audio/demo.mp3'
 
@@ -50,6 +52,7 @@ export default class App {
     overlay.addEventListener('click', this._overlayClickHandler)
 
     this._setupEEG()
+    this._setupJellyfin()
   }
 
   /**
@@ -126,6 +129,24 @@ export default class App {
     }
 
     this.update()
+  }
+
+  /** Wire up Jellyfin browser button and create manager + browser instances. */
+  _setupJellyfin() {
+    const jellyfinManager = new JellyfinManager()
+    const jellyfinBrowser = new JellyfinBrowser(jellyfinManager, (url) => {
+      if (this.renderer) {
+        this._swapAudio(url)
+      } else {
+        const overlay = document.querySelector('.user_interaction')
+        overlay?.removeEventListener('click', this._overlayClickHandler)
+        this.init(url)
+      }
+    })
+
+    document.getElementById('jellyfin-btn').addEventListener('click', () => {
+      jellyfinBrowser.show()
+    })
   }
 
   /** Wire up EEG connect/disconnect UI and create the EEGManager instance. */
