@@ -156,10 +156,16 @@ export default class JellyfinBrowser {
 
       const info = document.createElement('div')
       info.className = 'jellyfin-track-info'
-      info.innerHTML = `
-        <span class="jellyfin-track-title">${_esc(item.Name)}</span>
-        <span class="jellyfin-track-meta">${_esc(artist)}${album ? ' — ' + _esc(album) : ''}</span>
-      `
+
+      const titleEl = document.createElement('span')
+      titleEl.className   = 'jellyfin-track-title'
+      titleEl.textContent = item.Name
+
+      const metaEl = document.createElement('span')
+      metaEl.className   = 'jellyfin-track-meta'
+      metaEl.textContent = artist + (album ? ' \u2014 ' + album : '')
+
+      info.append(titleEl, metaEl)
 
       const dur = document.createElement('span')
       dur.className   = 'jellyfin-track-dur'
@@ -188,12 +194,4 @@ function _fmtDuration(ticks) {
   const s = Math.floor(ticks / 10_000_000)
   const m = Math.floor(s / 60)
   return `${m}:${String(s % 60).padStart(2, '0')}`
-}
-
-function _esc(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
 }

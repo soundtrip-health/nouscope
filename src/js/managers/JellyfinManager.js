@@ -29,7 +29,7 @@ export default class JellyfinManager {
    * @param {string} password
    */
   async authenticate(serverUrl, username, password) {
-    const base = serverUrl.replace(/\/$/, '')
+    const base = _sanitizeServerUrl(serverUrl)
     const res = await fetch(`${base}/Users/AuthenticateByName`, {
       method:  'POST',
       headers: {
@@ -54,7 +54,7 @@ export default class JellyfinManager {
    * @param {string} apiKey
    */
   connectWithApiKey(serverUrl, apiKey) {
-    this.serverUrl = serverUrl.replace(/\/$/, '')
+    this.serverUrl = _sanitizeServerUrl(serverUrl)
     this.token     = apiKey
     this.userId    = null
     this._save()
@@ -116,6 +116,8 @@ export default class JellyfinManager {
     return { 'X-Emby-Authorization': `${CLIENT_INFO}, Token="${this.token}"` }
   }
 
+  // ── Storage ─────────────────────────────────────────────────────────────────
+
   _save() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       serverUrl: this.serverUrl,
@@ -136,4 +138,23 @@ export default class JellyfinManager {
       // ignore corrupt storage
     }
   }
+}
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
+
+/**
+ * Validate and normalize a Jellyfin server URL.
+ * - Must parse as a valid URL
+ * - Protocol must be http or https (prevents javascript:/file:/blob: etc.)
+ * - Returns origin only (strips any path, query, or fragment the user may have typed)
+ * @param {string} raw
+ * @returns {string}  e.g. "http://192.168.1.100:8096"
+ */
+function _sanitizeServerUrl(raw) {
+  let parsed
+  try { parsed = new URL(raw) } catch { throw new Error('Invalid server URL.') }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Server URL must use http or https.')
+  }
+  return parsed.origin
 }
