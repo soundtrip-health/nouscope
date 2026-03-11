@@ -283,6 +283,13 @@ a:focus-visible {
   letter-spacing: 0.04em;
 }
 
+.bio-band-legend {
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  display: flex;
+  gap: 0.3rem;
+}
+
 .bio-imu-legend {
   font-size: 0.65rem;
   letter-spacing: 0.06em;
