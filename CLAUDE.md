@@ -20,14 +20,15 @@ No test suite is configured.
 
 `src/js/index.js` instantiates `App`. The `App` constructor immediately:
 1. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI (so EEG can connect before music starts)
+2. `_setupJellyfin()` — instantiates `JellyfinManager` and `JellyfinBrowser`, wires the `☁ Jellyfin` button
 
-Then on user interaction (click for demo track, or file upload via the Track button in the controls bar):
+Then on user interaction (click for demo track, file upload via the Track button, or track selection from Jellyfin browser):
 2. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
 3. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
 4. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
 5. `update()` render loop starts
 
-If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time by clicking the Track button in the controls bar. When EEG connects (before or after music), `autoMix` and `autoRotate` are set to `false` and `headControl` to `true`.
+If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time via the Track button (file upload) or the `☁ Jellyfin` button (stream from server). When EEG connects (before or after music), `autoMix` and `autoRotate` are set to `false` and `headControl` to `true`.
 
 ### Key Modules
 
@@ -38,6 +39,8 @@ If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time
 | `src/js/managers/BPMManager.js` | BPM detection, beat event dispatch via Three.js EventDispatcher |
 | `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
 | `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; signal quality dots |
+| `src/js/managers/JellyfinManager.js` | Jellyfin API client: auth (username/password or API key), paginated music library browsing, stream URL generation; credentials persisted to `localStorage` (token only, never password) |
+| `src/js/ui/JellyfinBrowser.js` | Modal UI for Jellyfin: login view + library browser with debounced search and Load More pagination |
 | `src/js/entities/ReactiveParticles.js` | Particle geometry (box/cylinder), ShaderMaterial uniforms, GSAP beat reactions, EEG/HR/IMU integration, dat.GUI |
 | `src/js/entities/glsl/vertex.glsl` | Simplex noise + curl force field for particle displacement, amplitude modulation |
 | `src/js/entities/glsl/fragment.glsl` | Circular point shape, distance-based color gradient, heartPulse warm flush |
@@ -86,6 +89,19 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 - **PARTICLES**: Start Color, End Color
 - **VISUALIZER**: Auto Mix (geometry swap on beat), Auto Rotate (GSAP rotation on beat), Head Control (IMU) — routes pitch/roll to `holderObjects.rotation`, Reset Cylinder
 - **INFLUENCE**: EEG Strength, HR Strength, IMU Strength (all 0–3×)
+
+### Jellyfin Integration
+
+**Files:** `src/js/managers/JellyfinManager.js`, `src/js/ui/JellyfinBrowser.js`
+
+- `☁ Jellyfin` button in `#eeg-controls` opens the browser modal at any time (before or after audio starts).
+- If audio is not yet started, selecting a track calls `App.init(streamUrl)`; if already running, calls `App._swapAudio(streamUrl)`. `AudioManager.loadAudioBuffer()` accepts URL strings natively.
+- **Auth options:** username/password (`POST /Users/AuthenticateByName` → stores returned `AccessToken`) or a pre-existing API key stored directly as the token. Jellyfin API key auth has no `UserId`.
+- **Credential storage:** `serverUrl`, `token`, and `userId` are persisted in `localStorage` under key `nouscope_jellyfin`. Passwords are **never** stored.
+- **Server URL validation:** `_sanitizeServerUrl()` parses via `new URL()`, enforces `http:`/`https:` protocol, and returns `origin` only — preventing `javascript:`, `file:`, or path-injection variants.
+- **XSS prevention:** Track metadata (name, artist, album) from the Jellyfin API is rendered via `textContent` only — never via `innerHTML`. No `_esc()` helper is needed or used.
+- **Stream URL:** `/Audio/{itemId}/universal?api_key={token}&...` — the token appears as a query parameter. This is required by Jellyfin's streaming API; `Authorization` headers cannot be used for `fetch().arrayBuffer()` streaming. The token is therefore visible in browser network logs and Jellyfin server access logs. This is an accepted, documented tradeoff.
+- **CORS:** Jellyfin defaults to `Access-Control-Allow-Origin: *`. Users with locked-down CORS must add the Nouscope origin in Jellyfin → Dashboard → Networking → Allowed Origins.
 
 ### Standing Rules
 
