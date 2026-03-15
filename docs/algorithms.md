@@ -68,43 +68,85 @@ Falls back to 120 BPM if `guess()` throws. The interval-based approach means bea
 
 **File:** `src/js/managers/EEGManager.js`, `_processEEGSample()` / `_computeBandPower()`
 
-### Signal pipeline
+### Overview
 
-muse-js delivers EEG samples via `zipSamples()` which synchronizes the four electrode channels (TP9, AF7, AF8, TP10) into aligned packets. The four channel values are averaged into a single scalar per sample, NaN samples are dropped.
+Band power estimation follows a simplified fBOSC (frequency-specific Bayesian Oscillation-Suppression Criterion) approach (Seymour et al. 2022, *European Journal of Neuroscience*). The key improvement over a plain DFT is **aperiodic (1/f) background normalization**: each band's power is divided by the expected power under the fitted aperiodic model before the final relative normalization. This means a genuinely elevated oscillation (e.g. a strong alpha peak) contributes proportionally more than a band that simply happens to sit at a lower frequency in the 1/f slope.
+
+### Stage 1 — Per-channel buffer management
+
+muse-js delivers EEG samples via `zipSamples()`, synchronizing the four electrode channels (TP9, AF7, AF8, TP10) into aligned packets. Each channel is maintained in its own rolling 256-sample analysis buffer (`_chBuffers[4]`). NaN samples are replaced with 0. Spectral analysis is triggered every 128 new samples (~0.5 s at 256 Hz), giving 50% overlap between consecutive windows.
+
+### Stage 2 — Per-channel spectral estimation
+
+Band power is estimated differently for delta vs. all higher bands:
+
+**Delta (1–4 Hz) — sparse Hann-windowed DFT:**
+```
+w[n] = 0.5 - 0.5·cos(2π·n / (N-1))          (Hann window)
+DFT power at bin k = |Σ signal[n]·w[n]·e^(-j·2π·k·n/N)|²
+delta = DFT[1] + DFT[2] + DFT[3]             (bins 1, 2, 3 Hz)
+```
+Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) are precomputed at construction time, so the hot-path only performs multiply-accumulate operations.
+
+**Theta, Alpha, Beta, Gamma — Morlet wavelet instantaneous power:**
+
+The Morlet wavelet at frequency `f` (following BOSC_tf.m):
+```
+σ = τ / (2π·f)                    (temporal std dev; τ = wavenumber = 6)
+A = 1 / sqrt(σ·√π)                (amplitude normalization)
+ψ(t) = A · exp(-t²/2σ²) · exp(i·2π·f·t)
+```
+Window: ±3σ samples (truncated from the ±3.6σ used in BOSC_tf to keep the 6 Hz kernel within the 256-sample buffer).
+
+| Band  | Center freq | σ (s) | Kernel half-width (samples) |
+|-------|-------------|-------|----------------------------|
+| theta | 6 Hz        | 0.159 | 122                         |
+| alpha | 10 Hz       | 0.095 | 73                          |
+| beta  | 20 Hz       | 0.048 | 37                          |
+| gamma | 40 Hz       | 0.024 | 18                          |
+
+Power is computed as the mean `|W(t)|²` over all valid (edge-free) samples in the window:
+```
+power_band = mean( re(t)² + im(t)² )   for t ∈ [halfWin … N-1-halfWin]
+```
+
+### Stage 3 — Quality-weighted channel aggregation
+
+Each channel is assigned a weight based on its signal quality (updated ~4× per second):
+
+| Quality | RMS (µV) | Base weight |
+|---------|----------|-------------|
+| good    | < 50     | 1.0         |
+| marginal | 50–100  | `marginalChannelWeight` (default 0.5) |
+| poor    | > 100    | 0.0         |
+
+Up to 2 channels may be **dropped** (excluded entirely) based on `badChannelThreshold`:
+- `'poor'` (default): only channels rated 'poor' are drop candidates
+- `'marginal'`: channels rated 'poor' or 'marginal' are candidates
+
+The worst-rated candidates are dropped first; at least 2 channels are always retained. Remaining channels are averaged using the quality weights, normalised to sum 1.
+
+### Stage 4 — Aperiodic background model (BOSC_bgfit style)
+
+Every `APERIODIC_UPDATE_INTERVAL = 10` windows (~5 s), the background model is refit from the quality-weighted average wavelet powers at 6, 10, 20, 40 Hz. A log-log OLS regression gives:
 
 ```
-avg = (ch0 + ch1 + ch2 + ch3) / 4
+log₁₀(P_expected) = a + b · log₁₀(f)
 ```
 
-Samples accumulate in a rolling 256-sample buffer. Every time it fills, band powers are recomputed with **50% overlap** (the buffer is sliced by half, not cleared), giving a new estimate roughly every 128 samples (~0.5 s at 256 Hz).
+Parameters are updated via exponential moving average (`AP_SMOOTH = 0.3`) to avoid abrupt jumps. The initial model is `{a: 0, b: -1.5}` (generic 1/f^1.5 prior), which converges to the actual EEG spectrum within ~5 updates.
 
-### Spectral estimation
+### Stage 5 — Aperiodic normalization → relative output
 
-Rather than an FFT, a **direct DFT** is computed for integer bins 1–50 Hz. This is O(N²) but acceptable for N=256 at ~2 Hz update rate.
+Each band's power is divided by the expected aperiodic power at its representative frequency, then the five values are renormalised to sum 1:
 
-1. **Hann window** to reduce spectral leakage:
-   ```
-   w[n] = 0.5 - 0.5 * cos(2π·n / (N-1))
-   signal_windowed[n] = signal[n] * w[n]
-   ```
+```
+norm_band = raw_band / 10^(a + b · log₁₀(f_center))
 
-2. **DFT power** at each integer Hz bin k (1 Hz resolution because N=256 samples at 256 Hz):
-   ```
-   PSD[k] = |Σ signal_windowed[n] · e^(-j·2π·k·n/N)|²
-           = re² + im²
-   ```
+Representative frequencies: delta→2 Hz, theta→6, alpha→10, beta→20, gamma→40
+```
 
-3. **Band integration** — PSD bins are summed over each band's Hz range:
-
-   | Band | Bins (Hz) |
-   |------|-----------|
-   | delta | 1–3 |
-   | theta | 4–7 |
-   | alpha | 8–12 |
-   | beta | 13–29 |
-   | gamma | 30–49 |
-
-4. **Relative normalization** — divides each band by the total power across all bands, so the five values always sum to 1.0. This makes the output robust to amplitude variation (electrode contact quality, individual differences) but means the values are compositional — if gamma rises, others fall.
+This preserves backward compatibility (output still sums to 1) while correctly weighting bands that are genuinely elevated above the 1/f noise floor.
 
 `EEGManager.bandPower` is updated in place after each computation window and read by `ReactiveParticles.update()` every frame.
 
