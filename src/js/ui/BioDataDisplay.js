@@ -8,6 +8,8 @@ const EEG_SCALE     = 200   // µV mapped to full per-channel half-height
 const EEG_AMPLITUDE = 0.22  // normalized half-height per channel stripe
 const EEG_OFFSETS   = [0.75, 0.25, -0.25, -0.75]  // TP9, AF7, AF8, TP10
 
+const BAND_ROLL = 300  // ~5 s at ~60 fps polling rate
+
 const PPG_ROLL = 384  // 6 s at 64 Hz — matches MSPTD analysis window
 
 const IMU_ROLL    = 208    // 4 s at ~52 Hz
@@ -21,6 +23,15 @@ const EEG_COLORS = [
   new ColorRGBA(102, 255, 128, 255),   // AF7  — green
   new ColorRGBA(255, 166,  51, 255),   // AF8  — orange
   new ColorRGBA(229, 102, 255, 255),   // TP10 — magenta
+]
+
+// delta=violet, theta=blue, alpha=green, beta=amber, gamma=red
+const BAND_COLORS = [
+  new ColorRGBA(167, 139, 250, 255),  // δ delta  — violet
+  new ColorRGBA( 96, 165, 250, 255),  // θ theta  — blue
+  new ColorRGBA( 52, 211, 153, 255),  // α alpha  — green
+  new ColorRGBA(251, 191,  36, 255),  // β beta   — amber
+  new ColorRGBA(248, 113, 113, 255),  // γ gamma  — red
 ]
 
 const PPG_COLOR = new ColorRGBA(255, 128, 128, 255)  // salmon
@@ -39,13 +50,15 @@ const TRANSPARENT = [0, 0, 0, 0]
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default class BioDataDisplay {
-  _eegPlot = null
-  _ppgPlot = null
-  _imuPlot = null
+  _eegPlot  = null
+  _bandPlot = null
+  _ppgPlot  = null
+  _imuPlot  = null
 
-  _eegGL = null
-  _ppgGL = null
-  _imuGL = null
+  _eegGL  = null
+  _bandGL = null
+  _ppgGL  = null
+  _imuGL  = null
 
   _eegReadIdx = [0, 0, 0, 0]
   _ppgReadIdx = 0
@@ -64,6 +77,13 @@ export default class BioDataDisplay {
     setBackgroundColor(this._eegGL, TRANSPARENT)
     this._eegPlot = new WebglLineRoll(this._eegGL, EEG_ROLL, 4)
     EEG_COLORS.forEach((c, i) => this._eegPlot.setLineColor(c, i))
+
+    // EEG band powers — 5 lines (delta, theta, alpha, beta, gamma), polled each frame
+    const bandCanvas = document.getElementById('band-canvas')
+    this._bandGL = createWebGL2Context(bandCanvas, { transparent: true })
+    setBackgroundColor(this._bandGL, TRANSPARENT)
+    this._bandPlot = new WebglLineRoll(this._bandGL, BAND_ROLL, 5)
+    BAND_COLORS.forEach((c, i) => this._bandPlot.setLineColor(c, i))
 
     // PPG — single filtered infrared trace
     const ppgCanvas = document.getElementById('ppg-canvas')
@@ -97,6 +117,7 @@ export default class BioDataDisplay {
     const mgr = App.eegManager
     if (!mgr?.isConnected) return
     this._updateEEG(mgr)
+    this._updateBands(mgr)
     this._updatePPG(mgr)
     this._updateIMU(mgr)
   }
@@ -122,6 +143,20 @@ export default class BioDataDisplay {
 
     this._eegGL.clear(this._eegGL.COLOR_BUFFER_BIT)
     this._eegPlot.draw()
+  }
+
+  _updateBands(mgr) {
+    const { delta, theta, alpha, beta, gamma } = mgr.bandPower
+    // Map 0–1 power values to -1..1 (bottom = 0, top = 1)
+    this._bandPlot.addPoint([
+      delta * 2 - 1,
+      theta * 2 - 1,
+      alpha * 2 - 1,
+      beta  * 2 - 1,
+      gamma * 2 - 1,
+    ])
+    this._bandGL.clear(this._bandGL.COLOR_BUFFER_BIT)
+    this._bandPlot.draw()
   }
 
   _updatePPG(mgr) {
