@@ -14,8 +14,10 @@ const CAMERA_Z_RANGE = 1     // ±range for random z placement
 
 /**
  * Bio feature sources available for mapping to viz parameters.
- * EEG band values are relative powers (0–1, sum = 1).
- * 'hr' is the heart-rate phase oscillator (0–1, cubed-sine shape).
+ * EEG band values are per-band activity deviations above the adaptive 1/f baseline:
+ *   0   = band power at or below the recent typical (aperiodic) level
+ *   1.0 = band is twice its recent typical level (strong oscillatory elevation)
+ * 'hr' is the heart-rate phase oscillator (0–1, cubed-sine shape), unchanged.
  * 'none' produces zero contribution.
  */
 const BIO_SOURCES = ['none', 'delta', 'theta', 'alpha', 'beta', 'gamma', 'hr']
@@ -24,16 +26,21 @@ const BIO_SOURCES = ['none', 'delta', 'theta', 'alpha', 'beta', 'gamma', 'hr']
  * Per viz-parameter bio mapping ranges.
  *   min     — weight slider left edge  (no contribution)
  *   max     — weight slider right edge (maximum contribution)
- *   default — midpoint; preserves the original hardcoded behavior
+ *   default — starting value
  *
  * Formula each frame:  uniform += sources[source] * weight
+ *
+ * EEG bands are zero at rest (no contribution to audio-baseline behavior) and
+ * positive when a band is elevated above the user's recent 1/f-corrected baseline.
+ * A deviation of 1.0 (2× above rest) with the default weight gives a noticeable
+ * but not overwhelming effect. 'hr' retains its 0–1 scale.
  */
 const BIO_RANGE = {
-  amplitude:   { min: 0.0, max: 0.6, default: 0.3 },  // was: gamma * 0.3
-  offsetGain:  { min: 0.0, max: 1.0, default: 0.5 },  // was: beta  * 0.5
-  size:        { min: 0.0, max: 4.0, default: 2.0 },  // was: theta * 2.0
-  maxDistance: { min: 0.0, max: 3.6, default: 1.8 },  // was: alpha * 1.8
-  heartPulse:  { min: 0.0, max: 2.0, default: 1.0 },  // was: hr    * 1.0
+  amplitude:   { min: 0.0, max: 0.3, default: 0.15 },
+  offsetGain:  { min: 0.0, max: 0.5, default: 0.25 },
+  size:        { min: 0.0, max: 2.0, default: 1.0  },
+  maxDistance: { min: 0.0, max: 1.8, default: 0.9  },
+  heartPulse:  { min: 0.0, max: 2.0, default: 1.0  },  // hr still 0–1
 }
 
 /**
@@ -242,7 +249,7 @@ export default class ReactiveParticles extends THREE.Object3D {
 
   /**
    * Update shader uniforms from audio and EEG data. Called every frame.
-   * @param {object|null} eegBands  — { delta, theta, alpha, beta, gamma } (0–1 each), or null
+   * @param {object|null} eegBands  — { delta, theta, alpha, beta, gamma } activity deviations ≥ 0, or null
    * @param {number}      heartPulse — heart-rate oscillator value (0–1)
    * @param {object|null} headPose  — { pitch, roll } in radians, or null
    */

@@ -92,18 +92,18 @@ Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) are precomputed at construc
 
 The Morlet wavelet at frequency `f` (following BOSC_tf.m):
 ```
-σ = τ / (2π·f)                    (temporal std dev; τ = wavenumber = 6)
+σ = τ / (2π·f)                    (temporal std dev; τ = wavenumber)
 A = 1 / sqrt(σ·√π)                (amplitude normalization)
 ψ(t) = A · exp(-t²/2σ²) · exp(i·2π·f·t)
 ```
-Window: ±3σ samples (truncated from the ±3.6σ used in BOSC_tf to keep the 6 Hz kernel within the 256-sample buffer).
+Window: ±3σ samples (truncated from the ±3.6σ used in BOSC_tf to keep kernels within the 256-sample buffer). Theta uses a reduced wavenumber (τ=4 instead of 6) to keep the kernel short enough for a useful number of valid samples; the broader spectral smearing is acceptable for the wide 4–8 Hz band.
 
-| Band  | Center freq | σ (s) | Kernel half-width (samples) |
-|-------|-------------|-------|----------------------------|
-| theta | 6 Hz        | 0.159 | 122                         |
-| alpha | 10 Hz       | 0.095 | 73                          |
-| beta  | 20 Hz       | 0.048 | 37                          |
-| gamma | 40 Hz       | 0.024 | 18                          |
+| Band  | τ  | Center freq | σ (s) | Kernel half-width (samples) | Valid samples |
+|-------|----|-------------|-------|-----------------------------|---------------|
+| theta | 4  | 6 Hz        | 0.106 | 82                          | 92            |
+| alpha | 6  | 10 Hz       | 0.095 | 74                          | 108           |
+| beta  | 6  | 20 Hz       | 0.048 | 37                          | 182           |
+| gamma | 6  | 40 Hz       | 0.024 | 19                          | 218           |
 
 Power is computed as the mean `|W(t)|²` over all valid (edge-free) samples in the window:
 ```
@@ -134,7 +134,7 @@ Every `APERIODIC_UPDATE_INTERVAL = 10` windows (~5 s), the background model is r
 log₁₀(P_expected) = a + b · log₁₀(f)
 ```
 
-Parameters are updated via exponential moving average (`AP_SMOOTH = 0.3`) to avoid abrupt jumps. The initial model is `{a: 0, b: -1.5}` (generic 1/f^1.5 prior), which converges to the actual EEG spectrum within ~5 updates.
+The **first** refit uses instant adoption (`smooth = 1.0`) so the model immediately matches the actual signal scale rather than slowly converging from the dummy prior. Subsequent refits use EMA smoothing (`AP_SMOOTH = 0.3`) for stability. The initial model is `{a: 0, b: -1.5}` (generic 1/f^1.5 prior).
 
 ### Stage 5 — Aperiodic normalization → relative output
 
@@ -146,7 +146,11 @@ norm_band = raw_band / 10^(a + b · log₁₀(f_center))
 Representative frequencies: delta→2 Hz, theta→6, alpha→10, beta→20, gamma→40
 ```
 
-This preserves backward compatibility (output still sums to 1) while correctly weighting bands that are genuinely elevated above the 1/f noise floor.
+This preserves sustained brain-state information: a genuinely elevated oscillation (e.g. strong alpha during eyes-closed) receives a proportionally larger share after 1/f correction, and this persists for as long as the state holds — there is no adaptive baseline that would suppress sustained changes back to zero.
+
+Before the model has converged (`AP_MIN_REFITS = 3` refits, ≈ 15 s), `bandPower` is held at zero to suppress spurious EEG influence during warm-up.
+
+**Note on delta scale:** Delta (1–4 Hz) uses a Hann-windowed DFT while theta–gamma use Morlet wavelets. These produce different absolute power scales. The aperiodic model is fitted from wavelet powers at 6–40 Hz and extrapolated to 2 Hz for delta, so delta's relative share may be slightly elevated compared to a pure-wavelet analysis. In practice this is acceptable since delta has no default mapping in the visualizer.
 
 `EEGManager.bandPower` is updated in place after each computation window and read by `ReactiveParticles.update()` every frame.
 

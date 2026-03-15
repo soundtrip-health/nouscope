@@ -37,6 +37,10 @@ const EEG_BUF_SIZE = 256
 // Delta (1–4 Hz) uses a sparse DFT because the ±3σ wavelet window at 6 Hz already
 // reaches 245 samples — there is no room left for lower frequencies in a 256-sample buffer.
 const WAVELET_WAVENUMBER = 6   // τ (cycles per Gaussian σ); higher → better freq, worse time
+// Theta uses a reduced wavenumber (4 instead of 6) so the kernel fits comfortably
+// in the 256-sample buffer: halfWin drops from 123→82, giving 92 valid samples
+// instead of 10. The broader spectral smearing is acceptable for the 4–8 Hz band.
+const WAVELET_WAVENUMBER_THETA = 4
 
 // Representative center frequency per band for wavelet power estimation (theta and above).
 const WAVELET_BAND_FREQS = { theta: 6, alpha: 10, beta: 20, gamma: 40 }  // Hz
@@ -53,6 +57,10 @@ const AP_FIT_BANDS = ['theta', 'alpha', 'beta', 'gamma']
 // Re-fit the aperiodic model every N analysis windows (50% overlap → 128 new samples/window)
 const APERIODIC_UPDATE_INTERVAL = 10    // ≈ 5 s between refits
 const AP_SMOOTH                 = 0.3  // EMA coefficient for incremental model updates
+
+// Minimum number of aperiodic model refits before band power output starts.
+// Ensures the model has converged before values reach the shaders.
+const AP_MIN_REFITS = 3
 
 // Display ring-buffer lengths
 const EEG_DISPLAY_LEN = 256 * 4    // 4 s of raw EEG at 256 Hz
@@ -153,6 +161,7 @@ export default class EEGManager {
   headPose    = { pitch: 0, roll: 0 }  // radians from accelerometer
 
   onDisconnected = null          // optional callback
+  debug          = false         // set true to log pipeline internals each analysis window
 
   // ── Configurable channel-quality aggregation ──────────────────────────────
   // badChannelThreshold: quality level at or below which a channel is a drop candidate.
@@ -189,6 +198,7 @@ export default class EEGManager {
   // Aperiodic background model params: log₁₀(P) = a + b·log₁₀(f)
   _apModel       = { a: 0, b: -1.5 }
   _apWindowCount = 0   // analysis windows since last model refit
+  _apRefitCount  = 0   // total refits performed (for warm-up gating)
 
   // Precomputed signal-processing kernels (constant after construction)
   _wavelets    = null  // Morlet wavelet kernels per band
@@ -309,6 +319,7 @@ export default class EEGManager {
     this._analysisCount = 0
     this._apModel       = { a: 0, b: -1.5 }
     this._apWindowCount = 0
+    this._apRefitCount  = 0
     this._ppgBuffer    = []
     this._ppgStepCount = 0
     this._hpPrevX = this._hpPrevY = this._lpPrevY = 0
@@ -384,15 +395,17 @@ export default class EEGManager {
 
   /**
    * Compute per-channel band powers, apply quality-weighted aggregation, then
-   * normalise against the fitted aperiodic background.
+   * normalise against the fitted aperiodic (1/f) background.
    *
    * Pipeline:
    *   1. Per channel: sparse Hann-DFT for delta (1–4 Hz) + Morlet wavelet power
    *      for theta/alpha/beta/gamma.
    *   2. Quality-weighted channel aggregation (up to 2 bad channels dropped).
    *   3. Periodic log-log linear fit to the wavelet powers → aperiodic model.
+   *      First fit uses instant adoption; subsequent fits use EMA smoothing.
    *   4. Divide each band by its expected aperiodic power, then renormalise to
-   *      sum=1 so the output is compatible with the rest of the pipeline.
+   *      sum=1. Genuine oscillatory elevations (e.g. alpha peak during eyes-closed)
+   *      get a proportionally larger share after 1/f correction.
    */
   _computeBandPower() {
     // Step 1: per-channel band power
@@ -416,8 +429,11 @@ export default class EEGManager {
       this._refitAperiodicModel(chBands, weights, totalW)
     }
 
-    // Step 4: aperiodic normalisation → renormalise to sum=1
-    this.bandPower = this._apNormalize(raw)
+    // Step 4: aperiodic normalisation → relative power (sum=1)
+    const result = this._apNormalize(raw)
+    this.bandPower = result
+
+    this._debugLog(raw, result, weights)
   }
 
   /**
@@ -545,19 +561,23 @@ export default class EEGManager {
       let sum = 0
       for (let ch = 0; ch < 4; ch++) sum += chBands[ch][band] * weights[ch]
       const avgP = sum / totalW
-      return avgP > 0 ? Math.log10(avgP) : -10   // -10 as sentinel for near-zero power
+      return avgP > 0 ? Math.log10(avgP) : -10
     })
 
     const { a, b } = this._linReg(logF, logP)
 
-    // Exponential moving average to smooth out single-window fluctuations
-    this._apModel.a = (1 - AP_SMOOTH) * this._apModel.a + AP_SMOOTH * a
-    this._apModel.b = (1 - AP_SMOOTH) * this._apModel.b + AP_SMOOTH * b
+    // First fit adopts the regression instantly (no blending with the dummy prior);
+    // subsequent fits use EMA smoothing to avoid abrupt jumps.
+    const smooth = this._apRefitCount === 0 ? 1.0 : AP_SMOOTH
+    this._apModel.a = (1 - smooth) * this._apModel.a + smooth * a
+    this._apModel.b = (1 - smooth) * this._apModel.b + smooth * b
+
+    this._apRefitCount++
   }
 
   /**
-   * Normalise raw band powers against the aperiodic (1/f) background model and
-   * return values that sum to 1.
+   * Normalise raw band powers against the aperiodic (1/f) background model,
+   * then return relative power values that sum to 1.
    *
    * Each band's power is divided by the expected power at its representative
    * frequency under the fitted log-log linear model:
@@ -565,12 +585,21 @@ export default class EEGManager {
    *
    * This means a band with power exactly on the aperiodic baseline contributes
    * its "fair share" to the total, while a genuinely elevated oscillation
-   * (e.g. strong alpha) receives a proportionally larger weight.
+   * (e.g. strong alpha during eyes-closed) receives a proportionally larger
+   * share — the 1/f correction prevents low-frequency bands from dominating
+   * simply because 1/f power is higher there.
    *
-   * @param {{ delta, theta, alpha, beta, gamma }} raw — weighted-average band powers
-   * @returns {{ delta, theta, alpha, beta, gamma }} sum=1
+   * During warm-up (< AP_MIN_REFITS model refits, ≈ 15 s), returns zeros
+   * so no EEG influence reaches the shaders before the model has converged.
+   *
+   * @param {{ delta, theta, alpha, beta, gamma }} raw — quality-weighted band powers
+   * @returns {{ delta, theta, alpha, beta, gamma }} sum=1 relative power (or all zeros during warm-up)
    */
   _apNormalize(raw) {
+    if (this._apRefitCount < AP_MIN_REFITS) {
+      return { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
+    }
+
     const { a, b } = this._apModel
     const BAND_FREQ = { delta: 2, theta: 6, alpha: 10, beta: 20, gamma: 40 }
 
@@ -586,6 +615,33 @@ export default class EEGManager {
 
     for (const band of Object.keys(norm)) norm[band] /= total
     return norm
+  }
+
+  /**
+   * Log pipeline internals when this.debug is true.
+   * Enable at runtime: App.eegManager.debug = true
+   */
+  _debugLog(raw, result, weights) {
+    if (!this.debug) return
+    const { a, b } = this._apModel
+    const BAND_FREQ = { delta: 2, theta: 6, alpha: 10, beta: 20, gamma: 40 }
+    const expected = {}
+    for (const [band, f] of Object.entries(BAND_FREQ)) {
+      expected[band] = Math.pow(10, a + b * Math.log10(f))
+    }
+    const fmt = (obj) => {
+      const o = {}
+      for (const [k, v] of Object.entries(obj)) o[k] = +v.toFixed(4)
+      return o
+    }
+    console.groupCollapsed('[EEG] band power pipeline')
+    console.log('signal quality:', [...this.signalQuality])
+    console.log('channel weights:', weights.map(w => +w.toFixed(3)))
+    console.log('raw wavelet power:', fmt(raw))
+    console.log(`aperiodic model: a=${a.toFixed(4)}, b=${b.toFixed(4)} (refits: ${this._apRefitCount})`)
+    console.log('expected (1/f):', fmt(expected))
+    console.log('output (sum=1):', fmt(result))
+    console.groupEnd()
   }
 
   /**
@@ -628,7 +684,8 @@ export default class EEGManager {
     // ── Morlet wavelets ────────────────────────────────────────────────────
     this._wavelets = {}
     for (const [band, f] of Object.entries(WAVELET_BAND_FREQS)) {
-      const sigma   = WAVELET_WAVENUMBER / (2 * Math.PI * f)          // seconds
+      const tau     = band === 'theta' ? WAVELET_WAVENUMBER_THETA : WAVELET_WAVENUMBER
+      const sigma   = tau / (2 * Math.PI * f)                         // seconds
       const A       = 1 / Math.sqrt(sigma * Math.sqrt(Math.PI))        // BOSC amplitude norm
       const halfWin = Math.ceil(3.0 * sigma * EEG_FS)                  // ±3σ in samples
       const len     = 2 * halfWin + 1

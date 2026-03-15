@@ -8,7 +8,9 @@ const EEG_SCALE     = 200   // µV mapped to full per-channel half-height
 const EEG_AMPLITUDE = 0.22  // normalized half-height per channel stripe
 const EEG_OFFSETS   = [0.75, 0.25, -0.25, -0.75]  // TP9, AF7, AF8, TP10
 
-const BAND_ROLL = 300  // ~5 s at ~60 fps polling rate
+const BAND_ROLL        = 300   // ~5 s at ~60 fps polling rate
+const BAND_YMAX_MIN    = 0.2   // minimum visible Y range (prevents zero-range when all flat)
+const BAND_YMAX_DECAY  = 0.999 // per-frame running-max decay (~6% per 100 frames)
 
 const PPG_ROLL = 384  // 6 s at 64 Hz — matches MSPTD analysis window
 
@@ -64,7 +66,9 @@ export default class BioDataDisplay {
   _ppgReadIdx = 0
   _imuReadIdx = 0
 
-  _ppgPeak = 1   // running peak abs value for PPG auto-scale
+  _ppgPeak   = 1              // running peak abs value for PPG auto-scale
+  _bandYMax  = BAND_YMAX_MIN  // running peak for band auto-scale
+  _bandValEls = null          // [δ, θ, α, β, γ] value <span> references
 
   /**
    * Create WebGL contexts and rolling-line plots for all three canvases.
@@ -84,6 +88,9 @@ export default class BioDataDisplay {
     setBackgroundColor(this._bandGL, TRANSPARENT)
     this._bandPlot = new WebglLineRoll(this._bandGL, BAND_ROLL, 5)
     BAND_COLORS.forEach((c, i) => this._bandPlot.setLineColor(c, i))
+
+    this._bandValEls = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+      .map(b => document.getElementById(`band-val-${b}`))
 
     // PPG — single filtered infrared trace
     const ppgCanvas = document.getElementById('ppg-canvas')
@@ -109,7 +116,8 @@ export default class BioDataDisplay {
     this._eegReadIdx = [mgr.eegSampleCount, mgr.eegSampleCount, mgr.eegSampleCount, mgr.eegSampleCount]
     this._ppgReadIdx = mgr.ppgSampleCount
     this._imuReadIdx = mgr.imuSampleCount
-    this._ppgPeak = 1
+    this._ppgPeak  = 1
+    this._bandYMax = BAND_YMAX_MIN
   }
 
   /** Call each animation frame (only when panel is visible). */
@@ -147,16 +155,26 @@ export default class BioDataDisplay {
 
   _updateBands(mgr) {
     const { delta, theta, alpha, beta, gamma } = mgr.bandPower
-    // Map 0–1 power values to -1..1 (bottom = 0, top = 1)
-    this._bandPlot.addPoint([
-      delta * 2 - 1,
-      theta * 2 - 1,
-      alpha * 2 - 1,
-      beta  * 2 - 1,
-      gamma * 2 - 1,
-    ])
+    const vals = [delta, theta, alpha, beta, gamma]
+
+    // Auto-scale: running max with slow decay, floored at BAND_YMAX_MIN so the
+    // plot always shows at least some vertical range even when all bands are flat.
+    const frameMax = Math.max(...vals)
+    this._bandYMax = Math.max(this._bandYMax * BAND_YMAX_DECAY, frameMax, BAND_YMAX_MIN)
+
+    // Map [0, _bandYMax] → [-1, +1] for webgl-plot (0 = bottom, peak = top)
+    this._bandPlot.addPoint(vals.map(v => v / this._bandYMax * 2 - 1))
     this._bandGL.clear(this._bandGL.COLOR_BUFFER_BIT)
     this._bandPlot.draw()
+
+    // Update per-band text readouts
+    if (this._bandValEls) {
+      this._bandValEls[0].textContent = delta.toFixed(2)
+      this._bandValEls[1].textContent = theta.toFixed(2)
+      this._bandValEls[2].textContent = alpha.toFixed(2)
+      this._bandValEls[3].textContent = beta.toFixed(2)
+      this._bandValEls[4].textContent = gamma.toFixed(2)
+    }
   }
 
   _updatePPG(mgr) {

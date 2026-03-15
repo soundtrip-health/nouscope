@@ -283,11 +283,34 @@ a:focus-visible {
   letter-spacing: 0.04em;
 }
 
+.bio-bands-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+
+  canvas { width: 200px; }   // override the generic 280px rule for band canvas only
+}
+
 .bio-band-legend {
   font-size: 0.65rem;
   letter-spacing: 0.06em;
   display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  flex-shrink: 0;
+}
+
+.bio-band-item {
+  display: flex;
+  align-items: center;
   gap: 0.3rem;
+}
+
+.bio-band-val {
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.55);
+  min-width: 2.4rem;
 }
 
 .bio-imu-legend {
