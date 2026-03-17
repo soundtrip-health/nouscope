@@ -68,7 +68,8 @@ export default class BioDataDisplay {
 
   _ppgPeak   = 1              // running peak abs value for PPG auto-scale
   _bandYMax  = BAND_YMAX_MIN  // running peak for band auto-scale
-  _bandValEls = null          // [δ, θ, α, β, γ] value <span> references
+  _bandItemEls = null         // [δ, θ, α, β, γ] legend row <div> references
+  _bandValEls  = null         // [δ, θ, α, β, γ] value <span> references
 
   /**
    * Create WebGL contexts and rolling-line plots for all three canvases.
@@ -89,8 +90,9 @@ export default class BioDataDisplay {
     this._bandPlot = new WebglLineRoll(this._bandGL, BAND_ROLL, 5)
     BAND_COLORS.forEach((c, i) => this._bandPlot.setLineColor(c, i))
 
-    this._bandValEls = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-      .map(b => document.getElementById(`band-val-${b}`))
+    const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+    this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`band-item-${b}`))
+    this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`band-val-${b}`))
 
     // PPG — single filtered infrared trace
     const ppgCanvas = document.getElementById('ppg-canvas')
@@ -167,13 +169,13 @@ export default class BioDataDisplay {
     this._bandGL.clear(this._bandGL.COLOR_BUFFER_BIT)
     this._bandPlot.draw()
 
-    // Update per-band text readouts
-    if (this._bandValEls) {
-      this._bandValEls[0].textContent = delta.toFixed(2)
-      this._bandValEls[1].textContent = theta.toFixed(2)
-      this._bandValEls[2].textContent = alpha.toFixed(2)
-      this._bandValEls[3].textContent = beta.toFixed(2)
-      this._bandValEls[4].textContent = gamma.toFixed(2)
+    // Show legend rows only for bands mapped to a viz parameter
+    const normBands  = mgr.normalizeBands
+    const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+    for (let i = 0; i < 5; i++) {
+      const active = normBands.has(BAND_NAMES[i])
+      this._bandItemEls[i].style.display = active ? '' : 'none'
+      if (active) this._bandValEls[i].textContent = vals[i].toFixed(2)
     }
   }
 

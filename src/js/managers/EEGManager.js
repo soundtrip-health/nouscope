@@ -163,6 +163,13 @@ export default class EEGManager {
   onDisconnected = null          // optional callback
   debug          = false         // set true to log pipeline internals each analysis window
 
+  // ── Active-band filter ────────────────────────────────────────────────────
+  // Only bands in this Set participate in the aperiodic-normalised relative-power
+  // calculation. Bands absent from the Set are zeroed in bandPower output, so they
+  // cannot dominate the normalisation even when unmapped in the visualiser.
+  // Updated by ReactiveParticles whenever the MAPPING GUI sources change.
+  normalizeBands = new Set(['delta', 'theta', 'alpha', 'beta', 'gamma'])
+
   // ── Configurable channel-quality aggregation ──────────────────────────────
   // badChannelThreshold: quality level at or below which a channel is a drop candidate.
   //   'poor'     → drop channels rated 'poor' only (default)
@@ -603,17 +610,33 @@ export default class EEGManager {
     const { a, b } = this._apModel
     const BAND_FREQ = { delta: 2, theta: 6, alpha: 10, beta: 20, gamma: 40 }
 
+    // Only active (mapped) bands participate in the relative-power sum.
+    // Inactive bands are zeroed so they cannot inflate or dominate the total.
     let total = 0
     const norm = {}
     for (const [band, f] of Object.entries(BAND_FREQ)) {
+      if (!this.normalizeBands.has(band)) {
+        norm[band] = 0
+        continue
+      }
       const expected = Math.pow(10, a + b * Math.log10(f))
       norm[band] = raw[band] > 0 ? raw[band] / expected : 0
       total += norm[band]
     }
 
-    if (total === 0) return { delta: 0.2, theta: 0.2, alpha: 0.2, beta: 0.2, gamma: 0.2 }
+    if (total === 0) {
+      // Equal-weight fallback only for active bands
+      const n = this.normalizeBands.size
+      const eq = n > 0 ? 1 / n : 0
+      for (const band of Object.keys(BAND_FREQ)) {
+        norm[band] = this.normalizeBands.has(band) ? eq : 0
+      }
+      return norm
+    }
 
-    for (const band of Object.keys(norm)) norm[band] /= total
+    for (const band of Object.keys(norm)) {
+      if (this.normalizeBands.has(band)) norm[band] /= total
+    }
     return norm
   }
 

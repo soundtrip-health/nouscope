@@ -368,7 +368,30 @@ export default class ReactiveParticles extends THREE.Object3D {
     for (const [param, label] of Object.entries(paramLabels)) {
       const sub = mappingFolder.addFolder(label)
       sub.add(this.bioMapping[param], 'source', BIO_SOURCES).name('Source')
+        .onChange(() => this._syncNormalizeBands())
       sub.add(this.bioMapping[param], 'weight', BIO_RANGE[param].min, BIO_RANGE[param].max).name('Weight')
+    }
+
+    // Push initial active-band set so EEGManager normalises correctly from the start
+    this._syncNormalizeBands()
+  }
+
+  /**
+   * Derive which EEG bands are currently mapped to at least one viz parameter and
+   * push the resulting Set to EEGManager so unmapped bands are excluded from the
+   * relative-power normalisation (prevents unmapped high-power bands like delta
+   * from consuming most of the normalised share).
+   */
+  _syncNormalizeBands() {
+    const EEG_BANDS = new Set(['delta', 'theta', 'alpha', 'beta', 'gamma'])
+    const active = new Set(
+      Object.values(this.bioMapping)
+        .map(m => m.source)
+        .filter(s => EEG_BANDS.has(s))
+    )
+    // If nothing is mapped (all 'none'), fall back to full set to avoid all-zeros output
+    if (App.eegManager) {
+      App.eegManager.normalizeBands = active.size > 0 ? active : new Set(EEG_BANDS)
     }
   }
 }

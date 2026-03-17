@@ -138,19 +138,22 @@ The **first** refit uses instant adoption (`smooth = 1.0`) so the model immediat
 
 ### Stage 5 — Aperiodic normalization → relative output
 
-Each band's power is divided by the expected aperiodic power at its representative frequency, then the five values are renormalised to sum 1:
+Each band's power is divided by the expected aperiodic power at its representative frequency. Only bands that are **actively mapped** to a visualizer parameter (via `ReactiveParticles.bioMapping`) participate in the normalisation sum; unmapped bands are zeroed out:
 
 ```
-norm_band = raw_band / 10^(a + b · log₁₀(f_center))
+norm_band = raw_band / 10^(a + b · log₁₀(f_center))   [for active bands only]
+norm_band = 0                                            [for inactive/unmapped bands]
 
 Representative frequencies: delta→2 Hz, theta→6, alpha→10, beta→20, gamma→40
 ```
 
+`ReactiveParticles` maintains `EEGManager.normalizeBands` (a `Set` of band name strings). It is initialised from the default `bioMapping` at GUI creation and updated whenever the user changes a Source dropdown. This prevents high-power but unmapped bands (most commonly delta, which tends to dominate the 1/f spectrum) from consuming a disproportionate share of the normalised total.
+
+If all sources are set to `'none'`, `normalizeBands` falls back to the full set so output stays meaningful.
+
 This preserves sustained brain-state information: a genuinely elevated oscillation (e.g. strong alpha during eyes-closed) receives a proportionally larger share after 1/f correction, and this persists for as long as the state holds — there is no adaptive baseline that would suppress sustained changes back to zero.
 
 Before the model has converged (`AP_MIN_REFITS = 3` refits, ≈ 15 s), `bandPower` is held at zero to suppress spurious EEG influence during warm-up.
-
-**Note on delta scale:** Delta (1–4 Hz) uses a Hann-windowed DFT while theta–gamma use Morlet wavelets. These produce different absolute power scales. The aperiodic model is fitted from wavelet powers at 6–40 Hz and extrapolated to 2 Hz for delta, so delta's relative share may be slightly elevated compared to a pure-wavelet analysis. In practice this is acceptable since delta has no default mapping in the visualizer.
 
 `EEGManager.bandPower` is updated in place after each computation window and read by `ReactiveParticles.update()` every frame.
 
