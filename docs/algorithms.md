@@ -15,6 +15,7 @@ This document explains the key algorithms that drive the Nouscope visualization:
 7. [Vertex Shader — Curl Noise Displacement](#7-vertex-shader--curl-noise-displacement)
 8. [Fragment Shader — Color & Heartbeat Flush](#8-fragment-shader--color--heartbeat-flush)
 9. [Beat Reactions — Geometry & Rotation](#9-beat-reactions--geometry--rotation)
+10. [EEG Spectrogram Display](#10-eeg-spectrogram-display)
 
 ---
 
@@ -155,7 +156,29 @@ This preserves sustained brain-state information: a genuinely elevated oscillati
 
 Before the model has converged (`AP_MIN_REFITS = 3` refits, ≈ 15 s), `bandPower` is held at zero to suppress spurious EEG influence during warm-up.
 
-`EEGManager.bandPower` is updated in place after each computation window and read by `ReactiveParticles.update()` every frame.
+### Stage 6 — Temporal smoothing
+
+Two layers of smoothing prevent the discrete ~2 Hz analysis windows from producing staircase jumps in the visualization:
+
+1. **Source EMA** (`EEGManager`): After aperiodic normalization, each band is EMA-smoothed in place before storing to `bandPower`:
+   ```
+   bandPower[band] += BAND_SMOOTH * (result[band] - bandPower[band])
+   ```
+   `BAND_SMOOTH = 0.35` at ~2 Hz update rate gives a ~1.5 s settling time, matching the perceptual timescale of EEG state changes.
+
+2. **Per-frame lerp** (`ReactiveParticles`): The viz maintains `_smoothedBands` and lerps toward the latest `bandPower` each frame:
+   ```
+   _smoothedBands[band] += EEG_LERP_RATE * (target - _smoothedBands[band])
+   ```
+   `EEG_LERP_RATE = 0.06` at 60 fps gives sub-frame interpolation between the discrete ~2 Hz updates, eliminating visual jerkiness.
+
+3. **Display lerp** (`BioDataDisplay`): The band power plot maintains `_bandSmoothed[5]` and lerps toward `bandPower` each frame:
+   ```
+   _bandSmoothed[i] += BAND_LERP * (target[i] - _bandSmoothed[i])
+   ```
+   `BAND_LERP = 0.08` at 60 fps gives ~0.5 s to 90%, producing smooth curves in the EEG Bands panel instead of staircase jumps.
+
+The three layers compose: the source EMA prevents wild jumps in the target, while the per-frame lerps smoothly track that target at display refresh rate for both the shader uniforms and the diagnostic plot.
 
 ---
 
@@ -457,3 +480,80 @@ The actual `frequency` uniform is set each frame as `_baseFrequency * (1 + eegSo
 **Geometry disposal:** `destroyMesh()` calls `geometry.dispose()` and `material.dispose()` to free GPU buffers, and kills any active GSAP tweens on the old mesh before removal. New geometry shares the same `ShaderMaterial` instance.
 
 Both box and cylinder geometries randomize their segment counts on each creation, producing varied point densities and visual textures without any additional code.
+
+---
+
+## 10. EEG Spectrogram Display
+
+**Files:** `src/js/managers/EEGManager.js` (`_computeSpectrum()`, `_computeSpectrumLo()`), `src/js/ui/BioDataDisplay.js` (`_updateSpectrum()`, `_updateSpectrumLo()`)
+
+### Overview
+
+A scrolling time–frequency heatmap of EEG power, computed alongside the band power pipeline (Section 3). Each column represents one 256-sample analysis window (~0.5 s at 256 Hz, 50% overlap), covering 1–50 Hz at 1 Hz resolution. The display uses a viridis colormap on log₁₀-scaled power with auto-ranging. A second hi-resolution panel covers 0.5–8.0 Hz at 0.1 Hz resolution (using a separate 2560-sample / 10 s window) to reveal sub-Hz beat entrainment and delta/theta dynamics.
+
+### Stage 1 — Hann-windowed DFT (bins 1–50)
+
+The same precomputed Hann-weighted twiddle factors used for delta band power (Section 3, Stage 2) are extended to cover all 50 bins:
+
+```
+w[n] = 0.5 - 0.5·cos(2π·n / (N-1))          (Hann window, N=256)
+power[k] = |Σ sig[n]·w[n]·e^(-j·2π·k·n/N)|²   for k = 1…50
+```
+
+Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) for all 50 bins are precomputed at construction time alongside the wavelet kernels, so the hot-path performs only multiply-accumulate operations.
+
+### Stage 2 — Quality-weighted channel average
+
+Per-bin power is averaged across EEG channels using the same quality weights as band power (Section 3, Stage 3). Dropped channels (weight = 0) are skipped entirely.
+
+### Stage 3 — Artifact rejection
+
+Each retained channel's 256-sample buffer is scanned for samples exceeding ±150 µV. If more than 10% of samples on any single retained channel exceed this threshold, the entire window is rejected and no spectrogram column is emitted. The percentage-based approach prevents occasional blink spikes from blanking the spectrogram while still rejecting windows dominated by sustained movement artifacts.
+
+Rejected windows simply hold the previous column on-screen (the display does not advance), producing a momentary pause in the scrolling heatmap rather than a visible artifact stripe.
+
+### Stage 4 — Log power & display buffer
+
+Power values are stored as `log₁₀(power + 1e-10)` in a rolling buffer of `Float32Array(50)` columns (up to 280 columns ≈ 140 s of history). A monotonic `spectrumSampleCount` counter enables the same read-index pattern used by the other display buffers.
+
+The hi-res low-frequency spectrogram uses a separate 2560-sample (10 s) per-channel rolling buffer and its own set of 76 Hann-weighted DFT twiddle factors (0.5–8.0 Hz at 0.1 Hz steps). It stores `Float32Array(76)` columns in `_specLoDisplay` with its own `spectrumLoSampleCount` counter. The same artifact rejection and quality-weighted averaging apply. ~1.2 MB of precomputed kernels (76 bins × 2560 samples × 2 components × 4 bytes).
+
+### Stage 5 — Heatmap rendering (BioDataDisplay)
+
+The two panels use separate data buffers and plain 2D `<canvas>` (not WebGL) with a column-shift approach since the update rate is low (~2 Hz):
+
+1. **Auto-scale:** Running min/max of log₁₀ power expand immediately on new extremes and contract slowly (decay 0.995 per column), with a minimum dynamic range of 2 decades. Each panel maintains its own scale to optimise contrast for its frequency range.
+2. **Shift left:** `ctx.drawImage(canvas, -2, 0)` scrolls the existing content two pixels left (column width = 2 px).
+3. **Draw column:** A 2×H `ImageData` is filled using the viridis colormap LUT (256 entries, piecewise-linear from 9 key stops). Frequency axis labels are HTML elements alongside each canvas.
+
+**Full spectrogram** (`#spec-canvas`, 280×86 native px): bins 8–50 Hz (43 bins), 2 px/bin vertically, 2 px/column horizontally. Uses `_specDisplay` (256-sample DFT, 1 Hz resolution). Axis labels: 50, 8 Hz.
+
+**Delta/theta zoom** (`#spec-lo-canvas`, 280×76 native px): 0.5–8.0 Hz at 0.1 Hz resolution (76 bins), 1 px/bin vertically, 2 px/column horizontally. Uses a dedicated `_specLoDisplay` buffer computed from a 2560-sample (10 s) Hann-windowed DFT with precomputed twiddle factors for 76 fractional-Hz bins. First column appears after 10 s of data accumulation. Separate auto-scaling to maximise contrast for sub-Hz beat entrainment dynamics. Axis labels: 8, 4, 0.5 Hz.
+
+The `image-rendering: pixelated` CSS property ensures bins render with sharp edges when CSS-scaled.
+
+### Viridis colormap
+
+The colormap is a 256-entry RGB lookup table precomputed at module load from 9 piecewise-linear stops approximating matplotlib's viridis:
+
+| Normalized value | Color |
+|-----------------|-------|
+| 0.0 | dark purple (68, 1, 84) |
+| 0.25 | blue (59, 82, 139) |
+| 0.5 | teal (33, 145, 140) |
+| 0.75 | green (122, 209, 81) |
+| 1.0 | yellow (253, 231, 37) |
+
+Low power → purple/blue, high power → green/yellow.
+
+### Future: Multitaper spectral estimation
+
+The current implementation uses a single Hann window, which provides ~-31 dB sidelobe suppression — adequate for a visualization panel. For lower-variance estimates suitable for research-grade analysis, a **multitaper** approach using Discrete Prolate Spheroidal Sequences (DPSS / Slepian tapers) could replace the Hann window:
+
+1. **Pre-generate DPSS tapers** in Python using `scipy.signal.windows.dpss(N=256, NW=3)` and export as a JSON array (JavaScript lacks a native DPSS generator).
+2. **Compute K individual spectra** by multiplying the signal by each of the `K = 2·NW - 1 = 5` tapers, then taking the DFT of each.
+3. **Average the K power spectra** to produce the final multitaper estimate.
+
+The rendering pipeline (Stages 4–5) would remain unchanged — only the spectral estimation (Stages 1–2) would be swapped. The main tradeoff is shipping a ~30 KB JSON taper file and `K×` more DFT computation per window (5× at NW=3), which is still negligible at the 2 Hz update rate.
+
+Reference: Thomson, D. J. (1982). "Spectrum estimation and harmonic analysis." *Proceedings of the IEEE*, 70(9), 1055–1096.

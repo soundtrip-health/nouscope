@@ -261,7 +261,7 @@ a:focus-visible {
   position: fixed;
   bottom: 4rem;   // sits above .eeg-controls
   left: 1.5rem;
-  z-index: 100;
+  z-index: 1002;  // above overlay (1000) and eeg-controls (1001)
   width: 296px;
   background: rgba(0, 0, 0, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -327,6 +327,36 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.55);
   min-width: 2.4rem;
+}
+
+.bio-spec-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+
+  canvas {
+    flex: 1;
+    width: 0;     // let flex-grow override the generic 280px rule
+    min-width: 0;
+  }
+}
+
+.bio-spec-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.5rem;
+  color: rgba(255, 255, 255, 0.3);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  padding: 1px 0;    // align with top/bottom pixel rows
+  flex-shrink: 0;
+  min-width: 1.2rem;
+  text-align: right;
+}
+
+#spec-canvas, #spec-lo-canvas {
+  image-rendering: pixelated;
 }
 
 .bio-imu-legend {

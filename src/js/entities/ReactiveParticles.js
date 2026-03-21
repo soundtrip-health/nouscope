@@ -11,6 +11,7 @@ const BEAT_ROTATE_CHANCE = 0.3
 const BEAT_RESET_CHANCE = 0.3
 const CAMERA_Z = 10          // nominal camera depth (for z-position tweens)
 const CAMERA_Z_RANGE = 1     // ±range for random z placement
+const EEG_LERP_RATE = 0.06  // per-frame lerp toward latest EEG bands (~60 fps → ~4 Hz convergence)
 
 /**
  * Bio feature sources available for mapping to viz parameters.
@@ -110,6 +111,9 @@ export default class ReactiveParticles extends THREE.Object3D {
 
     // Base curl-field frequency; GSAP tweens this on beat, update() applies EEG multiplier
     this._baseFrequency = 2
+
+    // Per-frame smoothed EEG bands — lerped toward latest bandPower each frame
+    this._smoothedBands = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
   }
 
   /** Attach to the scene holder, create ShaderMaterial, build initial mesh, add GUI. */
@@ -264,13 +268,19 @@ export default class ReactiveParticles extends THREE.Object3D {
    * @param {object|null} headPose  — { pitch, roll } in radians, or null
    */
   update(eegBands = null, heartPulse = 0, headPose = null) {
+    // Per-frame lerp toward latest EEG values for smooth sub-update interpolation
+    for (const band of Object.keys(this._smoothedBands)) {
+      const target = eegBands?.[band] ?? 0
+      this._smoothedBands[band] += EEG_LERP_RATE * (target - this._smoothedBands[band])
+    }
+
     const sources = {
       none:  0,
-      delta: eegBands?.delta ?? 0,
-      theta: eegBands?.theta ?? 0,
-      alpha: eegBands?.alpha ?? 0,
-      beta:  eegBands?.beta  ?? 0,
-      gamma: eegBands?.gamma ?? 0,
+      delta: this._smoothedBands.delta,
+      theta: this._smoothedBands.theta,
+      alpha: this._smoothedBands.alpha,
+      beta:  this._smoothedBands.beta,
+      gamma: this._smoothedBands.gamma,
       hr:    heartPulse,
     }
 

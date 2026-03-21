@@ -62,9 +62,28 @@ const AP_SMOOTH                 = 0.3  // EMA coefficient for incremental model 
 // Ensures the model has converged before values reach the shaders.
 const AP_MIN_REFITS = 3
 
+// EMA smoothing on final bandPower output (~2 Hz update rate).
+// Lower = smoother (longer settling), higher = faster tracking.
+// 0.35 at 2 Hz ≈ 1.5 s settling time — matches perceptual EEG state timescale.
+const BAND_SMOOTH = 0.35
+
 // Display ring-buffer lengths
 const EEG_DISPLAY_LEN = 256 * 4    // 4 s of raw EEG at 256 Hz
 const IMU_DISPLAY_LEN = 52 * 4     // 4 s of IMU at ~52 Hz
+
+// Spectrogram (Hann-windowed DFT, quality-weighted channel average)
+const SPEC_BINS        = 50        // frequency bins 1–50 Hz (1 Hz/bin at 256 Hz / 256 samples)
+const SPEC_COLS        = 280       // rolling history columns (matches canvas pixel width)
+const SPEC_ARTIFACT_UV   = 150     // ±µV per-sample artifact threshold
+const SPEC_ARTIFACT_FRAC = 0.1    // reject window if >10% of samples exceed threshold
+
+// High-resolution low-frequency spectrogram (0.5–8.0 Hz at 0.1 Hz resolution)
+// Requires a 2560-sample (10 s) buffer: Δf = Fs/N = 256/2560 = 0.1 Hz
+const SPEC_LO_BUF_SIZE = 2560
+const SPEC_LO_MIN_HZ   = 0.5
+const SPEC_LO_MAX_HZ   = 8.0
+const SPEC_LO_STEP_HZ  = 0.1
+const SPEC_LO_NUM_BINS  = Math.round((SPEC_LO_MAX_HZ - SPEC_LO_MIN_HZ) / SPEC_LO_STEP_HZ) + 1  // 76
 
 // Signal quality RMS thresholds (µV, after mean subtraction)
 const SQ_WIN  = 256   // samples per RMS window
@@ -168,7 +187,7 @@ export default class EEGManager {
   // calculation. Bands absent from the Set are zeroed in bandPower output, so they
   // cannot dominate the normalisation even when unmapped in the visualiser.
   // Updated by ReactiveParticles whenever the MAPPING GUI sources change.
-  normalizeBands = new Set(['delta', 'theta', 'alpha', 'beta', 'gamma'])
+  normalizeBands = new Set(['theta', 'alpha', 'beta', 'gamma'])
 
   // ── Configurable channel-quality aggregation ──────────────────────────────
   // badChannelThreshold: quality level at or below which a channel is a drop candidate.
@@ -187,9 +206,10 @@ export default class EEGManager {
   signalQuality = ['poor', 'poor', 'poor', 'poor'] // per EEG channel
 
   // Monotonically increasing sample counters — never reset by the rolling window
-  eegSampleCount  = 0
-  ppgSampleCount  = 0
-  imuSampleCount  = 0
+  eegSampleCount      = 0
+  ppgSampleCount      = 0
+  imuSampleCount      = 0
+  spectrumSampleCount = 0
 
   // ── Private ─────────────────────────────────────────────────────────────────
   _client    = null
@@ -228,6 +248,15 @@ export default class EEGManager {
   // Signal quality update counter
   _sqSampleCount = 0
 
+  // Spectrogram — rolling columns of log₁₀(power) for display
+  _specDisplay = []
+
+  // Hi-res low-frequency spectrogram (0.5–8.0 Hz, 0.1 Hz resolution)
+  _chBuffersLong  = [[], [], [], []]   // 2560-sample rolling buffers per channel
+  _dftLoKernels   = null               // Hann-weighted twiddle factors for lo-freq bins
+  _specLoDisplay  = []
+  spectrumLoSampleCount = 0
+
   // ── Constructor ───────────────────────────────────────────────────────────
 
   constructor() {
@@ -238,6 +267,12 @@ export default class EEGManager {
 
   /** Filtered PPG waveform for display — same rolling buffer used by MSPTD. */
   get ppgDisplay() { return this._ppgBuffer }
+
+  /** Rolling spectrogram columns (Float32Array[SPEC_BINS] each, log₁₀ power). */
+  get spectrumDisplay() { return this._specDisplay }
+
+  /** Hi-res low-freq spectrogram columns (Float32Array[SPEC_LO_NUM_BINS], log₁₀ power, 0.5–8 Hz @ 0.1 Hz). */
+  get spectrumLoDisplay() { return this._specLoDisplay }
 
   /**
    * Connect to a Muse headset via Web Bluetooth and start streaming.
@@ -339,9 +374,14 @@ export default class EEGManager {
     this.accelDisplay  = { x: [], y: [], z: [] }
     this.gyroDisplay   = { x: [], y: [], z: [] }
     this.signalQuality = ['poor', 'poor', 'poor', 'poor']
-    this.eegSampleCount = 0
-    this.ppgSampleCount = 0
-    this.imuSampleCount = 0
+    this.eegSampleCount      = 0
+    this.ppgSampleCount      = 0
+    this.imuSampleCount      = 0
+    this.spectrumSampleCount = 0
+    this._specDisplay = []
+    this._chBuffersLong = [[], [], [], []]
+    this._specLoDisplay = []
+    this.spectrumLoSampleCount = 0
   }
 
   _handleDisconnect() {
@@ -367,6 +407,10 @@ export default class EEGManager {
       // Rolling analysis buffer — push new sample, drop oldest if full
       this._chBuffers[ch].push(val)
       if (this._chBuffers[ch].length > EEG_BUF_SIZE) this._chBuffers[ch].shift()
+
+      // Long buffer for hi-res low-frequency spectrogram (10 s window)
+      this._chBuffersLong[ch].push(val)
+      if (this._chBuffersLong[ch].length > SPEC_LO_BUF_SIZE) this._chBuffersLong[ch].shift()
     }
 
     // Update signal quality ~4× per second (every 64 samples at 256 Hz)
@@ -438,7 +482,15 @@ export default class EEGManager {
 
     // Step 4: aperiodic normalisation → relative power (sum=1)
     const result = this._apNormalize(raw)
-    this.bandPower = result
+
+    // Step 4b: EMA smooth to avoid staircase jumps between ~2 Hz analysis windows
+    for (const band of Object.keys(result)) {
+      this.bandPower[band] += BAND_SMOOTH * (result[band] - this.bandPower[band])
+    }
+
+    // Step 5: spectrogram columns (uses same channel weights)
+    this._computeSpectrum(weights, totalW)
+    this._computeSpectrumLo(weights, totalW)
 
     this._debugLog(raw, result, weights)
   }
@@ -668,6 +720,111 @@ export default class EEGManager {
   }
 
   /**
+   * Compute a quality-weighted Hann-DFT spectrogram column (bins 1–50 Hz).
+   * Stores log₁₀(power) in a rolling buffer for BioDataDisplay rendering.
+   * Windows where any retained channel exceeds ±SPEC_ARTIFACT_UV are rejected.
+   *
+   * @param {number[]} weights — normalised channel weights
+   * @param {number}   totalW  — sum of weights
+   */
+  _computeSpectrum(weights, totalW) {
+    if (totalW === 0) return
+
+    // Artifact rejection: if >SPEC_ARTIFACT_FRAC of samples on any retained
+    // channel exceed the threshold, push a null sentinel so the display still
+    // advances at the same rate but renders the column as dark gray.
+    const maxBad = Math.floor(EEG_BUF_SIZE * SPEC_ARTIFACT_FRAC)
+    let artifact = false
+    for (let ch = 0; ch < 4; ch++) {
+      if (weights[ch] === 0) continue
+      const buf = this._chBuffers[ch]
+      let bad = 0
+      for (let n = 0; n < buf.length; n++) {
+        if (Math.abs(buf[n]) > SPEC_ARTIFACT_UV && ++bad > maxBad) { artifact = true; break }
+      }
+      if (artifact) break
+    }
+    if (artifact) {
+      this._specDisplay.push(null)
+      if (this._specDisplay.length > SPEC_COLS) this._specDisplay.shift()
+      this.spectrumSampleCount++
+      return
+    }
+
+    const spectrum = new Float32Array(SPEC_BINS)
+    for (let k = 1; k <= SPEC_BINS; k++) {
+      const { re: reK, im: imK } = this._dftKernels[k]
+      let power = 0
+      for (let ch = 0; ch < 4; ch++) {
+        if (weights[ch] === 0) continue
+        const sig = this._chBuffers[ch]
+        let r = 0, m = 0
+        for (let n = 0; n < EEG_BUF_SIZE; n++) {
+          r += reK[n] * sig[n]
+          m += imK[n] * sig[n]
+        }
+        power += (r * r + m * m) * weights[ch]
+      }
+      spectrum[k - 1] = Math.log10(power / totalW + 1e-10)
+    }
+
+    this._specDisplay.push(spectrum)
+    if (this._specDisplay.length > SPEC_COLS) this._specDisplay.shift()
+    this.spectrumSampleCount++
+  }
+
+  /**
+   * Hi-res low-frequency spectrogram (0.5–8.0 Hz at 0.1 Hz resolution).
+   * Uses the 2560-sample (10 s) long buffer for true sub-Hz frequency resolution.
+   * Same artifact rejection and quality-weighted averaging as the main spectrogram.
+   */
+  _computeSpectrumLo(weights, totalW) {
+    if (totalW === 0) return
+    const N = SPEC_LO_BUF_SIZE
+    if (this._chBuffersLong[0].length < N) return   // need full 10 s window
+
+    // Artifact rejection on long buffer — push null sentinel to keep display rate steady
+    const maxBad = Math.floor(N * SPEC_ARTIFACT_FRAC)
+    let artifact = false
+    for (let ch = 0; ch < 4; ch++) {
+      if (weights[ch] === 0) continue
+      const buf = this._chBuffersLong[ch]
+      let bad = 0
+      for (let n = 0; n < N; n++) {
+        if (Math.abs(buf[n]) > SPEC_ARTIFACT_UV && ++bad > maxBad) { artifact = true; break }
+      }
+      if (artifact) break
+    }
+    if (artifact) {
+      this._specLoDisplay.push(null)
+      if (this._specLoDisplay.length > SPEC_COLS) this._specLoDisplay.shift()
+      this.spectrumLoSampleCount++
+      return
+    }
+
+    const spectrum = new Float32Array(SPEC_LO_NUM_BINS)
+    for (let k = 0; k < SPEC_LO_NUM_BINS; k++) {
+      const { re: reK, im: imK } = this._dftLoKernels[k]
+      let power = 0
+      for (let ch = 0; ch < 4; ch++) {
+        if (weights[ch] === 0) continue
+        const sig = this._chBuffersLong[ch]
+        let r = 0, m = 0
+        for (let n = 0; n < N; n++) {
+          r += reK[n] * sig[n]
+          m += imK[n] * sig[n]
+        }
+        power += (r * r + m * m) * weights[ch]
+      }
+      spectrum[k] = Math.log10(power / totalW + 1e-10)
+    }
+
+    this._specLoDisplay.push(spectrum)
+    if (this._specLoDisplay.length > SPEC_COLS) this._specLoDisplay.shift()
+    this.spectrumLoSampleCount++
+  }
+
+  /**
    * Ordinary-least-squares linear regression: y = a + b·x.
    * @param {number[]} xs
    * @param {number[]} ys
@@ -725,18 +882,41 @@ export default class EEGManager {
       this._wavelets[band] = { re, im, halfWin }
     }
 
-    // ── Hann-weighted DFT twiddle factors for delta bins ──────────────────
+    // ── Hann-weighted DFT twiddle factors (bins 1–SPEC_BINS) ──────────────
+    // Bins 1–3 used for delta band power; full range 1–SPEC_BINS used for spectrogram.
     this._dftKernels = {}
-    for (const k of DFT_BINS) {
+    const hann = new Float32Array(N)
+    for (let n = 0; n < N; n++) {
+      hann[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1))
+    }
+    for (let k = 1; k <= SPEC_BINS; k++) {
       const reK = new Float32Array(N)
       const imK = new Float32Array(N)
       for (let n = 0; n < N; n++) {
-        const hann  = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1))
         const angle = (2 * Math.PI * k * n) / N
-        reK[n] = hann * Math.cos(angle)
-        imK[n] = hann * Math.sin(angle)
+        reK[n] = hann[n] * Math.cos(angle)
+        imK[n] = hann[n] * Math.sin(angle)
       }
       this._dftKernels[k] = { re: reK, im: imK }
+    }
+
+    // ── Hi-res lo-freq DFT twiddle factors (0.5–8.0 Hz, 0.1 Hz steps, N=2560) ─
+    const NLo = SPEC_LO_BUF_SIZE
+    const hannLo = new Float32Array(NLo)
+    for (let n = 0; n < NLo; n++) {
+      hannLo[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (NLo - 1))
+    }
+    this._dftLoKernels = new Array(SPEC_LO_NUM_BINS)
+    for (let k = 0; k < SPEC_LO_NUM_BINS; k++) {
+      const fHz = SPEC_LO_MIN_HZ + k * SPEC_LO_STEP_HZ
+      const reK = new Float32Array(NLo)
+      const imK = new Float32Array(NLo)
+      for (let n = 0; n < NLo; n++) {
+        const angle = (2 * Math.PI * fHz * n) / EEG_FS
+        reK[n] = hannLo[n] * Math.cos(angle)
+        imK[n] = hannLo[n] * Math.sin(angle)
+      }
+      this._dftLoKernels[k] = { re: reK, im: imK }
     }
   }
 

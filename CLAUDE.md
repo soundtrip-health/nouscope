@@ -73,7 +73,8 @@ EEG uses **multiplicative** scaling: `uniform *= (1 + source * weight)`. This me
 
 ### EEGManager — Signal Processing
 
-- **EEG bands**: rolling 256-sample buffer, Hann window + DFT (1 Hz bins, 1–50 Hz). Outputs normalized `bandPower { delta, theta, alpha, beta, gamma }` (relative power, sum = 1).
+- **EEG bands**: rolling 256-sample buffer, Hann window + DFT (1 Hz bins, 1–50 Hz). Outputs normalized `bandPower { delta, theta, alpha, beta, gamma }` (relative power, sum = 1). Three-layer temporal smoothing: source EMA (`BAND_SMOOTH=0.35`, ~1.5 s settling) in EEGManager prevents staircase jumps; per-frame lerp (`EEG_LERP_RATE=0.06`) in ReactiveParticles interpolates between ~2 Hz updates for smooth 60 fps visuals; display lerp (`BAND_LERP=0.08`) in BioDataDisplay smooths the diagnostic band plot.
+- **Spectrogram**: Hann-windowed DFT at bins 1–50 Hz, quality-weighted channel average, percentage-based artifact rejection (±150 µV threshold, reject window if >10% of samples exceed on any retained channel). Produces rolling `spectrumDisplay` buffer of log₁₀(power) columns + `spectrumSampleCount` counter. Twiddle factors for all 50 bins precomputed at construction time (shared with delta band DFT for bins 1–3).
 - **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape).
 - **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians. Gyroscope also subscribed.
 - `enablePpg = true` must be set on `MuseClient` before `connect()` — already handled in `EEGManager.connect()`.
@@ -84,6 +85,7 @@ EEG uses **multiplicative** scaling: `uniform *= (1 + source * weight)`. This me
 
 - Toggle button `◉` appears in `#eeg-controls` once EEG connects; opens `#bio-panel` above controls.
 - Three `WebglLineRoll` plots (webgl-plot library): EEG 4-channel stacked, PPG single trace (auto-scaled), IMU accel+gyro 6 lines.
+- **Spectrogram**: Two 2D `<canvas>` heatmaps with viridis colormap on log₁₀ power, auto-scaled. Full spectrogram (`#spec-canvas`, 280×86 px): bins 8–50 Hz, 2 px/bin. Delta/theta zoom (`#spec-lo-canvas`, 280×48 px): bins 1–8 Hz, 6 px/bin. Both use 2 px column width; scrolling via `drawImage(canvas, -2, 0)` shift. Frequency axis labels alongside each canvas. Sit between EEG raw traces and EEG Bands.
 - Signal quality shown as colored dots (green/yellow/red) per EEG channel.
 - Panel and toggle hidden when EEG is disconnected.
 
