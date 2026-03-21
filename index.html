@@ -100,7 +100,13 @@
         </div>
       </div>
       <div class="eeg-controls" id="eeg-controls">
-        <span class="eeg-status" id="eeg-status"></span>
+        <span class="eeg-battery" id="eeg-status" title="Battery">
+          <svg class="battery-icon" viewBox="0 0 10 22" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect class="battery-cap" x="3" y="0" width="4" height="2" rx="1" ry="1"/>
+            <rect class="battery-body" x="0.5" y="2.5" width="9" height="19" rx="2" ry="2"/>
+            <rect class="battery-fill" x="1.5" y="21" width="7" height="0" rx="1" ry="1"/>
+          </svg>
+        </span>
         <button id="eeg-connect">Connect EEG</button>
         <span class="heart-rate-display" id="heart-rate"></span>
         <button class="bio-toggle" id="bio-toggle" hidden title="Click to show/hide raw bio data">◉</button>

@@ -179,6 +179,8 @@ export default class EEGManager {
   heartPulse  = 0                // 0–1 oscillator synced to heartRate
   headPose    = { pitch: 0, roll: 0 }  // radians from accelerometer
 
+  batteryLevel   = null          // 0–100 (%) or null when disconnected
+  onBatteryLevel = null          // optional callback(level)
   onDisconnected = null          // optional callback
   debug          = false         // set true to log pipeline internals each analysis window
 
@@ -212,11 +214,12 @@ export default class EEGManager {
   spectrumSampleCount = 0
 
   // ── Private ─────────────────────────────────────────────────────────────────
-  _client    = null
-  _eegSub    = null
-  _ppgSub    = null
-  _accelSub  = null
-  _gyroSub   = null
+  _client      = null
+  _eegSub      = null
+  _ppgSub      = null
+  _accelSub    = null
+  _gyroSub     = null
+  _telemetrySub = null
 
   // EEG — per-channel rolling analysis buffers (EEG_BUF_SIZE samples each)
   _chBuffers    = [[], [], [], []]
@@ -312,6 +315,12 @@ export default class EEGManager {
       this._processGyro(gyro.samples)
     })
 
+    // Battery level from telemetry (updates every ~10 s)
+    this._telemetrySub = this._client.telemetryData.subscribe((t) => {
+      this.batteryLevel = Math.round(t.batteryLevel)
+      this.onBatteryLevel?.(this.batteryLevel)
+    })
+
     // Detect hardware-initiated disconnects
     this._client.connectionStatus.subscribe((connected) => {
       if (!connected && this.isConnected) this._handleDisconnect()
@@ -327,6 +336,7 @@ export default class EEGManager {
     this._ppgSub?.unsubscribe()
     this._accelSub?.unsubscribe()
     this._gyroSub?.unsubscribe()
+    this._telemetrySub?.unsubscribe()
     this._client?.disconnect()
     this._handleDisconnect()
   }
@@ -386,6 +396,7 @@ export default class EEGManager {
 
   _handleDisconnect() {
     this.isConnected = false
+    this.batteryLevel = null
     this._resetState()
     this.onDisconnected?.()
   }
