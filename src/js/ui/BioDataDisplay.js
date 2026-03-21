@@ -56,8 +56,12 @@ const SPEC_START_IDX   = SPEC_START_BIN - 1              // array index for SPEC
 const SPEC_DISPLAY_BINS = SPEC_BINS - SPEC_START_IDX     // bins shown: 8–50 Hz = 43
 const SPEC_PX_PER_BIN  = 2     // vertical pixels per frequency bin
 const SPEC_COL_WIDTH   = 2     // horizontal pixels per time column (scroll speed)
-const SPEC_SCALE_DECAY = 0.995   // running max/min decay per column
+const SPEC_SCALE_DECAY = 0.995   // running floor decay per column (keeps noise floor from anchoring)
 const SPEC_MIN_RANGE   = 2      // minimum log₁₀ dynamic range
+const SPEC_SCALE_WIN   = 30     // columns in sliding window for robust ceiling (~15 s at 2 Hz)
+const SPEC_SCALE_PCT   = 0.9    // percentile of window used as scale ceiling
+// log₁₀ cap ≈ 200 µV amplitude (Hann-DFT power ≈ A² × N²/16; log₁₀(200² × 4096) ≈ 8.2)
+const SPEC_LOG_CAP     = 8.2
 
 // Low-end spectrogram (0.5–8.0 Hz at 0.1 Hz resolution, hi-res entrainment view)
 const SPEC_LO_BINS       = 76  // 0.5–8.0 Hz at 0.1 Hz steps
@@ -125,10 +129,10 @@ export default class BioDataDisplay {
 
   _specReadIdx   = 0
   _specLoReadIdx = 0
-  _specLo      = 0            // running low end of log₁₀ power scale (full)
-  _specHi      = 4            // running high end (full)
-  _specLoLo    = 0            // running low end for low-freq view
-  _specLoHi    = 4            // running high end for low-freq view
+  _specLo      = 0            // running floor of log₁₀ power scale (full); decays upward slowly
+  _specHiWin   = []           // sliding window of per-column max for percentile ceiling (full)
+  _specLoLo    = 0            // running floor for low-freq view
+  _specLoHiWin = []           // sliding window of per-column max for percentile ceiling (lo-freq)
 
   /**
    * Create WebGL contexts and rolling-line plots for all three canvases.
@@ -195,9 +199,9 @@ export default class BioDataDisplay {
     this._specReadIdx   = mgr.spectrumSampleCount
     this._specLoReadIdx = mgr.spectrumLoSampleCount
     this._specLo      = 0
-    this._specHi      = 4
+    this._specHiWin   = []
     this._specLoLo    = 0
-    this._specLoHi    = 4
+    this._specLoHiWin = []
   }
 
   /** Call each animation frame (only when panel is visible). */
@@ -252,43 +256,40 @@ export default class BioDataDisplay {
 
       const imgData = this._specCtx.createImageData(SPEC_COL_WIDTH, H)
 
-      if (col === null) {
-        // Artifact column — fill with dark gray, alpha=255
-        imgData.data.fill(0)
-        for (let i = 0; i < imgData.data.length; i += 4) {
-          imgData.data[i]     = 40
-          imgData.data[i + 1] = 40
-          imgData.data[i + 2] = 40
-          imgData.data[i + 3] = 255
+      // Auto-scale: 90th-percentile window for ceiling (artifact-robust), running min+decay for floor
+      let colMax = -Infinity
+      for (let i = SPEC_START_IDX; i < SPEC_BINS; i++) {
+        if (col[i] > -9) {   // skip near-zero padding
+          if (col[i] > colMax) colMax = col[i]
+          if (col[i] < this._specLo) this._specLo = col[i]
         }
-      } else {
-        // Auto-scale over displayed bins only (8–50 Hz)
-        for (let i = SPEC_START_IDX; i < SPEC_BINS; i++) {
-          if (col[i] > -9) {   // skip near-zero padding
-            if (col[i] > this._specHi) this._specHi = col[i]
-            if (col[i] < this._specLo) this._specLo = col[i]
-          }
-        }
-        this._specHi -= (1 - SPEC_SCALE_DECAY)
-        this._specLo += (1 - SPEC_SCALE_DECAY)
+      }
+      if (colMax > -Infinity) {
+        this._specHiWin.push(Math.min(colMax, SPEC_LOG_CAP))
+        if (this._specHiWin.length > SPEC_SCALE_WIN) this._specHiWin.shift()
+      }
+      this._specLo += (1 - SPEC_SCALE_DECAY)
 
-        const range = Math.max(this._specHi - this._specLo, SPEC_MIN_RANGE)
+      const sorted = this._specHiWin.slice().sort((a, b) => a - b)
+      const specHi = sorted.length
+        ? sorted[Math.max(0, Math.floor((sorted.length - 1) * SPEC_SCALE_PCT))]
+        : this._specLo + SPEC_MIN_RANGE
+      const range = Math.max(specHi - this._specLo, SPEC_MIN_RANGE)
 
-        // Draw new column at right edge — each bin spans SPEC_PX_PER_BIN rows
-        for (let i = SPEC_START_IDX; i < SPEC_BINS; i++) {
-          const norm = (col[i] - this._specLo) / range
-          const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
-          const [r, g, b] = VIRIDIS_LUT[idx]
-          const binInDisplay = i - SPEC_START_IDX
-          for (let p = 0; p < SPEC_PX_PER_BIN; p++) {
-            const y = H - 1 - (binInDisplay * SPEC_PX_PER_BIN + p)
-            for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
-              const off = (y * SPEC_COL_WIDTH + cx) * 4
-              imgData.data[off]     = r
-              imgData.data[off + 1] = g
-              imgData.data[off + 2] = b
-              imgData.data[off + 3] = 255
-            }
+      // Draw new column at right edge — each bin spans SPEC_PX_PER_BIN rows
+      for (let i = SPEC_START_IDX; i < SPEC_BINS; i++) {
+        const norm = (col[i] - this._specLo) / range
+        const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
+        const [r, g, b] = VIRIDIS_LUT[idx]
+        const binInDisplay = i - SPEC_START_IDX
+        for (let p = 0; p < SPEC_PX_PER_BIN; p++) {
+          const y = H - 1 - (binInDisplay * SPEC_PX_PER_BIN + p)
+          for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
+            const off = (y * SPEC_COL_WIDTH + cx) * 4
+            imgData.data[off]     = r
+            imgData.data[off + 1] = g
+            imgData.data[off + 2] = b
+            imgData.data[off + 3] = 255
           }
         }
       }
@@ -316,40 +317,38 @@ export default class BioDataDisplay {
 
       const imgData = this._specLoCtx.createImageData(SPEC_COL_WIDTH, H)
 
-      if (col === null) {
-        // Artifact column — fill with dark gray
-        for (let i = 0; i < imgData.data.length; i += 4) {
-          imgData.data[i]     = 40
-          imgData.data[i + 1] = 40
-          imgData.data[i + 2] = 40
-          imgData.data[i + 3] = 255
+      // Auto-scale: 90th-percentile window for ceiling (artifact-robust), running min+decay for floor
+      let colMax = -Infinity
+      for (let i = 0; i < SPEC_LO_BINS; i++) {
+        if (col[i] > -9) {
+          if (col[i] > colMax) colMax = col[i]
+          if (col[i] < this._specLoLo) this._specLoLo = col[i]
         }
-      } else {
-        // Auto-scale over all lo-freq bins (0.5–8.0 Hz)
-        for (let i = 0; i < SPEC_LO_BINS; i++) {
-          if (col[i] > -9) {
-            if (col[i] > this._specLoHi) this._specLoHi = col[i]
-            if (col[i] < this._specLoLo) this._specLoLo = col[i]
-          }
-        }
-        this._specLoHi -= (1 - SPEC_SCALE_DECAY)
-        this._specLoLo += (1 - SPEC_SCALE_DECAY)
+      }
+      if (colMax > -Infinity) {
+        this._specLoHiWin.push(Math.min(colMax, SPEC_LOG_CAP))
+        if (this._specLoHiWin.length > SPEC_SCALE_WIN) this._specLoHiWin.shift()
+      }
+      this._specLoLo += (1 - SPEC_SCALE_DECAY)
 
-        const range = Math.max(this._specLoHi - this._specLoLo, SPEC_MIN_RANGE)
+      const sortedLo = this._specLoHiWin.slice().sort((a, b) => a - b)
+      const specLoHi = sortedLo.length
+        ? sortedLo[Math.max(0, Math.floor((sortedLo.length - 1) * SPEC_SCALE_PCT))]
+        : this._specLoLo + SPEC_MIN_RANGE
+      const range = Math.max(specLoHi - this._specLoLo, SPEC_MIN_RANGE)
 
-        // Draw new column at right edge — 1 pixel per bin
-        for (let i = 0; i < SPEC_LO_BINS; i++) {
-          const norm = (col[i] - this._specLoLo) / range
-          const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
-          const [r, g, b] = VIRIDIS_LUT[idx]
-          const y = H - 1 - i
-          for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
-            const off = (y * SPEC_COL_WIDTH + cx) * 4
-            imgData.data[off]     = r
-            imgData.data[off + 1] = g
-            imgData.data[off + 2] = b
-            imgData.data[off + 3] = 255
-          }
+      // Draw new column at right edge — 1 pixel per bin
+      for (let i = 0; i < SPEC_LO_BINS; i++) {
+        const norm = (col[i] - this._specLoLo) / range
+        const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
+        const [r, g, b] = VIRIDIS_LUT[idx]
+        const y = H - 1 - i
+        for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
+          const off = (y * SPEC_COL_WIDTH + cx) * 4
+          imgData.data[off]     = r
+          imgData.data[off + 1] = g
+          imgData.data[off + 2] = b
+          imgData.data[off + 3] = 255
         }
       }
 

@@ -506,23 +506,17 @@ Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) for all 50 bins are precomp
 
 Per-bin power is averaged across EEG channels using the same quality weights as band power (Section 3, Stage 3). Dropped channels (weight = 0) are skipped entirely.
 
-### Stage 3 — Artifact rejection
-
-Each retained channel's 256-sample buffer is scanned for samples exceeding ±150 µV. If more than 10% of samples on any single retained channel exceed this threshold, the entire window is rejected and no spectrogram column is emitted. The percentage-based approach prevents occasional blink spikes from blanking the spectrogram while still rejecting windows dominated by sustained movement artifacts.
-
-Rejected windows simply hold the previous column on-screen (the display does not advance), producing a momentary pause in the scrolling heatmap rather than a visible artifact stripe.
-
-### Stage 4 — Log power & display buffer
+### Stage 3 — Log power & display buffer
 
 Power values are stored as `log₁₀(power + 1e-10)` in a rolling buffer of `Float32Array(50)` columns (up to 280 columns ≈ 140 s of history). A monotonic `spectrumSampleCount` counter enables the same read-index pattern used by the other display buffers.
 
-The hi-res low-frequency spectrogram uses a separate 2560-sample (10 s) per-channel rolling buffer and its own set of 76 Hann-weighted DFT twiddle factors (0.5–8.0 Hz at 0.1 Hz steps). It stores `Float32Array(76)` columns in `_specLoDisplay` with its own `spectrumLoSampleCount` counter. The same artifact rejection and quality-weighted averaging apply. ~1.2 MB of precomputed kernels (76 bins × 2560 samples × 2 components × 4 bytes).
+The hi-res low-frequency spectrogram uses a separate 2560-sample (10 s) per-channel rolling buffer and its own set of 76 Hann-weighted DFT twiddle factors (0.5–8.0 Hz at 0.1 Hz steps). It stores `Float32Array(76)` columns in `_specLoDisplay` with its own `spectrumLoSampleCount` counter. Quality-weighted averaging applies. ~1.2 MB of precomputed kernels (76 bins × 2560 samples × 2 components × 4 bytes).
 
-### Stage 5 — Heatmap rendering (BioDataDisplay)
+### Stage 4 — Heatmap rendering (BioDataDisplay)
 
 The two panels use separate data buffers and plain 2D `<canvas>` (not WebGL) with a column-shift approach since the update rate is low (~2 Hz):
 
-1. **Auto-scale:** Running min/max of log₁₀ power expand immediately on new extremes and contract slowly (decay 0.995 per column), with a minimum dynamic range of 2 decades. Each panel maintains its own scale to optimise contrast for its frequency range.
+1. **Auto-scale:** Robust ceiling via a 30-column sliding window of per-column max values; the 90th percentile of the window becomes the scale ceiling. This means a single artifact spike influences at most ~10% of the window and is naturally ejected after ~15 s. The ceiling is additionally capped at `SPEC_LOG_CAP = 8.2` (≈ 200 µV amplitude, derived from Hann-DFT power ≈ A² × N²/16) to prevent headset-removal or other implausible transients from anchoring the scale. The floor tracks the running minimum with a slow upward decay (0.005 per column) so it follows the noise floor and contracts again when signal levels drop. Minimum dynamic range of 2 decades.
 2. **Shift left:** `ctx.drawImage(canvas, -2, 0)` scrolls the existing content two pixels left (column width = 2 px).
 3. **Draw column:** A 2×H `ImageData` is filled using the viridis colormap LUT (256 entries, piecewise-linear from 9 key stops). Frequency axis labels are HTML elements alongside each canvas.
 

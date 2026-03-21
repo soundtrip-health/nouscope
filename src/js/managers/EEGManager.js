@@ -74,8 +74,6 @@ const IMU_DISPLAY_LEN = 52 * 4     // 4 s of IMU at ~52 Hz
 // Spectrogram (Hann-windowed DFT, quality-weighted channel average)
 const SPEC_BINS        = 50        // frequency bins 1–50 Hz (1 Hz/bin at 256 Hz / 256 samples)
 const SPEC_COLS        = 280       // rolling history columns (matches canvas pixel width)
-const SPEC_ARTIFACT_UV   = 150     // ±µV per-sample artifact threshold
-const SPEC_ARTIFACT_FRAC = 0.1    // reject window if >10% of samples exceed threshold
 
 // High-resolution low-frequency spectrogram (0.5–8.0 Hz at 0.1 Hz resolution)
 // Requires a 2560-sample (10 s) buffer: Δf = Fs/N = 256/2560 = 0.1 Hz
@@ -733,34 +731,13 @@ export default class EEGManager {
   /**
    * Compute a quality-weighted Hann-DFT spectrogram column (bins 1–50 Hz).
    * Stores log₁₀(power) in a rolling buffer for BioDataDisplay rendering.
-   * Windows where any retained channel exceeds ±SPEC_ARTIFACT_UV are rejected.
+   * Artifact-robust auto-scaling is handled in BioDataDisplay (percentile window + cap).
    *
    * @param {number[]} weights — normalised channel weights
    * @param {number}   totalW  — sum of weights
    */
   _computeSpectrum(weights, totalW) {
     if (totalW === 0) return
-
-    // Artifact rejection: if >SPEC_ARTIFACT_FRAC of samples on any retained
-    // channel exceed the threshold, push a null sentinel so the display still
-    // advances at the same rate but renders the column as dark gray.
-    const maxBad = Math.floor(EEG_BUF_SIZE * SPEC_ARTIFACT_FRAC)
-    let artifact = false
-    for (let ch = 0; ch < 4; ch++) {
-      if (weights[ch] === 0) continue
-      const buf = this._chBuffers[ch]
-      let bad = 0
-      for (let n = 0; n < buf.length; n++) {
-        if (Math.abs(buf[n]) > SPEC_ARTIFACT_UV && ++bad > maxBad) { artifact = true; break }
-      }
-      if (artifact) break
-    }
-    if (artifact) {
-      this._specDisplay.push(null)
-      if (this._specDisplay.length > SPEC_COLS) this._specDisplay.shift()
-      this.spectrumSampleCount++
-      return
-    }
 
     const spectrum = new Float32Array(SPEC_BINS)
     for (let k = 1; k <= SPEC_BINS; k++) {
@@ -787,31 +764,12 @@ export default class EEGManager {
   /**
    * Hi-res low-frequency spectrogram (0.5–8.0 Hz at 0.1 Hz resolution).
    * Uses the 2560-sample (10 s) long buffer for true sub-Hz frequency resolution.
-   * Same artifact rejection and quality-weighted averaging as the main spectrogram.
+   * Artifact-robust auto-scaling is handled in BioDataDisplay (percentile window + cap).
    */
   _computeSpectrumLo(weights, totalW) {
     if (totalW === 0) return
     const N = SPEC_LO_BUF_SIZE
     if (this._chBuffersLong[0].length < N) return   // need full 10 s window
-
-    // Artifact rejection on long buffer — push null sentinel to keep display rate steady
-    const maxBad = Math.floor(N * SPEC_ARTIFACT_FRAC)
-    let artifact = false
-    for (let ch = 0; ch < 4; ch++) {
-      if (weights[ch] === 0) continue
-      const buf = this._chBuffersLong[ch]
-      let bad = 0
-      for (let n = 0; n < N; n++) {
-        if (Math.abs(buf[n]) > SPEC_ARTIFACT_UV && ++bad > maxBad) { artifact = true; break }
-      }
-      if (artifact) break
-    }
-    if (artifact) {
-      this._specLoDisplay.push(null)
-      if (this._specLoDisplay.length > SPEC_COLS) this._specLoDisplay.shift()
-      this.spectrumLoSampleCount++
-      return
-    }
 
     const spectrum = new Float32Array(SPEC_LO_NUM_BINS)
     for (let k = 0; k < SPEC_LO_NUM_BINS; k++) {
