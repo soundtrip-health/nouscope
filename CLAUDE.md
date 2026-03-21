@@ -43,7 +43,7 @@ If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time
 | `src/js/ui/JellyfinBrowser.js` | Modal UI for Jellyfin: login view + library browser with debounced search and Load More pagination |
 | `src/js/entities/ReactiveParticles.js` | Particle geometry (box/cylinder), ShaderMaterial uniforms, GSAP beat reactions, EEG/HR/IMU integration, dat.GUI |
 | `src/js/entities/glsl/vertex.glsl` | Simplex noise + curl force field for particle displacement, amplitude modulation |
-| `src/js/entities/glsl/fragment.glsl` | Circular point shape, distance-based color gradient, heartPulse warm flush |
+| `src/js/entities/glsl/fragment.glsl` | Circular point shape, distance-based color gradient, EEG hue shift (HSV rotation), heartPulse warm flush |
 
 ### Audio → Visual Pipeline
 
@@ -59,14 +59,17 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 | Uniform | Driven by | Visual effect |
 |---------|-----------|---------------|
 | `time` | frame counter (audio-speed scaled) | overall animation speed |
-| `amplitude` | audio `high` + EEG `gamma` | particle displacement intensity |
-| `offsetGain` | audio `mid` + EEG `beta` | turbulence / z-oscillation |
-| `size` | EEG `theta` | base particle size |
-| `maxDistance` | EEG `alpha` | displacement falloff radius |
+| `amplitude` | audio `high` × EEG `gamma` | particle displacement intensity |
+| `offsetGain` | audio `mid` × EEG `beta` | turbulence / z-oscillation |
+| `size` | `BASE_SIZE` × EEG `theta` | base particle size |
+| `maxDistance` | `BASE_MAX_DISTANCE` × EEG `alpha` | displacement falloff radius |
+| `frequency` | GSAP base × EEG `beta` | curl field frequency / chaos |
+| `hueShift` | EEG `gamma` | HSV hue rotation of color palette |
 | `heartPulse` | PPG heart rate oscillator (0–1) | warm reddish color flush per beat |
 | `startColor` / `endColor` | dat.GUI | gradient colors across displacement distance |
 | `offsetSize` | randomized per geometry | point size jitter scale |
-| `frequency` | GSAP-tweened per beat | curl field frequency |
+
+EEG uses **multiplicative** scaling: `uniform *= (1 + source * weight)`. This means EEG modulates audio reactivity rather than adding small offsets — a focused brain amplifies the music's visual effect.
 
 ### EEGManager — Signal Processing
 
@@ -88,7 +91,8 @@ On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) tri
 
 - **PARTICLES**: Start Color, End Color
 - **VISUALIZER**: Auto Mix (geometry swap on beat), Auto Rotate (GSAP rotation on beat), Head Control (IMU) — routes pitch/roll to `holderObjects.rotation`, Reset Cylinder
-- **INFLUENCE**: EEG Strength, HR Strength, IMU Strength (all 0–3×)
+- **AUDIO**: Bass Gain, Mid Gain, High Gain (all 0–2)
+- **MAPPING**: Per-parameter sub-folders (Amplitude, Turbulence, Particle Size, Spread Radius, Field Chaos, Hue Shift, Color Flush) each with Source dropdown + Weight slider
 
 ### Jellyfin Integration
 

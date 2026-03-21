@@ -252,7 +252,7 @@ Both are in radians. At rest (headset upright), pitch ≈ 0 and roll ≈ 0. The 
 
 ### Audio baseline (with per-band gain)
 
-Each audio band has a gain slider (0–2, default 1.0 = original behavior):
+Each audio band has a gain slider (0–2). Mid and high default to 1.0 (= prior tuning); bass defaults to **0.5** for a calmer baseline animation speed.
 
 ```js
 amplitude  = 0.8 + mapLinear(audio.high, 0, 0.6, -0.1, 0.2) * audioGains.high
@@ -266,35 +266,44 @@ maxDistance = BASE_MAX_DISTANCE  (1.8)  // audio has no maxDistance baseline
 `time` is incremented each frame at a rate driven by `audio.low`:
 ```js
 t = mapLinear(audio.low, 0.6, 1.0, 0.2, 0.5)
-time += max(0.1, clamp(t, 0.2, 0.5) * audioGains.bass)
+time += max(0.01, clamp(t, 0.2, 0.5) * audioGains.bass)
 ```
-Higher bass → faster overall animation speed. Floor of 0.1 keeps animation ticking at zero gain.
+Higher bass → faster overall animation speed. Floor of 0.01 keeps animation ticking at low gain.
 
 ### Bio mapping (user-configurable)
 
-Each viz parameter has an independently configurable bio source and weight:
+Each viz parameter has an independently configurable bio source and weight. Most parameters use **multiplicative** scaling so that EEG modulates the audio reactivity rather than simply adding a small offset:
 
 ```js
 sources = { none:0, delta, theta, alpha, beta, gamma, hr: heartPulse }
 
-amplitude   += sources[mapping.amplitude.source]   * mapping.amplitude.weight
-offsetGain  += sources[mapping.offsetGain.source]  * mapping.offsetGain.weight
-size        += sources[mapping.size.source]        * mapping.size.weight
-maxDistance += sources[mapping.maxDistance.source] * mapping.maxDistance.weight
+// Multiplicative — EEG scales the audio-driven baseline
+amplitude  *= (1 + sources[mapping.amplitude.source]  * mapping.amplitude.weight)
+offsetGain *= (1 + sources[mapping.offsetGain.source] * mapping.offsetGain.weight)
+size       *= (1 + sources[mapping.size.source]       * mapping.size.weight)
+maxDistance *= (1 + sources[mapping.maxDistance.source] * mapping.maxDistance.weight)
+frequency   = baseFrequency * (1 + sources[mapping.frequency.source] * mapping.frequency.weight)
+
+// Direct assignment (no audio baseline to multiply)
+hueShift_uniform   = sources[mapping.hueShift.source]   * mapping.hueShift.weight
 heartPulse_uniform = sources[mapping.heartPulse.source] * mapping.heartPulse.weight
 ```
 
-**Default mapping** (preserves the original hardcoded behavior at default weight):
+A focused brain (high gamma/beta) amplifies the music's visual effect; a calm brain softens it. At rest (EEG sources = 0), the multiplier is 1.0 and behavior matches audio-only mode.
 
-| Viz parameter | Default source | Weight range | Default weight | Notes |
-|---------------|---------------|--------------|----------------|-------|
-| Amplitude     | gamma         | 0.0 – 0.6   | 0.3            | High cognition → sharper displacement |
-| Turbulence    | beta          | 0.0 – 1.0   | 0.5            | Focus/alert → more churn |
-| Particle Size | theta         | 0.0 – 4.0   | 2.0            | Drowsy/relaxed → larger particles |
-| Spread Radius | alpha         | 0.0 – 3.6   | 1.8            | Calm/idle → wider spread |
-| Color Flush   | hr            | 0.0 – 2.0   | 1.0            | Heart rate → warm reddish pulse |
+**Default mapping:**
 
-Weight slider: `min` = no contribution, `max` = 2× default effect. Any source can be routed to any parameter — e.g. mapping `hr` to `amplitude` makes particles pulse with each heartbeat, or mapping `alpha` to `heartPulse` flushes color with calm mental states. `delta` is available as a source but has no default mapping.
+| Viz parameter | Default source | Weight range | Default weight | Scaling | Notes |
+|---------------|---------------|--------------|----------------|---------|-------|
+| Amplitude     | gamma         | 0.0 – 1.0   | 0.5            | ×(1+s·w) | Focus → 50% more displacement at full gamma |
+| Turbulence    | beta          | 0.0 – 2.0   | 1.0            | ×(1+s·w) | Alert → doubled turbulence |
+| Particle Size | theta         | 0.0 – 3.0   | 1.5            | ×(1+s·w) | Drowsy → 2.5× larger particles |
+| Spread Radius | alpha         | 0.0 – 2.0   | 1.0            | ×(1+s·w) | Calm → doubled spread |
+| Field Chaos   | beta          | 0.0 – 3.0   | 1.5            | ×(1+s·w) | Alert → 2.5× curl frequency (tighter vortices) |
+| Hue Shift     | gamma         | 0.0 – 0.25  | 0.12           | direct  | Focus → ~43° hue rotation at full gamma |
+| Color Flush   | hr            | 0.0 – 2.0   | 1.0            | direct  | Heart rate → warm reddish pulse |
+
+Weight slider: `min` = no contribution, `max` = full effect. Any source can be routed to any parameter — e.g. mapping `hr` to `amplitude` makes particles pulse with each heartbeat, or mapping `alpha` to `heartPulse` flushes color with calm mental states. `delta` is available as a source but has no default mapping.
 
 ### IMU head control
 
@@ -389,6 +398,16 @@ vec3 color = mix(startColor, endColor, vDistance);
 
 `vDistance` is the normalized displacement magnitude from the vertex shader. Particles near their base geometry position (low displacement) receive `startColor`; maximally displaced particles receive `endColor`. This means the gradient directly encodes how much the particle is being pushed by the curl field at this moment.
 
+### EEG hue shift
+
+```glsl
+vec3 hsv = rgb2hsv(color);
+hsv.x = fract(hsv.x + hueShift);
+color = hsv2rgb(hsv);
+```
+
+The `hueShift` uniform (driven by gamma by default) rotates the entire color palette through HSV hue space. At rest (hueShift = 0), colors are unchanged. At full gamma with default weight (0.12), the palette rotates ~43° — a clearly visible shift toward warmer or cooler tones depending on the user's chosen start/end colors. The `fract()` wraps the hue angle so all values produce valid colors. RGB↔HSV conversion uses the standard Hue-Saturation-Value formulation.
+
 ### Heartbeat warm flush
 
 ```glsl
@@ -420,16 +439,16 @@ On each beat event from `BPMManager`:
 30% chance → geometry reset (destroyMesh → createCylinderMesh)
 ```
 
-Geometry reset also triggers a GSAP tween on the `frequency` uniform:
+Geometry reset also triggers a GSAP tween on the base curl-field frequency:
 ```js
-gsap.to(material.uniforms.frequency, {
+gsap.to(this, {
   duration: bpmDuration * 2,
-  value: randFloat(0.5, 3),
+  _baseFrequency: randFloat(0.5, 3),
   ease: 'expo.easeInOut',
 })
 ```
 
-This gradually shifts the curl field density over two beats, producing smooth visual transitions between coarse and fine-grained flow.
+The actual `frequency` uniform is set each frame as `_baseFrequency * (1 + eegSource * weight)`, so EEG modulates whatever frequency the beat tween is currently interpolating toward. This gradually shifts the curl field density over two beats, producing smooth visual transitions between coarse and fine-grained flow — with EEG adding a real-time layer of chaos on top.
 
 **Rotation tween duration** is randomly either:
 - `15 s` (80% chance) — slow drift, crosses multiple beats

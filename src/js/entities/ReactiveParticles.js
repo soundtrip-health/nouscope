@@ -28,33 +28,37 @@ const BIO_SOURCES = ['none', 'delta', 'theta', 'alpha', 'beta', 'gamma', 'hr']
  *   max     — weight slider right edge (maximum contribution)
  *   default — starting value
  *
- * Formula each frame:  uniform += sources[source] * weight
+ * Most parameters use **multiplicative** scaling:
+ *   uniform *= (1 + sources[source] * weight)
+ * This makes EEG modulate the audio reactivity — a focused brain amplifies
+ * the music's effect, a relaxed brain softens it.
  *
- * EEG bands are zero at rest (no contribution to audio-baseline behavior) and
- * positive when a band is elevated above the user's recent 1/f-corrected baseline.
- * A deviation of 1.0 (2× above rest) with the default weight gives a noticeable
- * but not overwhelming effect. 'hr' retains its 0–1 scale.
+ * Exceptions (direct assignment):
+ *   heartPulse — uniform = sources[source] * weight  (standalone color flush)
+ *   hueShift   — uniform = sources[source] * weight  (hue rotation amount)
  */
 const BIO_RANGE = {
-  amplitude:   { min: 0.0, max: 0.3, default: 0.15 },
-  offsetGain:  { min: 0.0, max: 0.5, default: 0.25 },
-  size:        { min: 0.0, max: 2.0, default: 1.0  },
-  maxDistance: { min: 0.0, max: 1.8, default: 0.9  },
-  heartPulse:  { min: 0.0, max: 2.0, default: 1.0  },  // hr still 0–1
+  amplitude:   { min: 0.0, max: 1.0, default: 0.5  },
+  offsetGain:  { min: 0.0, max: 2.0, default: 1.0  },
+  size:        { min: 0.0, max: 3.0, default: 1.5  },
+  maxDistance:  { min: 0.0, max: 2.0, default: 1.0  },
+  frequency:   { min: 0.0, max: 3.0, default: 1.5  },
+  hueShift:    { min: 0.0, max: 0.25, default: 0.12 },
+  heartPulse:  { min: 0.0, max: 2.0, default: 1.0  },
 }
 
 /**
  * Per-band audio gain ranges.
  *   min     — slider left  (silence the band's contribution)
  *   max     — slider right (2× the default contribution)
- *   default — 1.0 = original hardcoded behavior
+ *   default — mid/high: 1.0 = prior tuning; bass: 0.5 = calmer default speed
  *
  * bass → animation speed (time increment)
  * mid  → turbulence (offsetGain baseline)
  * high → displacement amplitude baseline
  */
 const AUDIO_RANGE = {
-  bass: { min: 0.0, max: 2.0, default: 1.0 },
+  bass: { min: 0.0, max: 2.0, default: 0.5 },
   mid:  { min: 0.0, max: 2.0, default: 1.0 },
   high: { min: 0.0, max: 2.0, default: 1.0 },
 }
@@ -93,14 +97,19 @@ export default class ReactiveParticles extends THREE.Object3D {
     }
 
     // Bio→viz mapping: source selects the input signal; weight scales its contribution.
-    // Defaults preserve the original hardcoded behavior (weight = BIO_RANGE[param].default).
+    // Most use multiplicative scaling (EEG amplifies audio reactivity).
     this.bioMapping = {
       amplitude:   { source: 'gamma', weight: BIO_RANGE.amplitude.default },
       offsetGain:  { source: 'beta',  weight: BIO_RANGE.offsetGain.default },
       size:        { source: 'theta', weight: BIO_RANGE.size.default },
-      maxDistance: { source: 'alpha', weight: BIO_RANGE.maxDistance.default },
+      maxDistance:  { source: 'alpha', weight: BIO_RANGE.maxDistance.default },
+      frequency:   { source: 'beta',  weight: BIO_RANGE.frequency.default },
+      hueShift:    { source: 'gamma', weight: BIO_RANGE.hueShift.default },
       heartPulse:  { source: 'hr',    weight: BIO_RANGE.heartPulse.default },
     }
+
+    // Base curl-field frequency; GSAP tweens this on beat, update() applies EEG multiplier
+    this._baseFrequency = 2
   }
 
   /** Attach to the scene holder, create ShaderMaterial, build initial mesh, add GUI. */
@@ -126,6 +135,7 @@ export default class ReactiveParticles extends THREE.Object3D {
         startColor:  { value: new THREE.Color(this.properties.startColor) },
         endColor:    { value: new THREE.Color(this.properties.endColor) },
         heartPulse:  { value: 0 },
+        hueShift:    { value: 0 },
       },
     })
 
@@ -227,9 +237,9 @@ export default class ReactiveParticles extends THREE.Object3D {
       this.destroyMesh()
       this.createCylinderMesh()
 
-      gsap.to(this.material.uniforms.frequency, {
+      gsap.to(this, {
         duration: App.bpmManager ? (App.bpmManager.getBPMDuration() / 1000) * 2 : 2,
-        value: THREE.MathUtils.randFloat(0.5, 3),
+        _baseFrequency: THREE.MathUtils.randFloat(0.5, 3),
         ease: 'expo.easeInOut',
       })
     }
@@ -254,7 +264,6 @@ export default class ReactiveParticles extends THREE.Object3D {
    * @param {object|null} headPose  — { pitch, roll } in radians, or null
    */
   update(eegBands = null, heartPulse = 0, headPose = null) {
-    // Build bio source lookup once; used in both the audio and heartPulse paths below
     const sources = {
       none:  0,
       delta: eegBands?.delta ?? 0,
@@ -265,34 +274,46 @@ export default class ReactiveParticles extends THREE.Object3D {
       hr:    heartPulse,
     }
 
+    let amplitude, offsetGain, size, maxDistance
+
     if (App.audioManager?.isPlaying) {
-      // Audio baseline — audioGains scale each band's contribution (0 = none, 1 = default, 2 = double)
-      let amplitude   = 0.8 + THREE.MathUtils.mapLinear(App.audioManager.frequencyData.high, 0, 0.6, -0.1, 0.2) * this.audioGains.high
-      let offsetGain  = App.audioManager.frequencyData.mid * 0.6 * this.audioGains.mid
-      let size        = BASE_SIZE
-      let maxDistance = BASE_MAX_DISTANCE
+      // Audio baseline — audioGains scale each band's contribution
+      amplitude   = 0.8 + THREE.MathUtils.mapLinear(App.audioManager.frequencyData.high, 0, 0.6, -0.1, 0.2) * this.audioGains.high
+      offsetGain  = App.audioManager.frequencyData.mid * 0.6 * this.audioGains.mid
+      size        = BASE_SIZE
+      maxDistance  = BASE_MAX_DISTANCE
 
-      // Bio additive contributions — each viz parameter takes one source signal × weight
-      amplitude   += sources[this.bioMapping.amplitude.source]   * this.bioMapping.amplitude.weight
-      offsetGain  += sources[this.bioMapping.offsetGain.source]  * this.bioMapping.offsetGain.weight
-      size        += sources[this.bioMapping.size.source]        * this.bioMapping.size.weight
-      maxDistance += sources[this.bioMapping.maxDistance.source] * this.bioMapping.maxDistance.weight
-
-      this.material.uniforms.amplitude.value   = amplitude
-      this.material.uniforms.offsetGain.value  = offsetGain
-      this.material.uniforms.size.value        = size
-      this.material.uniforms.maxDistance.value = maxDistance
-
-      // Bass gain scales animation speed; floor of 0.1 keeps animation ticking at low gain
+      // Bass gain scales animation speed (floor keeps time advancing at very low gain)
       const t = THREE.MathUtils.mapLinear(App.audioManager.frequencyData.low, 0.6, 1, 0.2, 0.5)
-      this.time += Math.max(0.1, THREE.MathUtils.clamp(t, 0.2, 0.5) * this.audioGains.bass)
+      this.time += Math.max(0.01, THREE.MathUtils.clamp(t, 0.2, 0.5) * this.audioGains.bass)
     } else {
-      this.material.uniforms.frequency.value   = 0.8
-      this.material.uniforms.amplitude.value   = 1
-      this.material.uniforms.size.value        = BASE_SIZE
-      this.material.uniforms.maxDistance.value = BASE_MAX_DISTANCE
+      amplitude   = 1
+      offsetGain  = 0
+      size        = BASE_SIZE
+      maxDistance  = BASE_MAX_DISTANCE
+      this._baseFrequency = 0.8
       this.time += 0.2
     }
+
+    // EEG multiplicative modulation — brain state scales how strongly audio
+    // (or idle defaults) affect the viz. Focused brain amplifies, relaxed softens.
+    amplitude  *= (1 + sources[this.bioMapping.amplitude.source]  * this.bioMapping.amplitude.weight)
+    offsetGain *= (1 + sources[this.bioMapping.offsetGain.source] * this.bioMapping.offsetGain.weight)
+    size       *= (1 + sources[this.bioMapping.size.source]       * this.bioMapping.size.weight)
+    maxDistance *= (1 + sources[this.bioMapping.maxDistance.source] * this.bioMapping.maxDistance.weight)
+
+    this.material.uniforms.amplitude.value  = amplitude
+    this.material.uniforms.offsetGain.value = offsetGain
+    this.material.uniforms.size.value       = size
+    this.material.uniforms.maxDistance.value = maxDistance
+
+    // Curl field frequency: base from GSAP beat tweens, modulated by EEG
+    this.material.uniforms.frequency.value = this._baseFrequency *
+      (1 + sources[this.bioMapping.frequency.source] * this.bioMapping.frequency.weight)
+
+    // Hue shift — rotates the color palette based on brain state
+    this.material.uniforms.hueShift.value =
+      sources[this.bioMapping.hueShift.source] * this.bioMapping.hueShift.weight
 
     // Color flush — driven by bio mapping, applied regardless of audio state
     this.material.uniforms.heartPulse.value =
@@ -362,7 +383,9 @@ export default class ReactiveParticles extends THREE.Object3D {
       amplitude:   'Amplitude',
       offsetGain:  'Turbulence',
       size:        'Particle Size',
-      maxDistance: 'Spread Radius',
+      maxDistance:  'Spread Radius',
+      frequency:   'Field Chaos',
+      hueShift:    'Hue Shift',
       heartPulse:  'Color Flush',
     }
     for (const [param, label] of Object.entries(paramLabels)) {

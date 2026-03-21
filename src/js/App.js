@@ -53,6 +53,9 @@ export default class App {
 
     this._setupEEG()
     this._setupJellyfin()
+
+    // Start the render/update loop immediately so EEG plots work before music starts
+    this.update()
   }
 
   /**
@@ -117,6 +120,7 @@ export default class App {
     document.querySelector('.user_interaction').remove()
 
     App.audioManager.play()
+    this._setupPauseBtn()
 
     this.particles = new ReativeParticles()
     this.particles.init()
@@ -127,8 +131,6 @@ export default class App {
       this.particles.properties.autoRotate = false
       this.particles.properties.headControl = true
     }
-
-    this.update()
   }
 
   /** Wire up Jellyfin browser button and create manager + browser instances. */
@@ -217,6 +219,25 @@ export default class App {
     })
   }
 
+  /** Show the pause button and wire its click handler (idempotent). */
+  _setupPauseBtn() {
+    if (this._pauseBtn) {
+      this._pauseBtn.textContent = '⏸'
+      return
+    }
+    this._pauseBtn = document.getElementById('pause-btn')
+    this._pauseBtn.addEventListener('click', () => {
+      if (App.audioManager.isPlaying) {
+        App.audioManager.pause()
+        this._pauseBtn.textContent = '▶'
+      } else {
+        App.audioManager.play()
+        this._pauseBtn.textContent = '⏸'
+      }
+    })
+    this._pauseBtn.hidden = false
+  }
+
   /** Swap in a new audio track while the visualizer is running. */
   async _swapAudio(file) {
     if (App.audioManager.isPlaying) {
@@ -227,6 +248,7 @@ export default class App {
       await App.audioManager.loadAudioBuffer(file)
       await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
       App.audioManager.play()
+      if (this._pauseBtn) this._pauseBtn.textContent = '⏸'
     } catch (err) {
       console.error('Audio swap failed:', err)
     }
@@ -279,8 +301,8 @@ export default class App {
       App.eegManager?.heartPulse ?? 0,
       App.eegManager?.headPose ?? null,
     )
-    App.audioManager.update()
+    App.audioManager?.update()
 
-    this.renderer.render(this.scene, this.camera)
+    if (this.renderer) this.renderer.render(this.scene, this.camera)
   }
 }
