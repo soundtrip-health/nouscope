@@ -158,7 +158,7 @@ Before the model has converged (`AP_MIN_REFITS = 3` refits, ≈ 15 s), `bandPowe
 
 ### Stage 6 — Temporal smoothing
 
-Two layers of smoothing prevent the discrete ~2 Hz analysis windows from producing staircase jumps in the visualization:
+Three layers of smoothing prevent the discrete ~2 Hz analysis windows from producing staircase jumps in the visualization:
 
 1. **Source EMA** (`EEGManager`): After aperiodic normalization, each band is EMA-smoothed in place before storing to `bandPower`:
    ```
@@ -446,7 +446,7 @@ At `heartPulse = 1.0` (peak systole), the color shifts by `0.35 × pulseWarm` �
 gl_FragColor = vec4(color, circle.r * vDistance);
 ```
 
-Particles are transparent near the base geometry surface (`vDistance ≈ 0`) and fully opaque when maximally displaced. Combined with the circular mask, this means only strongly displaced particles are visible, and they fade at the center of each point.
+Particles are transparent near the base geometry surface (`vDistance ≈ 0`) and fully opaque when maximally displaced. Combined with the circular mask, this means only strongly displaced particles are visible, and each point fades at its edge (not at the center).
 
 ---
 
