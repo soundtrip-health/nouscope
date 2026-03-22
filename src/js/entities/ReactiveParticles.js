@@ -71,8 +71,8 @@ const AUDIO_RANGE = {
  * Each frame, audio frequency data and optional EEG band powers are mapped
  * to ShaderMaterial uniforms controlling particle size, displacement, and color.
  *
- * On each BPM beat, geometry is randomly replaced (box ↔ cylinder) and
- * rotations are tweened via GSAP.
+ * On each BPM beat (when Auto Mix / Auto Rotate are on), the mesh may be
+ * rebuilt as a new randomized cylinder and/or holder rotation tweened via GSAP.
  *
  * Optional: IMU head-pose (pitch/roll) overrides auto-rotate when headControl is enabled.
  */

@@ -479,7 +479,7 @@ The actual `frequency` uniform is set each frame as `_baseFrequency * (1 + eegSo
 
 **Geometry disposal:** `destroyMesh()` calls `geometry.dispose()` and `material.dispose()` to free GPU buffers, and kills any active GSAP tweens on the old mesh before removal. New geometry shares the same `ShaderMaterial` instance.
 
-Both box and cylinder geometries randomize their segment counts on each creation, producing varied point densities and visual textures without any additional code.
+Each `createCylinderMesh()` call randomizes radial and height segment multipliers, varying point density and texture. (`createBoxMesh()` exists in the file but is not called from the live paths.)
 
 ---
 
