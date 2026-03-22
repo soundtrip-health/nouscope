@@ -129,7 +129,7 @@ src/js/
 
 Each frame (`App.update()`): `EEGManager.update()` (heart phase, etc.) → `ReactiveParticles.update()` (maps latest audio + EEG to uniforms; reads `AudioManager.frequencyData` from the **previous** frame’s `AudioManager.update()`) → `AudioManager.update()` refreshes FFT bands for the **next** frame → render.
 
-On each BPM beat, `onBPMBeat()` randomly (30% each) triggers geometry swaps and/or rotation tweens when the corresponding **VISUALIZER** toggles are on.
+On each BPM beat, `onBPMBeat()` randomly (30% each) triggers cylinder resets (`resetMesh()` → `createCylinderMesh()`) and/or rotation tweens when the corresponding **VISUALIZER** toggles are on.
 
 ## Credits
 
