@@ -197,6 +197,22 @@ a:focus-visible {
       cursor: default;
     }
   }
+
+  #pause-btn {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    color: var(--color-text);
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+
+    &:hover {
+      border-color: var(--color-text);
+      background: rgba(255, 255, 255, 0.1);
+    }
+  }
 }
 
 .controls-upload-btn {
@@ -225,17 +241,51 @@ a:focus-visible {
   min-width: 4rem;
 }
 
-.eeg-status {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.3);
+.eeg-battery {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
-  transition: background 0.3s;
+  cursor: default;
 
-  &.connected {
-    background: #00e676;
-    box-shadow: 0 0 6px #00e676;
+  .battery-icon {
+    width: 10px;
+    height: 22px;
+    display: block;
+  }
+
+  .battery-body {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.3);
+    stroke-width: 1;
+    transition: stroke 0.3s;
+  }
+
+  .battery-cap {
+    fill: rgba(255, 255, 255, 0.3);
+    transition: fill 0.3s;
+  }
+
+  .battery-fill {
+    fill: rgba(255, 255, 255, 0.3);
+    transition: width 0.5s, fill 0.3s;
+  }
+
+  &[data-state='good'] {
+    .battery-body  { stroke: #00e676; }
+    .battery-cap   { fill: #00e676; }
+    .battery-fill  { fill: #00e676; }
+  }
+
+  &[data-state='warn'] {
+    .battery-body  { stroke: #ffb300; }
+    .battery-cap   { fill: #ffb300; }
+    .battery-fill  { fill: #ffb300; }
+  }
+
+  &[data-state='low'] {
+    .battery-body  { stroke: #ff5252; }
+    .battery-cap   { fill: #ff5252; }
+    .battery-fill  { fill: #ff5252; }
   }
 }
 
@@ -245,7 +295,7 @@ a:focus-visible {
   position: fixed;
   bottom: 4rem;   // sits above .eeg-controls
   left: 1.5rem;
-  z-index: 100;
+  z-index: 1002;  // above overlay (1000) and eeg-controls (1001)
   width: 296px;
   background: rgba(0, 0, 0, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -283,11 +333,64 @@ a:focus-visible {
   letter-spacing: 0.04em;
 }
 
+.bio-bands-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+
+  canvas { width: 200px; }   // override the generic 280px rule for band canvas only
+}
+
 .bio-band-legend {
   font-size: 0.65rem;
   letter-spacing: 0.06em;
   display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  flex-shrink: 0;
+}
+
+.bio-band-item {
+  display: flex;
+  align-items: center;
   gap: 0.3rem;
+}
+
+.bio-band-val {
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.55);
+  min-width: 2.4rem;
+}
+
+.bio-spec-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+
+  canvas {
+    flex: 1;
+    width: 0;     // let flex-grow override the generic 280px rule
+    min-width: 0;
+  }
+}
+
+.bio-spec-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.5rem;
+  color: rgba(255, 255, 255, 0.3);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  padding: 1px 0;    // align with top/bottom pixel rows
+  flex-shrink: 0;
+  min-width: 1.2rem;
+  text-align: right;
+}
+
+#spec-canvas, #spec-lo-canvas {
+  image-rendering: pixelated;
 }
 
 .bio-imu-legend {
