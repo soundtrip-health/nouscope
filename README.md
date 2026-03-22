@@ -2,19 +2,19 @@
 
 An audio-reactive 3D particle visualizer with optional Muse EEG/PPG/IMU biometric integration, built with Three.js and WebGL.
 
-## Live Demo
+[![Nouscope — audio-reactive particle visualizer with optional EEG panel](screenshot.png)](https://soundtrip.health/nouscope/)
 
-[https://soundtrip.health/nouscope](https://soundtrip.health/nouscope)
+**[Live demo](https://soundtrip.health/nouscope/)**
 
 ## Features
 
 - Audio-reactive 3D particle system (Three.js / WebGL)
-- Audio BPM beat detection — geometry swaps and rotations sync to the beat
+- Audio BPM beat detection — optional beat-synced rotation tweens and cylinder mesh resets (**Auto Rotate** / **Auto Mix**)
 - Five EEG frequency bands (delta, theta, alpha, beta, gamma) mapped to visual parameters
 - PPG heart rate detection with per-beat warm color pulse
 - IMU head-pose control — tilt your head to rotate the particle field
-- Upload your own audio or use the bundled demo track
-- dat.GUI controls for colors, mixing, and biometric influence strength
+- Upload audio, add `public/audio/demo.mp3` for a one-click start, or stream from a [Jellyfin](https://jellyfin.org/) server
+- dat.GUI controls for colors, audio band gains, per-parameter bio mapping, and IMU strength
 
 ## Browser Support
 
@@ -39,7 +39,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in Chrome or Edge.
+Open `http://localhost:5173` (any modern browser; use Chrome or Edge to develop or test Web Bluetooth / EEG).
 
 ### Demo Track
 
@@ -52,22 +52,22 @@ If `demo.mp3` is absent, the app prompts the user to upload a file.
 
 ## Usage
 
-1. Click anywhere to start with the demo track, or use **Upload your own audio file**
+1. Click anywhere to start with the demo track (if `public/audio/demo.mp3` exists), use **↑ Track** to upload a file, or **☁ Jellyfin** to pick a track from your server
 2. The particle field reacts to audio in real time
 3. Optionally click **Connect EEG** to pair a Muse headset via Bluetooth
-4. Use the dat.GUI panel (top-right, desktop only) to adjust colors and biometric influence
+4. Use the dat.GUI panel (top-right, desktop only) to adjust colors, **AUDIO** gains, **MAPPING** (which biometric drives each visual parameter), and **VISUALIZER** options including **IMU Strength**
 
 ## EEG Integration
 
 Requires a [Muse](https://choosemuse.com/) EEG headset (Muse 2 or Muse S) and Chrome or Edge.
 
-| EEG Band | Frequency | Visual Effect |
-|----------|-----------|--------------|
-| Delta (1–4 Hz) | Deep sleep | Particle spread radius |
+| EEG band | Frequency (approx.) | Default in **MAPPING** (changeable per parameter) |
+|----------|---------------------|------------------------------------------------------|
+| Delta (1–4 Hz) | Deep sleep | Not mapped by default — assign in **MAPPING** if desired |
 | Theta (4–8 Hz) | Drowsy / relaxed | Particle size |
-| Alpha (8–13 Hz) | Calm / idle | Ring spread radius |
-| Beta (13–30 Hz) | Focused / alert | Turbulence intensity |
-| Gamma (30–50 Hz) | High cognition | Amplitude boost |
+| Alpha (8–13 Hz) | Calm / idle | Spread radius (`maxDistance`) |
+| Beta (13–30 Hz) | Focused / alert | Turbulence (`offsetGain`) and field chaos (`frequency`) |
+| Gamma (30–50 Hz) | High cognition | Amplitude and hue shift |
 
 **PPG / Heart Rate** — detects heartbeats from the Muse's infrared sensor and drives a warm color flush on each beat.
 
@@ -75,26 +75,30 @@ Requires a [Muse](https://choosemuse.com/) EEG headset (Muse 2 or Muse S) and Ch
 
 ## Customization
 
-All visual parameters are exposed via the dat.GUI panel:
+Main controls in the dat.GUI panel:
 
 | Folder | Control | Effect |
 |--------|---------|--------|
 | PARTICLES | Start Color / End Color | Gradient colors across displacement distance |
-| VISUALIZER | Auto Mix | Randomly swap geometry on each beat |
+| VISUALIZER | Auto Mix | On random beats, rebuild a new randomized cylinder mesh |
 | VISUALIZER | Auto Rotate | GSAP-driven rotation tweens on beats |
 | VISUALIZER | Head Control (IMU) | Route IMU pitch/roll to rotation |
+| VISUALIZER | IMU Strength | Scale (0–3) head-tilt → rotation |
 | VISUALIZER | Reset Cylinder | Manually reset to cylinder geometry |
-| INFLUENCE | EEG / HR / IMU Strength | Scale (0–3×) each biometric input |
+| AUDIO | Bass / Mid / High Gain | Per-band audio contribution (0–2) |
+| MAPPING | Amplitude, Turbulence, … | Per visual parameter: **Source** (EEG band, `hr`, or none) + **Weight** |
 
 ### Shader Uniforms
 
-| Uniform | Driven by | Effect |
-|---------|-----------|--------|
-| `amplitude` | audio high + EEG gamma | particle displacement intensity |
-| `offsetGain` | audio mid + EEG beta | turbulence / z-oscillation |
-| `size` | EEG theta | base particle size |
-| `maxDistance` | EEG alpha | displacement falloff radius |
-| `heartPulse` | PPG heart rate | warm reddish color flush |
+| Uniform | Driven by (defaults) | Effect |
+|---------|------------------------|--------|
+| `amplitude` | audio `high` × EEG **gamma** (MAPPING) | particle displacement intensity |
+| `offsetGain` | audio `mid` × EEG **beta** (turbulence) | turbulence / z-oscillation |
+| `frequency` | GSAP base × EEG **beta** (field chaos) | curl field scale / chaos |
+| `size` | base × EEG **theta** | base particle size |
+| `maxDistance` | base × EEG **alpha** | displacement falloff radius |
+| `hueShift` | EEG **gamma** | HSV hue rotation of palette |
+| `heartPulse` | **hr** mapping × PPG phase | warm reddish color flush |
 
 ## Developer Guide
 
@@ -109,7 +113,11 @@ src/js/
 ├── managers/
 │   ├── AudioManager.js       — audio loading (File or URL), freq band extraction
 │   ├── BPMManager.js         — BPM detection, beat event dispatcher
-│   └── EEGManager.js         — Muse BT, EEG bands, PPG heart rate, IMU head pose
+│   ├── EEGManager.js         — Muse BT, EEG bands, PPG heart rate, IMU head pose
+│   └── JellyfinManager.js    — Jellyfin auth, browse, stream URLs
+├── ui/
+│   ├── BioDataDisplay.js     — live EEG / PPG / IMU / spectrogram panel
+│   └── JellyfinBrowser.js    — modal library browser
 └── entities/
     ├── ReactiveParticles.js  — ShaderMaterial, GSAP tweens, audio/EEG mapping
     └── glsl/
@@ -119,10 +127,9 @@ src/js/
 
 ### Audio → Visual Pipeline
 
-1. `AudioManager.update()` produces normalized `{ low, mid, high }` each frame
-2. `ReactiveParticles.update()` maps these to shader uniforms
-3. `EEGManager` streams band powers and heart rate over Bluetooth
-4. On each BPM beat, `onBPMBeat()` randomly triggers geometry swaps or rotation tweens
+Each frame (`App.update()`): `EEGManager.update()` (heart phase, etc.) → `ReactiveParticles.update()` (maps latest audio + EEG to uniforms; reads `AudioManager.frequencyData` from the **previous** frame’s `AudioManager.update()`) → `AudioManager.update()` refreshes FFT bands for the **next** frame → render.
+
+On each BPM beat, `onBPMBeat()` randomly (30% each) triggers geometry swaps and/or rotation tweens when the corresponding **VISUALIZER** toggles are on.
 
 ## Credits
 

@@ -15,6 +15,7 @@ This document explains the key algorithms that drive the Nouscope visualization:
 7. [Vertex Shader — Curl Noise Displacement](#7-vertex-shader--curl-noise-displacement)
 8. [Fragment Shader — Color & Heartbeat Flush](#8-fragment-shader--color--heartbeat-flush)
 9. [Beat Reactions — Geometry & Rotation](#9-beat-reactions--geometry--rotation)
+10. [EEG Spectrogram Display](#10-eeg-spectrogram-display)
 
 ---
 
@@ -68,45 +69,116 @@ Falls back to 120 BPM if `guess()` throws. The interval-based approach means bea
 
 **File:** `src/js/managers/EEGManager.js`, `_processEEGSample()` / `_computeBandPower()`
 
-### Signal pipeline
+### Overview
 
-muse-js delivers EEG samples via `zipSamples()` which synchronizes the four electrode channels (TP9, AF7, AF8, TP10) into aligned packets. The four channel values are averaged into a single scalar per sample, NaN samples are dropped.
+Band power estimation follows a simplified fBOSC (frequency-specific Bayesian Oscillation-Suppression Criterion) approach (Seymour et al. 2022, *European Journal of Neuroscience*). The key improvement over a plain DFT is **aperiodic (1/f) background normalization**: each band's power is divided by the expected power under the fitted aperiodic model before the final relative normalization. This means a genuinely elevated oscillation (e.g. a strong alpha peak) contributes proportionally more than a band that simply happens to sit at a lower frequency in the 1/f slope.
+
+### Stage 1 — Per-channel buffer management
+
+muse-js delivers EEG samples via `zipSamples()`, synchronizing the four electrode channels (TP9, AF7, AF8, TP10) into aligned packets. Each channel is maintained in its own rolling 256-sample analysis buffer (`_chBuffers[4]`). NaN samples are replaced with 0. Spectral analysis is triggered every 128 new samples (~0.5 s at 256 Hz), giving 50% overlap between consecutive windows.
+
+### Stage 2 — Per-channel spectral estimation
+
+Band power is estimated differently for delta vs. all higher bands:
+
+**Delta (1–4 Hz) — sparse Hann-windowed DFT:**
+```
+w[n] = 0.5 - 0.5·cos(2π·n / (N-1))          (Hann window)
+DFT power at bin k = |Σ signal[n]·w[n]·e^(-j·2π·k·n/N)|²
+delta = DFT[1] + DFT[2] + DFT[3]             (bins 1, 2, 3 Hz)
+```
+Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) are precomputed at construction time, so the hot-path only performs multiply-accumulate operations.
+
+**Theta, Alpha, Beta, Gamma — Morlet wavelet instantaneous power:**
+
+The Morlet wavelet at frequency `f` (following BOSC_tf.m):
+```
+σ = τ / (2π·f)                    (temporal std dev; τ = wavenumber)
+A = 1 / sqrt(σ·√π)                (amplitude normalization)
+ψ(t) = A · exp(-t²/2σ²) · exp(i·2π·f·t)
+```
+Window: ±3σ samples (truncated from the ±3.6σ used in BOSC_tf to keep kernels within the 256-sample buffer). Theta uses a reduced wavenumber (τ=4 instead of 6) to keep the kernel short enough for a useful number of valid samples; the broader spectral smearing is acceptable for the wide 4–8 Hz band.
+
+| Band  | τ  | Center freq | σ (s) | Kernel half-width (samples) | Valid samples |
+|-------|----|-------------|-------|-----------------------------|---------------|
+| theta | 4  | 6 Hz        | 0.106 | 82                          | 92            |
+| alpha | 6  | 10 Hz       | 0.095 | 74                          | 108           |
+| beta  | 6  | 20 Hz       | 0.048 | 37                          | 182           |
+| gamma | 6  | 40 Hz       | 0.024 | 19                          | 218           |
+
+Power is computed as the mean `|W(t)|²` over all valid (edge-free) samples in the window:
+```
+power_band = mean( re(t)² + im(t)² )   for t ∈ [halfWin … N-1-halfWin]
+```
+
+### Stage 3 — Quality-weighted channel aggregation
+
+Each channel is assigned a weight based on its signal quality (updated ~4× per second):
+
+| Quality | RMS (µV) | Base weight |
+|---------|----------|-------------|
+| good    | < 50     | 1.0         |
+| marginal | 50–100  | `marginalChannelWeight` (default 0.5) |
+| poor    | > 100    | 0.0         |
+
+Up to 2 channels may be **dropped** (excluded entirely) based on `badChannelThreshold`:
+- `'poor'` (default): only channels rated 'poor' are drop candidates
+- `'marginal'`: channels rated 'poor' or 'marginal' are candidates
+
+The worst-rated candidates are dropped first; at least 2 channels are always retained. Remaining channels are averaged using the quality weights, normalised to sum 1.
+
+### Stage 4 — Aperiodic background model (BOSC_bgfit style)
+
+Every `APERIODIC_UPDATE_INTERVAL = 10` windows (~5 s), the background model is refit from the quality-weighted average wavelet powers at 6, 10, 20, 40 Hz. A log-log OLS regression gives:
 
 ```
-avg = (ch0 + ch1 + ch2 + ch3) / 4
+log₁₀(P_expected) = a + b · log₁₀(f)
 ```
 
-Samples accumulate in a rolling 256-sample buffer. Every time it fills, band powers are recomputed with **50% overlap** (the buffer is sliced by half, not cleared), giving a new estimate roughly every 128 samples (~0.5 s at 256 Hz).
+The **first** refit uses instant adoption (`smooth = 1.0`) so the model immediately matches the actual signal scale rather than slowly converging from the dummy prior. Subsequent refits use EMA smoothing (`AP_SMOOTH = 0.3`) for stability. The initial model is `{a: 0, b: -1.5}` (generic 1/f^1.5 prior).
 
-### Spectral estimation
+### Stage 5 — Aperiodic normalization → relative output
 
-Rather than an FFT, a **direct DFT** is computed for integer bins 1–50 Hz. This is O(N²) but acceptable for N=256 at ~2 Hz update rate.
+Each band's power is divided by the expected aperiodic power at its representative frequency. Only bands that are **actively mapped** to a visualizer parameter (via `ReactiveParticles.bioMapping`) participate in the normalisation sum; unmapped bands are zeroed out:
 
-1. **Hann window** to reduce spectral leakage:
+```
+norm_band = raw_band / 10^(a + b · log₁₀(f_center))   [for active bands only]
+norm_band = 0                                            [for inactive/unmapped bands]
+
+Representative frequencies: delta→2 Hz, theta→6, alpha→10, beta→20, gamma→40
+```
+
+`ReactiveParticles` maintains `EEGManager.normalizeBands` (a `Set` of band name strings). It is initialised from the default `bioMapping` at GUI creation and updated whenever the user changes a Source dropdown. This prevents high-power but unmapped bands (most commonly delta, which tends to dominate the 1/f spectrum) from consuming a disproportionate share of the normalised total.
+
+If all sources are set to `'none'`, `normalizeBands` falls back to the full set so output stays meaningful.
+
+This preserves sustained brain-state information: a genuinely elevated oscillation (e.g. strong alpha during eyes-closed) receives a proportionally larger share after 1/f correction, and this persists for as long as the state holds — there is no adaptive baseline that would suppress sustained changes back to zero.
+
+Before the model has converged (`AP_MIN_REFITS = 3` refits, ≈ 15 s), `bandPower` is held at zero to suppress spurious EEG influence during warm-up.
+
+### Stage 6 — Temporal smoothing
+
+Two layers of smoothing prevent the discrete ~2 Hz analysis windows from producing staircase jumps in the visualization:
+
+1. **Source EMA** (`EEGManager`): After aperiodic normalization, each band is EMA-smoothed in place before storing to `bandPower`:
    ```
-   w[n] = 0.5 - 0.5 * cos(2π·n / (N-1))
-   signal_windowed[n] = signal[n] * w[n]
+   bandPower[band] += BAND_SMOOTH * (result[band] - bandPower[band])
    ```
+   `BAND_SMOOTH = 0.35` at ~2 Hz update rate gives a ~1.5 s settling time, matching the perceptual timescale of EEG state changes.
 
-2. **DFT power** at each integer Hz bin k (1 Hz resolution because N=256 samples at 256 Hz):
+2. **Per-frame lerp** (`ReactiveParticles`): The viz maintains `_smoothedBands` and lerps toward the latest `bandPower` each frame:
    ```
-   PSD[k] = |Σ signal_windowed[n] · e^(-j·2π·k·n/N)|²
-           = re² + im²
+   _smoothedBands[band] += EEG_LERP_RATE * (target - _smoothedBands[band])
    ```
+   `EEG_LERP_RATE = 0.06` at 60 fps gives sub-frame interpolation between the discrete ~2 Hz updates, eliminating visual jerkiness.
 
-3. **Band integration** — PSD bins are summed over each band's Hz range:
+3. **Display lerp** (`BioDataDisplay`): The band power plot maintains `_bandSmoothed[5]` and lerps toward `bandPower` each frame:
+   ```
+   _bandSmoothed[i] += BAND_LERP * (target[i] - _bandSmoothed[i])
+   ```
+   `BAND_LERP = 0.08` at 60 fps gives ~0.5 s to 90%, producing smooth curves in the EEG Bands panel instead of staircase jumps.
 
-   | Band | Bins (Hz) |
-   |------|-----------|
-   | delta | 1–3 |
-   | theta | 4–7 |
-   | alpha | 8–12 |
-   | beta | 13–29 |
-   | gamma | 30–49 |
-
-4. **Relative normalization** — divides each band by the total power across all bands, so the five values always sum to 1.0. This makes the output robust to amplitude variation (electrode contact quality, individual differences) but means the values are compositional — if gamma rises, others fall.
-
-`EEGManager.bandPower` is updated in place after each computation window and read by `ReactiveParticles.update()` every frame.
+The three layers compose: the source EMA prevents wild jumps in the target, while the per-frame lerps smoothly track that target at display refresh rate for both the shader uniforms and the diagnostic plot.
 
 ---
 
@@ -203,7 +275,7 @@ Both are in radians. At rest (headset upright), pitch ≈ 0 and roll ≈ 0. The 
 
 ### Audio baseline (with per-band gain)
 
-Each audio band has a gain slider (0–2, default 1.0 = original behavior):
+Each audio band has a gain slider (0–2). Mid and high default to 1.0 (= prior tuning); bass defaults to **0.5** for a calmer baseline animation speed.
 
 ```js
 amplitude  = 0.8 + mapLinear(audio.high, 0, 0.6, -0.1, 0.2) * audioGains.high
@@ -217,35 +289,44 @@ maxDistance = BASE_MAX_DISTANCE  (1.8)  // audio has no maxDistance baseline
 `time` is incremented each frame at a rate driven by `audio.low`:
 ```js
 t = mapLinear(audio.low, 0.6, 1.0, 0.2, 0.5)
-time += max(0.1, clamp(t, 0.2, 0.5) * audioGains.bass)
+time += max(0.01, clamp(t, 0.2, 0.5) * audioGains.bass)
 ```
-Higher bass → faster overall animation speed. Floor of 0.1 keeps animation ticking at zero gain.
+Higher bass → faster overall animation speed. Floor of 0.01 keeps animation ticking at low gain.
 
 ### Bio mapping (user-configurable)
 
-Each viz parameter has an independently configurable bio source and weight:
+Each viz parameter has an independently configurable bio source and weight. Most parameters use **multiplicative** scaling so that EEG modulates the audio reactivity rather than simply adding a small offset:
 
 ```js
 sources = { none:0, delta, theta, alpha, beta, gamma, hr: heartPulse }
 
-amplitude   += sources[mapping.amplitude.source]   * mapping.amplitude.weight
-offsetGain  += sources[mapping.offsetGain.source]  * mapping.offsetGain.weight
-size        += sources[mapping.size.source]        * mapping.size.weight
-maxDistance += sources[mapping.maxDistance.source] * mapping.maxDistance.weight
+// Multiplicative — EEG scales the audio-driven baseline
+amplitude  *= (1 + sources[mapping.amplitude.source]  * mapping.amplitude.weight)
+offsetGain *= (1 + sources[mapping.offsetGain.source] * mapping.offsetGain.weight)
+size       *= (1 + sources[mapping.size.source]       * mapping.size.weight)
+maxDistance *= (1 + sources[mapping.maxDistance.source] * mapping.maxDistance.weight)
+frequency   = baseFrequency * (1 + sources[mapping.frequency.source] * mapping.frequency.weight)
+
+// Direct assignment (no audio baseline to multiply)
+hueShift_uniform   = sources[mapping.hueShift.source]   * mapping.hueShift.weight
 heartPulse_uniform = sources[mapping.heartPulse.source] * mapping.heartPulse.weight
 ```
 
-**Default mapping** (preserves the original hardcoded behavior at default weight):
+A focused brain (high gamma/beta) amplifies the music's visual effect; a calm brain softens it. At rest (EEG sources = 0), the multiplier is 1.0 and behavior matches audio-only mode.
 
-| Viz parameter | Default source | Weight range | Default weight | Notes |
-|---------------|---------------|--------------|----------------|-------|
-| Amplitude     | gamma         | 0.0 – 0.6   | 0.3            | High cognition → sharper displacement |
-| Turbulence    | beta          | 0.0 – 1.0   | 0.5            | Focus/alert → more churn |
-| Particle Size | theta         | 0.0 – 4.0   | 2.0            | Drowsy/relaxed → larger particles |
-| Spread Radius | alpha         | 0.0 – 3.6   | 1.8            | Calm/idle → wider spread |
-| Color Flush   | hr            | 0.0 – 2.0   | 1.0            | Heart rate → warm reddish pulse |
+**Default mapping:**
 
-Weight slider: `min` = no contribution, `max` = 2× default effect. Any source can be routed to any parameter — e.g. mapping `hr` to `amplitude` makes particles pulse with each heartbeat, or mapping `alpha` to `heartPulse` flushes color with calm mental states. `delta` is available as a source but has no default mapping.
+| Viz parameter | Default source | Weight range | Default weight | Scaling | Notes |
+|---------------|---------------|--------------|----------------|---------|-------|
+| Amplitude     | gamma         | 0.0 – 1.0   | 0.5            | ×(1+s·w) | Focus → 50% more displacement at full gamma |
+| Turbulence    | beta          | 0.0 – 2.0   | 1.0            | ×(1+s·w) | Alert → doubled turbulence |
+| Particle Size | theta         | 0.0 – 3.0   | 1.5            | ×(1+s·w) | Drowsy → 2.5× larger particles |
+| Spread Radius | alpha         | 0.0 – 2.0   | 1.0            | ×(1+s·w) | Calm → doubled spread |
+| Field Chaos   | beta          | 0.0 – 3.0   | 1.5            | ×(1+s·w) | Alert → 2.5× curl frequency (tighter vortices) |
+| Hue Shift     | gamma         | 0.0 – 0.25  | 0.12           | direct  | Focus → ~43° hue rotation at full gamma |
+| Color Flush   | hr            | 0.0 – 2.0   | 1.0            | direct  | Heart rate → warm reddish pulse |
+
+Weight slider: `min` = no contribution, `max` = full effect. Any source can be routed to any parameter — e.g. mapping `hr` to `amplitude` makes particles pulse with each heartbeat, or mapping `alpha` to `heartPulse` flushes color with calm mental states. `delta` is available as a source but has no default mapping.
 
 ### IMU head control
 
@@ -340,6 +421,16 @@ vec3 color = mix(startColor, endColor, vDistance);
 
 `vDistance` is the normalized displacement magnitude from the vertex shader. Particles near their base geometry position (low displacement) receive `startColor`; maximally displaced particles receive `endColor`. This means the gradient directly encodes how much the particle is being pushed by the curl field at this moment.
 
+### EEG hue shift
+
+```glsl
+vec3 hsv = rgb2hsv(color);
+hsv.x = fract(hsv.x + hueShift);
+color = hsv2rgb(hsv);
+```
+
+The `hueShift` uniform (driven by gamma by default) rotates the entire color palette through HSV hue space. At rest (hueShift = 0), colors are unchanged. At full gamma with default weight (0.12), the palette rotates ~43° — a clearly visible shift toward warmer or cooler tones depending on the user's chosen start/end colors. The `fract()` wraps the hue angle so all values produce valid colors. RGB↔HSV conversion uses the standard Hue-Saturation-Value formulation.
+
 ### Heartbeat warm flush
 
 ```glsl
@@ -371,16 +462,16 @@ On each beat event from `BPMManager`:
 30% chance → geometry reset (destroyMesh → createCylinderMesh)
 ```
 
-Geometry reset also triggers a GSAP tween on the `frequency` uniform:
+Geometry reset also triggers a GSAP tween on the base curl-field frequency:
 ```js
-gsap.to(material.uniforms.frequency, {
+gsap.to(this, {
   duration: bpmDuration * 2,
-  value: randFloat(0.5, 3),
+  _baseFrequency: randFloat(0.5, 3),
   ease: 'expo.easeInOut',
 })
 ```
 
-This gradually shifts the curl field density over two beats, producing smooth visual transitions between coarse and fine-grained flow.
+The actual `frequency` uniform is set each frame as `_baseFrequency * (1 + eegSource * weight)`, so EEG modulates whatever frequency the beat tween is currently interpolating toward. This gradually shifts the curl field density over two beats, producing smooth visual transitions between coarse and fine-grained flow — with EEG adding a real-time layer of chaos on top.
 
 **Rotation tween duration** is randomly either:
 - `15 s` (80% chance) — slow drift, crosses multiple beats
@@ -388,4 +479,75 @@ This gradually shifts the curl field density over two beats, producing smooth vi
 
 **Geometry disposal:** `destroyMesh()` calls `geometry.dispose()` and `material.dispose()` to free GPU buffers, and kills any active GSAP tweens on the old mesh before removal. New geometry shares the same `ShaderMaterial` instance.
 
-Both box and cylinder geometries randomize their segment counts on each creation, producing varied point densities and visual textures without any additional code.
+Each `createCylinderMesh()` call randomizes radial and height segment multipliers, varying point density and texture. (`createBoxMesh()` exists in the file but is not called from the live paths.)
+
+---
+
+## 10. EEG Spectrogram Display
+
+**Files:** `src/js/managers/EEGManager.js` (`_computeSpectrum()`, `_computeSpectrumLo()`), `src/js/ui/BioDataDisplay.js` (`_updateSpectrum()`, `_updateSpectrumLo()`)
+
+### Overview
+
+A scrolling time–frequency heatmap of EEG power, computed alongside the band power pipeline (Section 3). Each column represents one 256-sample analysis window (~0.5 s at 256 Hz, 50% overlap), covering 1–50 Hz at 1 Hz resolution. The display uses a viridis colormap on log₁₀-scaled power with auto-ranging. A second hi-resolution panel covers 0.5–8.0 Hz at 0.1 Hz resolution (using a separate 2560-sample / 10 s window) to reveal sub-Hz beat entrainment and delta/theta dynamics.
+
+### Stage 1 — Hann-windowed DFT (bins 1–50)
+
+The same precomputed Hann-weighted twiddle factors used for delta band power (Section 3, Stage 2) are extended to cover all 50 bins:
+
+```
+w[n] = 0.5 - 0.5·cos(2π·n / (N-1))          (Hann window, N=256)
+power[k] = |Σ sig[n]·w[n]·e^(-j·2π·k·n/N)|²   for k = 1…50
+```
+
+Twiddle factors (`w[n]·cos(…)`, `w[n]·sin(…)`) for all 50 bins are precomputed at construction time alongside the wavelet kernels, so the hot-path performs only multiply-accumulate operations.
+
+### Stage 2 — Quality-weighted channel average
+
+Per-bin power is averaged across EEG channels using the same quality weights as band power (Section 3, Stage 3). Dropped channels (weight = 0) are skipped entirely.
+
+### Stage 3 — Log power & display buffer
+
+Power values are stored as `log₁₀(power + 1e-10)` in a rolling buffer of `Float32Array(50)` columns (up to 280 columns ≈ 140 s of history). A monotonic `spectrumSampleCount` counter enables the same read-index pattern used by the other display buffers.
+
+The hi-res low-frequency spectrogram uses a separate 2560-sample (10 s) per-channel rolling buffer and its own set of 76 Hann-weighted DFT twiddle factors (0.5–8.0 Hz at 0.1 Hz steps). It stores `Float32Array(76)` columns in `_specLoDisplay` with its own `spectrumLoSampleCount` counter. Quality-weighted averaging applies. ~1.2 MB of precomputed kernels (76 bins × 2560 samples × 2 components × 4 bytes).
+
+### Stage 4 — Heatmap rendering (BioDataDisplay)
+
+The two panels use separate data buffers and plain 2D `<canvas>` (not WebGL) with a column-shift approach since the update rate is low (~2 Hz):
+
+1. **Auto-scale:** Robust ceiling via a 30-column sliding window of per-column max values; the 90th percentile of the window becomes the scale ceiling. This means a single artifact spike influences at most ~10% of the window and is naturally ejected after ~15 s. The ceiling is additionally capped at `SPEC_LOG_CAP = 8.2` (≈ 200 µV amplitude, derived from Hann-DFT power ≈ A² × N²/16) to prevent headset-removal or other implausible transients from anchoring the scale. The floor tracks the running minimum with a slow upward decay (0.005 per column) so it follows the noise floor and contracts again when signal levels drop. Minimum dynamic range of 2 decades.
+2. **Shift left:** `ctx.drawImage(canvas, -2, 0)` scrolls the existing content two pixels left (column width = 2 px).
+3. **Draw column:** A 2×H `ImageData` is filled using the viridis colormap LUT (256 entries, piecewise-linear from 9 key stops). Frequency axis labels are HTML elements alongside each canvas.
+
+**Full spectrogram** (`#spec-canvas`, 280×86 native px): bins 8–50 Hz (43 bins), 2 px/bin vertically, 2 px/column horizontally. Uses `_specDisplay` (256-sample DFT, 1 Hz resolution). Axis labels: 50, 8 Hz.
+
+**Delta/theta zoom** (`#spec-lo-canvas`, 280×76 native px): 0.5–8.0 Hz at 0.1 Hz resolution (76 bins), 1 px/bin vertically, 2 px/column horizontally. Uses a dedicated `_specLoDisplay` buffer computed from a 2560-sample (10 s) Hann-windowed DFT with precomputed twiddle factors for 76 fractional-Hz bins. First column appears after 10 s of data accumulation. Separate auto-scaling to maximise contrast for sub-Hz beat entrainment dynamics. Axis labels: 8, 4, 0.5 Hz.
+
+The `image-rendering: pixelated` CSS property ensures bins render with sharp edges when CSS-scaled.
+
+### Viridis colormap
+
+The colormap is a 256-entry RGB lookup table precomputed at module load from 9 piecewise-linear stops approximating matplotlib's viridis:
+
+| Normalized value | Color |
+|-----------------|-------|
+| 0.0 | dark purple (68, 1, 84) |
+| 0.25 | blue (59, 82, 139) |
+| 0.5 | teal (33, 145, 140) |
+| 0.75 | green (122, 209, 81) |
+| 1.0 | yellow (253, 231, 37) |
+
+Low power → purple/blue, high power → green/yellow.
+
+### Future: Multitaper spectral estimation
+
+The current implementation uses a single Hann window, which provides ~-31 dB sidelobe suppression — adequate for a visualization panel. For lower-variance estimates suitable for research-grade analysis, a **multitaper** approach using Discrete Prolate Spheroidal Sequences (DPSS / Slepian tapers) could replace the Hann window:
+
+1. **Pre-generate DPSS tapers** in Python using `scipy.signal.windows.dpss(N=256, NW=3)` and export as a JSON array (JavaScript lacks a native DPSS generator).
+2. **Compute K individual spectra** by multiplying the signal by each of the `K = 2·NW - 1 = 5` tapers, then taking the DFT of each.
+3. **Average the K power spectra** to produce the final multitaper estimate.
+
+The rendering pipeline (Stages 4–5) would remain unchanged — only the spectral estimation (Stages 1–2) would be swapped. The main tradeoff is shipping a ~30 KB JSON taper file and `K×` more DFT computation per window (5× at NW=3), which is still negligible at the 2 Hz update rate.
+
+Reference: Thomson, D. J. (1982). "Spectrum estimation and harmonic analysis." *Proceedings of the IEEE*, 70(9), 1055–1096.

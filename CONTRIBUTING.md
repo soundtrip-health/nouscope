@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in Chrome or Edge (required for Web Bluetooth / EEG).
+Open `http://localhost:5173`. Use Chrome or Edge when you need Web Bluetooth (EEG); the visualizer alone works in any modern browser.
 
 ## Branch Convention
 

@@ -53,6 +53,9 @@ export default class App {
 
     this._setupEEG()
     this._setupJellyfin()
+
+    // Start the render/update loop immediately so EEG plots work before music starts
+    this.update()
   }
 
   /**
@@ -117,6 +120,7 @@ export default class App {
     document.querySelector('.user_interaction').remove()
 
     App.audioManager.play()
+    this._setupPauseBtn()
 
     this.particles = new ReativeParticles()
     this.particles.init()
@@ -127,8 +131,6 @@ export default class App {
       this.particles.properties.autoRotate = false
       this.particles.properties.headControl = true
     }
-
-    this.update()
   }
 
   /** Wire up Jellyfin browser button and create manager + browser instances. */
@@ -155,7 +157,8 @@ export default class App {
 
     const controls    = document.getElementById('eeg-controls')
     const btn         = document.getElementById('eeg-connect')
-    const dot         = document.getElementById('eeg-status')
+    const batteryEl   = document.getElementById('eeg-status')
+    const batteryFill = batteryEl.querySelector('.battery-fill')
     const toggleBtn   = document.getElementById('bio-toggle')
     const panel       = document.getElementById('bio-panel')
     this._hrDisplay   = document.getElementById('heart-rate')
@@ -165,6 +168,23 @@ export default class App {
     this._bioToggle   = toggleBtn
     this._bioVisible  = false
 
+    const updateBattery = (level) => {
+      // level: 0–100 or null (disconnected)
+      // Vertical battery: fill grows upward inside body (body: y=2.5, height=19, inner max=17)
+      const maxH    = 17
+      const fillH   = level != null ? Math.round(maxH * level / 100) : 0
+      batteryFill.setAttribute('height', fillH)
+      batteryFill.setAttribute('y', (21 - fillH).toFixed(1))
+      batteryEl.dataset.level = level != null ? level : ''
+      batteryEl.title = level != null ? `Battery: ${level}%` : 'Battery'
+      // Color: green ≥50, yellow 20–49, red <20, gray when disconnected
+      batteryEl.dataset.state = level == null ? 'off'
+        : level >= 50 ? 'good'
+        : level >= 20 ? 'warn'
+        : 'low'
+    }
+    updateBattery(null)
+
     controls.style.display = 'flex'
 
     toggleBtn.addEventListener('click', () => {
@@ -173,10 +193,12 @@ export default class App {
       toggleBtn.classList.toggle('active', this._bioVisible)
     })
 
+    App.eegManager.onBatteryLevel = (level) => updateBattery(level)
+
     App.eegManager.onDisconnected = () => {
       btn.textContent = 'Connect EEG'
       btn.disabled = false
-      dot.classList.remove('connected')
+      updateBattery(null)
       toggleBtn.hidden = true
       panel.hidden = true
       this._bioVisible = false
@@ -193,7 +215,6 @@ export default class App {
           await App.eegManager.connect()
           btn.textContent = 'Disconnect EEG'
           btn.disabled = false
-          dot.classList.add('connected')
           toggleBtn.hidden = false
           // Switch to EEG-driven defaults: head control on, auto-mix/rotate off
           if (this.particles) {
@@ -217,6 +238,25 @@ export default class App {
     })
   }
 
+  /** Show the pause button and wire its click handler (idempotent). */
+  _setupPauseBtn() {
+    if (this._pauseBtn) {
+      this._pauseBtn.textContent = '⏸'
+      return
+    }
+    this._pauseBtn = document.getElementById('pause-btn')
+    this._pauseBtn.addEventListener('click', () => {
+      if (App.audioManager.isPlaying) {
+        App.audioManager.pause()
+        this._pauseBtn.textContent = '▶'
+      } else {
+        App.audioManager.play()
+        this._pauseBtn.textContent = '⏸'
+      }
+    })
+    this._pauseBtn.hidden = false
+  }
+
   /** Swap in a new audio track while the visualizer is running. */
   async _swapAudio(file) {
     if (App.audioManager.isPlaying) {
@@ -227,6 +267,7 @@ export default class App {
       await App.audioManager.loadAudioBuffer(file)
       await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
       App.audioManager.play()
+      if (this._pauseBtn) this._pauseBtn.textContent = '⏸'
     } catch (err) {
       console.error('Audio swap failed:', err)
     }
@@ -279,8 +320,8 @@ export default class App {
       App.eegManager?.heartPulse ?? 0,
       App.eegManager?.headPose ?? null,
     )
-    App.audioManager.update()
+    App.audioManager?.update()
 
-    this.renderer.render(this.scene, this.camera)
+    if (this.renderer) this.renderer.render(this.scene, this.camera)
   }
 }
