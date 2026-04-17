@@ -447,7 +447,9 @@ a:focus-visible {
   &.poor     { background: #ef5350; box-shadow: 0 0 4px #ef5350; }
 }
 
-.bio-toggle {
+.bio-toggle,
+.bio-fullscreen,
+.bio-record {
   background: none;
   border: 1px solid rgba(255, 255, 255, 0.25);
   color: rgba(255, 255, 255, 0.5);
@@ -468,6 +470,85 @@ a:focus-visible {
     color: #00e676;
     border-color: #00e676;
   }
+}
+
+.bio-record {
+  // Record uses red when active instead of green
+  &.active {
+    color: #ef5350;
+    border-color: #ef5350;
+    animation: record-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes record-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 83, 80, 0.5); }
+  50%      { box-shadow: 0 0 0 4px rgba(239, 83, 80, 0); }
+}
+
+.bio-record-time {
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: #ef5350;
+  letter-spacing: 0.05em;
+  min-width: 2.8rem;
+
+  &[hidden] { display: none; }
+}
+
+.bio-mse-value {
+  font-size: 0.6rem;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+// ── Fullscreen bio panel ──────────────────────────────────────────────────────
+// Full-viewport data view. Hides the Three.js canvas and lays out all bio
+// sections in a responsive grid. CSS-scales canvases (image-rendering: pixelated
+// on spectrograms keeps columns crisp; webgl-plot line traces scale smoothly).
+body.fullscreen-bio {
+  .content { display: none; }
+
+  .bio-panel {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    left: 0;
+    bottom: 0;
+    z-index: 1004;
+    padding: 1.5rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 1rem;
+    overflow: auto;
+  }
+
+  .bio-section {
+    min-height: 0;
+    min-width: 0;
+    gap: 0.4rem;
+
+    canvas {
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 0;
+      flex: 1;
+    }
+  }
+
+  .bio-spec-body, .bio-bands-body {
+    flex: 1;
+    min-height: 0;
+  }
+
+  // First section (EEG) spans full width for clarity
+  .bio-section:first-child { grid-column: 1 / -1; }
+
+  // Keep controls on top and clickable
+  .eeg-controls { z-index: 1005; }
 }
 
 // ── Jellyfin ──────────────────────────────────────────────────────────────────

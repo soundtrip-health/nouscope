@@ -16,6 +16,9 @@ This document explains the key algorithms that drive the Nouscope visualization:
 8. [Fragment Shader — Color & Heartbeat Flush](#8-fragment-shader--color--heartbeat-flush)
 9. [Beat Reactions — Geometry & Rotation](#9-beat-reactions--geometry--rotation)
 10. [EEG Spectrogram Display](#10-eeg-spectrogram-display)
+11. [EEG–Music Entrainment Index](#6--eegmusic-entrainment-index)
+12. [EEG Complexity — Multiscale Entropy](#7--eeg-complexity--multiscale-entropy)
+13. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
 
 ---
 
@@ -642,3 +645,137 @@ Inspired by Nozaradan et al. (2012) — tests whether beat-related frequencies a
 - Nozaradan, S., Peretz, I., & Mouraux, A. (2012). Selective neuronal entrainment to the beat and meter embedded in a musical rhythm. *J. Neurosci.*, 32(49), 17572–17581.
 - Stober, S., Prätzlich, T., & Müller, M. (2016). Brain beats: Tempo extraction from EEG data. *Proc. ISMIR*, 276–282.
 - Grosche, P. & Müller, M. (2011). Extracting predominant local pulse information from music recordings. *IEEE TASLP*, 19(6), 1688–1701.
+
+---
+
+## §7 — EEG Complexity — Multiscale Entropy
+
+**File:** `src/js/managers/ComplexityManager.js`
+
+Multiscale entropy (MSE) characterises the complexity of a time series by
+computing Sample Entropy (SampEn) at multiple temporal scales after
+coarse-graining. A flat, low curve indicates a highly regular signal (e.g.
+seizure activity, deep anesthesia); a curve that rises with scale indicates
+rich cross-scale temporal structure — so-called "healthy" complexity.
+
+### Stage 1 — Quality-weighted channel aggregation
+
+- Source: `EEGManager._chBuffersLong` (2560-sample = 10 s per-channel buffers)
+- Window: last **`WIN_SAMPLES = 2048`** samples (8 s at 256 Hz)
+- Weights: `good=1.0`, `marginal=0.5`, `poor=0.0` (same convention as EntrainmentManager)
+- Output: `Float32Array(2048)` of the weighted channel average
+
+### Stage 2 — Tolerance r from full-signal σ
+
+- `r = TOL_COEF · σ` with `TOL_COEF = 0.15` (Richman & Moorman, 2000 default)
+- `σ` computed once on the aggregated window; r is **not** recomputed per scale
+  so values at different scales remain on a common axis
+
+### Stage 3 — Coarse-graining at τ = 1…NUM_SCALES
+
+For each scale τ ∈ {1…`NUM_SCALES = 6`}:
+
+```
+y[j] = (1/τ) · Σₖ₌₀^(τ-1)  x[j·τ + k],   j = 0 … ⌊N/τ⌋-1
+```
+
+τ = 1 returns the original signal (no copy). τ = 6 reduces the 2048-sample
+window to 341 samples, which is still plenty for SampEn convergence.
+
+### Stage 4 — Sample Entropy (m=2)
+
+```
+SampEn(m, r, N) = -ln( A / B )
+  B = # pairs (i, j), i ≠ j, with Chebyshev distance ≤ r over m points
+  A = # pairs (i, j), i ≠ j, with Chebyshev distance ≤ r over m+1 points
+```
+
+- `m = EMBED_DIM = 2` — standard choice, balances resolution vs. data requirement
+- Self-matches (i = j) excluded → unlike ApEn, no log(1) bias
+- Early exit on any dimension mismatch keeps the naïve O(N²·m) loop tolerable
+- `B = 0` or `A = 0` → returns 0 (undefined log); caller treats as "insufficient data"
+
+### Stage 5 — Output smoothing
+
+- Each scale's SampEn is EMA-smoothed (`EMA = 0.4`) across updates to reduce
+  jitter between the ~0.2 Hz recomputations
+- `complexity` = mean of the smoothed curve — a convenient scalar bio source
+
+### Update cadence
+
+- `UPDATE_INTERVAL_MS = 5000` (rate-limited to 0.2 Hz)
+- At scale 1, N = 2048, inner loop ≈ 2M iterations. Scale 2 → 524K.
+  Total cost per update ~3–5M comparisons, runs synchronously in a few tens of ms
+- If this causes visible hitches on slower machines, move to a Web Worker (the
+  entire computation takes one `buf` copy + scalar outputs, so worker transfer is cheap)
+
+### Constants
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `NUM_SCALES` | 6 | Coarse-graining scales |
+| `EMBED_DIM` | 2 | SampEn embedding dimension m |
+| `TOL_COEF` | 0.15 | r = TOL_COEF · σ |
+| `WIN_SAMPLES` | 2048 | Samples per update (8 s at 256 Hz) |
+| `UPDATE_INTERVAL_MS` | 5000 | Minimum interval between updates |
+| `EMA` | 0.4 | Per-scale output smoothing |
+
+### Display
+
+- `#mse-canvas` (280 × 60 px) in `#bio-panel`: 6 bars, violet→amber gradient.
+  Y-axis scaled to a fixed max of 2.5 (SampEn rarely exceeds this in practice).
+- `#bio-mse-value`: scalar `complexity` to 2 decimals
+- Bio source: `'complex'` — mappable to any viz parameter via MAPPING GUI
+
+### References
+
+- Costa, M., Goldberger, A. L., & Peng, C.-K. (2002). Multiscale entropy analysis of complex physiologic time series. *Physical Review Letters*, 89(6), 068102.
+- Richman, J. S., & Moorman, J. R. (2000). Physiological time-series analysis using approximate entropy and sample entropy. *Am. J. Physiol. Heart Circ. Physiol.*, 278(6), H2039–H2049.
+
+---
+
+## §8 — Session Recording — JSONL Export
+
+**File:** `src/js/managers/RecordingManager.js`
+
+A lightweight in-memory recorder that captures raw sensor samples and derived
+metrics into JSON Lines (JSONL) format while toggled on. On stop, the full
+buffer is assembled into a `Blob` and offered for download via an anchor tag
+with a timestamped filename (`nouscope-<iso>.jsonl`).
+
+### Record types
+
+| Type | Rate | Fields | Source |
+|---|---|---|---|
+| `meta` | 1× at start | `startedAt`, `sampleRates`, `channels`, `app` | start() |
+| `eeg` | 256 Hz | `ch: [tp9, af7, af8, tp10]` (µV) | `EEGManager._processEEGSample` |
+| `ppg` | 64 Hz | `raw` (unfiltered infrared) | `EEGManager._processPPGSample` |
+| `accel` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processAccel` |
+| `gyro` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processGyro` |
+| `bands` | ~2 Hz | `delta, theta, alpha, beta, gamma` (post-EMA) | `EEGManager._computeBandPower` |
+| `hr` | ~1 Hz | `bpm` (from MSPTDfast) | `EEGManager._runMSPTD` |
+| `entrain` | ~2 Hz | `idx` (smoothed) | `EntrainmentManager.update` |
+| `mse` | ~0.2 Hz | `curve`, `complexity` | `ComplexityManager.update` |
+
+- `t` on every record is `performance.now() - startedPerf` in milliseconds (one decimal place)
+- Each type rides on its own data path — no synchronous "tick" — so cadences reflect true per-sample arrival times
+
+### Design choices
+
+- **Hook pattern**: Each data path calls `App.recordingManager?.recordX(...)` directly.
+  When not recording, the call is a no-op (early `isRecording` check); overhead is one optional chaining + one branch per sample.
+- **Pre-serialization**: `JSON.stringify(obj)` is called at record time, so the final `Blob` is just `lines.join('\n')` — no deep walk over the accumulated object graph on stop.
+- **Raw PPG**: `ppg.raw` is the unfiltered infrared value from Muse so downstream users can apply their own filtering / beat detection.
+- **IMU**: samples are packet-averaged (3 samples per Muse reading) before recording, matching the display buffers. Raw per-sample logging would triple the IMU rate at marginal analytic value.
+
+### Memory profile
+
+- Per-sample overhead ~70 bytes (JSON + newline). One hour of full-stream recording ≈ 90 MB.
+- 4-hour sessions would push ~360 MB and may stress the browser. For long sessions prefer the File System Access API (Chrome/Edge) — not currently implemented.
+
+### UI
+
+- `⏺ ` button in `#eeg-controls` (visible only when EEG is connected).
+- Active state: red border + pulsing outline animation.
+- Elapsed time (`MM:SS`) shown next to the button while recording.
+- Click again to stop → immediate download.

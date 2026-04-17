@@ -19,15 +19,17 @@ No test suite is configured.
 ### Entry Point & Boot Sequence
 
 `src/js/index.js` instantiates `App`. The `App` constructor immediately:
-1. `_setupEEG()` — instantiates `EEGManager` and wires the connect/disconnect UI (so EEG can connect before music starts)
+1. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires the connect/disconnect UI (so EEG can connect before music starts)
 2. `_setupJellyfin()` — instantiates `JellyfinManager` and `JellyfinBrowser`, wires the `☁ Jellyfin` button
+3. `_setupRecording()` — instantiates `RecordingManager`, wires the `⏺` record button
+4. `_setupFullscreen()` — wires the `⛶` full-screen bio-panel toggle + Escape key
 
 Then on user interaction (click for demo track, file upload via the Track button, or track selection from Jellyfin browser):
-3. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
-4. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
-5. `EntrainmentManager` — instantiated (precomputes DFT kernels for tempogram analysis)
-6. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
-7. `update()` render loop starts (already running for EEG/bio; particles render once audio loads)
+5. `AudioManager.loadAudioBuffer(source)` — loads a `File` object or fetches `/audio/demo.mp3`
+6. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector`
+7. `EntrainmentManager` — instantiated (precomputes DFT kernels for tempogram analysis)
+8. `ReactiveParticles.init()` — creates ShaderMaterial, builds mesh, adds dat.GUI
+9. `update()` render loop starts (already running for EEG/bio; particles render once audio loads)
 
 If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time via the Track button (file upload) or the `☁ Jellyfin` button (stream from server). When EEG connects (before or after music), `autoMix` and `autoRotate` are set to `false` and `headControl` to `true`.
 
@@ -39,6 +41,8 @@ If `demo.mp3` is absent the UI shows an error; audio can be replaced at any time
 | `src/js/managers/AudioManager.js` | Audio loading (File or URL), Three.js AudioListener/AudioAnalyser, normalized `{ low, mid, high }` frequency bands, spectral-flux novelty curve |
 | `src/js/managers/BPMManager.js` | BPM detection, beat event dispatch via Three.js EventDispatcher |
 | `src/js/managers/EntrainmentManager.js` | Real-time EEG–music entrainment: parallel audio/EEG tempograms (0.5–5 Hz), z-score selective enhancement comparison, entrainment index (0–1) |
+| `src/js/managers/ComplexityManager.js` | Multiscale entropy (MSE) on quality-weighted 4-channel EEG average; SampEn at 6 scales, updated ~0.2 Hz; exposes `mseCurve` + `complexity` scalar |
+| `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file |
 | `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
 | `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; signal quality dots |
 | `src/js/managers/JellyfinManager.js` | Jellyfin API client: auth (username/password or API key), paginated music library browsing, stream URL generation; credentials persisted to `localStorage` (token only, never password) |
@@ -54,6 +58,7 @@ Each frame in `App.update()`:
 2. `ReactiveParticles.update(bandPower, heartPulse, headPose)` — maps audio + EEG to uniforms
 3. `AudioManager.update()` — refreshes FFT analyser data + samples spectral-flux novelty
 4. `EntrainmentManager.update(now)` — rate-limited to ~2 Hz; computes audio/EEG tempograms and entrainment index
+5. `ComplexityManager.update(now)` — rate-limited to ~0.2 Hz; computes 6-scale MSE on the EEG long buffer
 
 On each BPM beat, `ReactiveParticles.onBPMBeat()` randomly (30% chance each) triggers a GSAP rotation tween and/or a geometry reset to a new randomized cylinder (`resetMesh` → `createCylinderMesh`), each gated by **VISUALIZER** toggles and head-control state.
 
@@ -94,6 +99,41 @@ EEG uses **multiplicative** scaling: `uniform *= (1 + source * weight)`. This me
 - Graceful degradation: audio-only shows tempogram but entrainment=0; EEG-only likewise; both missing → all zero.
 - References: Nozaradan et al. (2012), Stober et al. (2016) "Brain Beats"
 
+### ComplexityManager — Multiscale Entropy
+
+- **Input**: quality-weighted 4-channel EEG average over the last 2048 samples (8 s at 256 Hz) from `EEGManager._chBuffersLong`
+- **Coarse-graining** at scales τ ∈ {1..6}: each scale averages τ consecutive samples
+- **Sample Entropy** (Richman & Moorman): m=2, r=0.15·σ (σ fixed from the full-signal std for cross-scale comparability), Chebyshev distance, self-matches excluded
+- **Output**: `mseCurve` (Float32Array(6), EMA-smoothed α=0.4) and scalar `complexity` (mean of curve)
+- Updates at ~0.2 Hz (`UPDATE_INTERVAL_MS=5000`); computation is synchronous (~tens of ms)
+- **Bio source**: `'complex'` in `BIO_SOURCES`, mappable to any viz parameter
+- **Display**: `#mse-canvas` (280×60 px) 6-bar chart in bio-panel; violet→amber color gradient across scales; label in `#bio-mse-value`
+- Graceful degradation: EEG disconnected → curve decays to 0 via EMA; all-poor quality → decay
+- References: Costa, Goldberger & Peng (2002); Richman & Moorman (2000)
+
+### RecordingManager — JSONL Data Export
+
+- **Pattern**: push-based. EEGManager/EntrainmentManager/ComplexityManager call `App.recordingManager?.recordX(...)` at data-production sites; when `isRecording=false`, the calls are cheap no-ops (one optional chain + one branch per sample)
+- **Record types** (`t` is ms since start):
+  - `eeg` — `ch:[tp9,af7,af8,tp10]` at 256 Hz (raw µV from Muse)
+  - `ppg` — `raw` at 64 Hz (unfiltered infrared)
+  - `accel`, `gyro` — `x,y,z` at ~52 Hz (packet-averaged)
+  - `bands` — `delta,theta,alpha,beta,gamma` at ~2 Hz (post-EMA output)
+  - `hr` — `bpm` after each successful MSPTD detection
+  - `entrain` — `idx` at ~2 Hz (smoothed entrainment)
+  - `mse` — `curve[]`, `complexity` at ~0.2 Hz
+  - `meta` header line at start with ISO timestamp, sample rates, channel labels
+- **UI**: `⏺` button in `#eeg-controls` (visible only when EEG connected); active state is red with pulse animation; elapsed time `MM:SS` shown next to button
+- **Download**: on stop, lines joined with `\n`, wrapped in `Blob` (`application/x-ndjson`), downloaded as `nouscope-{iso-ts}.jsonl` via anchor tag
+- **Memory**: ~70 bytes/sample → ~90 MB/hour at full stream. Multi-hour sessions should use File System Access API (not yet implemented)
+
+### Full-screen Bio Panel
+
+- `⛶` button in `#eeg-controls` (visible only when EEG connected) toggles `body.fullscreen-bio` class
+- CSS hides `.content` (Three.js canvas) and grids `#bio-panel` into a 2-column full-viewport layout (EEG row spans full width)
+- Canvases CSS-scale to fill their grid cells (`image-rendering: pixelated` keeps spectrograms crisp; webgl-plot line traces scale smoothly)
+- Escape key exits fullscreen; EEG disconnect also clears the mode
+
 ### BioDataDisplay — Live Data Panel
 
 - Toggle button `◉` appears in `#eeg-controls` once EEG connects; opens `#bio-panel` above controls.
@@ -109,7 +149,7 @@ EEG uses **multiplicative** scaling: `uniform *= (1 + source * weight)`. This me
 - **PARTICLES**: Start Color, End Color
 - **VISUALIZER**: Auto Mix (geometry swap on beat), Auto Rotate (GSAP rotation on beat), Head Control (IMU) — routes pitch/roll to `holderObjects.rotation`, Reset Cylinder
 - **AUDIO**: Bass Gain, Mid Gain, High Gain (all 0–2)
-- **MAPPING**: Per-parameter sub-folders (Amplitude, Turbulence, Particle Size, Spread Radius, Field Chaos, Hue Shift, Color Flush) each with Source dropdown (`none`, `delta`, `theta`, `alpha`, `beta`, `gamma`, `hr`, `entrain`) + Weight slider
+- **MAPPING**: Per-parameter sub-folders (Amplitude, Turbulence, Particle Size, Spread Radius, Field Chaos, Hue Shift, Color Flush) each with Source dropdown (`none`, `delta`, `theta`, `alpha`, `beta`, `gamma`, `hr`, `entrain`, `complex`) + Weight slider
 
 ### Jellyfin Integration
 

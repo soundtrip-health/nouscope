@@ -1,4 +1,5 @@
 import { MuseClient, zipSamples } from 'muse-js'
+import App from '../App'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -404,6 +405,10 @@ export default class EEGManager {
   _processEEGSample(channelData) {
     this.eegSampleCount++
 
+    App.recordingManager?.recordEeg(
+      channelData[0], channelData[1], channelData[2], channelData[3],
+    )
+
     for (let ch = 0; ch < 4; ch++) {
       const v = channelData[ch]
       const val = isNaN(v) ? 0 : v
@@ -496,6 +501,8 @@ export default class EEGManager {
     for (const band of Object.keys(result)) {
       this.bandPower[band] += BAND_SMOOTH * (result[band] - this.bandPower[band])
     }
+
+    App.recordingManager?.recordBands(this.bandPower)
 
     // Step 5: spectrogram columns (uses same channel weights)
     this._computeSpectrum(weights, totalW)
@@ -902,6 +909,8 @@ export default class EEGManager {
    *   4. Every ~1 second, run MSPTDfast on the buffer to update heartRate
    */
   _processPPGSample(raw) {
+    App.recordingManager?.recordPpg(raw)
+
     // 1. High-pass (remove DC & baseline wander)
     const hp = HP_ALPHA * (this._hpPrevY + raw - this._hpPrevX)
     this._hpPrevX = raw
@@ -976,6 +985,8 @@ export default class EEGManager {
     const sorted = [...ibis].sort((a, b) => a - b)
     const medIBI = sorted[Math.floor(sorted.length / 2)]
     this.heartRate = Math.round(60 / medIBI)
+
+    App.recordingManager?.recordHr(this.heartRate)
   }
 
   // ── IMU / head pose ──────────────────────────────────────────────────────
@@ -998,6 +1009,7 @@ export default class EEGManager {
 
     // Push raw average to display buffer
     this.imuSampleCount++
+    App.recordingManager?.recordAccel(ax, ay, az)
     this.accelDisplay.x.push(ax)
     this.accelDisplay.y.push(ay)
     this.accelDisplay.z.push(az)
@@ -1025,6 +1037,8 @@ export default class EEGManager {
     gx /= samples.length
     gy /= samples.length
     gz /= samples.length
+
+    App.recordingManager?.recordGyro(gx, gy, gz)
 
     this.gyroDisplay.x.push(gx)
     this.gyroDisplay.y.push(gy)
