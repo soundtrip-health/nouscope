@@ -141,6 +141,10 @@ export default class BioDataDisplay {
   _entrainValueEl = null
   _entrainFillEl  = null
 
+  // MSE bar chart state
+  _mseCtx         = null
+  _mseValueEl     = null
+
   /**
    * Create WebGL contexts and rolling-line plots for all three canvases.
    * Safe to call while the panel is hidden — canvas dimensions are set via HTML attributes.
@@ -183,6 +187,13 @@ export default class BioDataDisplay {
     const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`band-item-${b}`))
     this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`band-val-${b}`))
+
+    // MSE — bar chart of SampEn per scale (drawn in 2D canvas, simple & cheap)
+    const mseCanvas = document.getElementById('mse-canvas')
+    if (mseCanvas) {
+      this._mseCtx    = mseCanvas.getContext('2d')
+      this._mseValueEl = document.getElementById('bio-mse-value')
+    }
 
     // PPG — single filtered infrared trace
     const ppgCanvas = document.getElementById('ppg-canvas')
@@ -233,6 +244,7 @@ export default class BioDataDisplay {
     // Audio tempogram + entrainment meter update even without EEG
     this._updateAudioTempogram()
     this._updateEntrainmentMeter()
+    this._updateMse()
   }
 
   // ── Private ──────────────────────────────────────────────────────────────────
@@ -505,6 +517,47 @@ export default class BioDataDisplay {
     }
 
     this._specAudioCtx.putImageData(imgData, canvas.width - COL_WIDTH, 0)
+  }
+
+  // ── MSE bar chart ──────────────────────────────────────────────────────────
+
+  _updateMse() {
+    const cMgr = App.complexityManager
+    if (!cMgr || !this._mseCtx) return
+
+    const ctx    = this._mseCtx
+    const canvas = ctx.canvas
+    const W = canvas.width, H = canvas.height
+    const curve = cMgr.mseCurve
+    const nBars = curve.length
+
+    ctx.clearRect(0, 0, W, H)
+
+    // Soft grid line at y=1 (typical SampEn baseline)
+    const yAxisMax = 2.5                      // SampEn rarely exceeds ~2.5 in practice
+    const y1 = H - (1 / yAxisMax) * H
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
+    ctx.beginPath(); ctx.moveTo(0, y1); ctx.lineTo(W, y1); ctx.stroke()
+
+    const gap   = 3
+    const barW  = (W - gap * (nBars + 1)) / nBars
+    for (let i = 0; i < nBars; i++) {
+      const v = Math.max(0, Math.min(yAxisMax, curve[i]))
+      const h = (v / yAxisMax) * (H - 2)
+      const x = gap + i * (barW + gap)
+      // Color gradient violet→green→amber across scales to emphasise the curve shape
+      const t = nBars > 1 ? i / (nBars - 1) : 0
+      const r = Math.round(167 * (1 - t) + 251 * t)
+      const g = Math.round(139 * (1 - t) + 191 * t)
+      const b = Math.round(250 * (1 - t) +  36 * t)
+      ctx.fillStyle = `rgb(${r},${g},${b})`
+      ctx.fillRect(x, H - h - 1, barW, h)
+    }
+
+    if (this._mseValueEl) {
+      const c = cMgr.complexity
+      this._mseValueEl.textContent = c > 0 ? c.toFixed(2) : ''
+    }
   }
 
   // ── Entrainment meter ──────────────────────────────────────────────────────

@@ -5,6 +5,8 @@ import BPMManager from './managers/BPMManager'
 import AudioManager from './managers/AudioManager'
 import EEGManager from './managers/EEGManager'
 import EntrainmentManager from './managers/EntrainmentManager'
+import ComplexityManager from './managers/ComplexityManager'
+import RecordingManager from './managers/RecordingManager'
 import BioDataDisplay from './ui/BioDataDisplay'
 import JellyfinManager from './managers/JellyfinManager'
 import JellyfinBrowser from './ui/JellyfinBrowser'
@@ -28,6 +30,8 @@ export default class App {
   static bpmManager = null
   static eegManager = null
   static entrainmentManager = null
+  static complexityManager = null
+  static recordingManager = null
 
   constructor() {
     const overlay = document.querySelector('.user_interaction')
@@ -55,6 +59,8 @@ export default class App {
 
     this._setupEEG()
     this._setupJellyfin()
+    this._setupRecording()
+    this._setupFullscreen()
 
     // Start the render/update loop immediately so EEG plots work before music starts
     this.update()
@@ -158,6 +164,7 @@ export default class App {
   /** Wire up EEG connect/disconnect UI and create the EEGManager instance. */
   _setupEEG() {
     App.eegManager = new EEGManager()
+    App.complexityManager = new ComplexityManager()
 
     const controls    = document.getElementById('eeg-controls')
     const btn         = document.getElementById('eeg-connect')
@@ -207,6 +214,11 @@ export default class App {
       panel.hidden = true
       this._bioVisible = false
       toggleBtn.classList.remove('active')
+      if (this._recordBtn)     this._recordBtn.hidden = true
+      if (this._fullscreenBtn) this._fullscreenBtn.hidden = true
+      // Exit fullscreen mode if active, since the panel is now hidden
+      document.body.classList.remove('fullscreen-bio')
+      this._fullscreenBtn?.classList.remove('active')
     }
 
     btn.addEventListener('click', async () => {
@@ -220,6 +232,8 @@ export default class App {
           btn.textContent = 'Disconnect EEG'
           btn.disabled = false
           toggleBtn.hidden = false
+          if (this._recordBtn)     this._recordBtn.hidden = false
+          if (this._fullscreenBtn) this._fullscreenBtn.hidden = false
           // Switch to EEG-driven defaults: head control on, auto-mix/rotate off
           if (this.particles) {
             this.particles.properties.autoMix = false
@@ -238,6 +252,71 @@ export default class App {
           btn.textContent = 'Connect EEG'
           btn.disabled = false
         }
+      }
+    })
+  }
+
+  /** Wire up the record button + download-on-stop flow. */
+  _setupRecording() {
+    App.recordingManager = new RecordingManager()
+
+    const btn     = document.getElementById('bio-record')
+    const timeEl  = document.getElementById('bio-record-time')
+    this._recordBtn    = btn
+    this._recordTimeEl = timeEl
+
+    btn.addEventListener('click', () => {
+      const rm = App.recordingManager
+      if (rm.isRecording) {
+        const blob = rm.stop()
+        this._downloadRecording(blob, rm.startedAtMs)
+        btn.classList.remove('active')
+        btn.title = 'Record raw data to JSONL'
+        timeEl.hidden = true
+      } else {
+        rm.start()
+        btn.classList.add('active')
+        btn.title = 'Stop recording and download JSONL'
+        timeEl.hidden = false
+      }
+    })
+  }
+
+  /** Trigger a browser download of the JSONL blob. */
+  _downloadRecording(blob, startedAtMs) {
+    const ts    = new Date(startedAtMs).toISOString().replace(/[:.]/g, '-').replace('Z', '')
+    const url   = URL.createObjectURL(blob)
+    const a     = document.createElement('a')
+    a.href      = url
+    a.download  = `nouscope-${ts}.jsonl`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  /** Wire up the full-screen bio-panel button + Escape-to-exit. */
+  _setupFullscreen() {
+    const btn = document.getElementById('bio-fullscreen')
+    this._fullscreenBtn = btn
+
+    const toggle = () => {
+      const active = document.body.classList.toggle('fullscreen-bio')
+      btn.classList.toggle('active', active)
+      // Make sure the panel is visible when entering fullscreen
+      if (active) {
+        const panel = document.getElementById('bio-panel')
+        panel.hidden = false
+        this._bioVisible = true
+        this._bioToggle?.classList.add('active')
+      }
+    }
+
+    btn.addEventListener('click', toggle)
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('fullscreen-bio')) {
+        toggle()
       }
     })
   }
@@ -326,6 +405,15 @@ export default class App {
     )
     App.audioManager?.update()
     App.entrainmentManager?.update(performance.now())
+    App.complexityManager?.update(performance.now())
+
+    // Record-time readout (updates ~once per second is plenty; cheap per-frame)
+    if (this._recordTimeEl && App.recordingManager?.isRecording) {
+      const s = Math.floor(App.recordingManager.elapsedMs() / 1000)
+      const mm = Math.floor(s / 60).toString().padStart(2, '0')
+      const ss = (s % 60).toString().padStart(2, '0')
+      this._recordTimeEl.textContent = `${mm}:${ss}`
+    }
 
     if (this.renderer) this.renderer.render(this.scene, this.camera)
   }

@@ -246,6 +246,8 @@ export default class EntrainmentManager {
     } else {
       this.entrainment *= (1 - ENTRAIN_EMA)
     }
+
+    App.recordingManager?.recordEntrain(this.entrainment)
   }
 }
 
