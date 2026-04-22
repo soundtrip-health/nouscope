@@ -2,8 +2,12 @@ import App from '../App'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-// MSE: coarse-grain at τ=1..NUM_SCALES, compute SampEn at each scale.
-const NUM_SCALES    = 6
+// MSE: coarse-grain at each τ in SCALES, compute SampEn at each scale.
+// Odd scales {1,3,5,7,9} give a wider temporal range than consecutive 1..6 while
+// keeping the per-scale cost manageable. At τ=9 the 2048-sample window coarse-grains
+// to 227 samples — still within SampEn's usable range for m=2.
+const SCALES        = [1, 3, 5, 7, 9]
+const NUM_SCALES    = SCALES.length
 const EMBED_DIM     = 2        // m — embedding dimension for SampEn (2 is standard)
 const TOL_COEF      = 0.15     // r = TOL_COEF × σ  (Richman & Moorman, 2000)
 const WIN_SAMPLES   = 2048     // 8 s of EEG at 256 Hz — balances resolution vs. cost
@@ -14,10 +18,6 @@ const UPDATE_INTERVAL_MS = 5000
 
 // Quality scoring (mirrors EEGManager + EntrainmentManager conventions)
 const Q_WEIGHT = { good: 1.0, marginal: 0.5, poor: 0.0 }
-
-// EMA smoothing on the output curve — 5 s update cadence already smooths a lot,
-// but this kills the last bit of scale-level jitter between recomputations.
-const EMA = 0.4
 
 // ── ComplexityManager ───────────────────────────────────────────────────────
 
@@ -54,6 +54,7 @@ export default class ComplexityManager {
   mseCurve   = new Float32Array(NUM_SCALES)
   complexity = 0       // 0–1-ish; mean SampEn across scales
   numScales  = NUM_SCALES
+  scales     = SCALES  // τ values in display order
 
   // ── Private ────────────────────────────────────────────────────────────────
   _lastUpdateTime = 0
@@ -65,7 +66,7 @@ export default class ComplexityManager {
 
     const eegMgr = App.eegManager
     if (!eegMgr?.isConnected) {
-      this._decay()
+      this._reset()
       return
     }
 
@@ -92,27 +93,27 @@ export default class ComplexityManager {
 
     // Tolerance r — fixed from full-signal σ so scale values stay comparable
     const sigma = _std(buf)
-    if (sigma < 1e-6) { this._decay(); return }
+    if (sigma < 1e-6) { this._reset(); return }
     const r = TOL_COEF * sigma
 
-    // SampEn at each scale — update via EMA
-    let sum = 0, count = 0
-    for (let tau = 1; tau <= NUM_SCALES; tau++) {
+    // SampEn at each scale — raw values, no smoothing
+    let sum = 0
+    for (let i = 0; i < NUM_SCALES; i++) {
+      const tau = SCALES[i]
       const coarse = _coarseGrain(buf, tau)
       let se = _sampleEntropy(coarse, EMBED_DIM, r)
       if (!isFinite(se) || se < 0) se = 0
-      this.mseCurve[tau - 1] += EMA * (se - this.mseCurve[tau - 1])
-      sum += this.mseCurve[tau - 1]
-      count++
+      this.mseCurve[i] = se
+      sum += se
     }
-    this.complexity = count > 0 ? sum / count : 0
+    this.complexity = sum / NUM_SCALES
 
     App.recordingManager?.recordMse(this.mseCurve, this.complexity)
   }
 
-  _decay() {
-    for (let i = 0; i < NUM_SCALES; i++) this.mseCurve[i] *= (1 - EMA)
-    this.complexity *= (1 - EMA)
+  _reset() {
+    this.mseCurve.fill(0)
+    this.complexity = 0
   }
 }
 

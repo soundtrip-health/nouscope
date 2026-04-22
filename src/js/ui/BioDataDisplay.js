@@ -13,6 +13,12 @@ const BAND_YMAX_MIN    = 0.2   // minimum visible Y range (prevents zero-range w
 const BAND_YMAX_DECAY  = 0.999 // per-frame running-max decay (~6% per 100 frames)
 const BAND_LERP        = 0.08  // per-frame EMA toward bandPower (~0.5 s to 90% at 60 fps)
 
+// MSE timeseries: 5 lines (one per τ scale), rolling window wide enough to see
+// several update cycles. MSE recomputes at ~0.2 Hz; the plot holds the raw value
+// flat between updates (no smoothing), so steps reflect actual recomputations.
+const MSE_ROLL   = 1800  // 30 s at ~60 fps — covers ~6 MSE update cycles
+const MSE_Y_MAX  = 2.5   // SampEn rarely exceeds this; used to map values into [-1, +1]
+
 const PPG_ROLL = 384  // 6 s at 64 Hz — matches MSPTD analysis window
 
 const IMU_ROLL    = 208    // 4 s at ~52 Hz
@@ -47,6 +53,22 @@ const IMU_COLORS = [
   new ColorRGBA(217,  77,  77, 255),   // gy — darker red
   new ColorRGBA(255, 153, 128, 255),   // gz — lighter red
 ]
+
+// MSE scale colors — violet→amber gradient across the 5 scales (τ=1 → τ=9)
+const MSE_RGB = (() => {
+  const N = 5
+  const arr = new Array(N)
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1)
+    arr[i] = [
+      Math.round(167 * (1 - t) + 251 * t),
+      Math.round(139 * (1 - t) + 191 * t),
+      Math.round(250 * (1 - t) +  36 * t),
+    ]
+  }
+  return arr
+})()
+const MSE_COLORS = MSE_RGB.map(([r, g, b]) => new ColorRGBA(r, g, b, 255))
 
 // ── Spectrogram ──────────────────────────────────────────────────────────────
 
@@ -141,9 +163,11 @@ export default class BioDataDisplay {
   _entrainValueEl = null
   _entrainFillEl  = null
 
-  // MSE bar chart state
-  _mseCtx         = null
-  _mseValueEl     = null
+  // MSE timeseries state (5 lines, one per τ scale)
+  _mseGL      = null
+  _msePlot    = null
+  _mseValueEl = null
+  _mseValEls  = null  // legend value spans (one per scale)
 
   /**
    * Create WebGL contexts and rolling-line plots for all three canvases.
@@ -188,11 +212,15 @@ export default class BioDataDisplay {
     this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`band-item-${b}`))
     this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`band-val-${b}`))
 
-    // MSE — bar chart of SampEn per scale (drawn in 2D canvas, simple & cheap)
+    // MSE — 5-line rolling timeseries (one line per τ scale)
     const mseCanvas = document.getElementById('mse-canvas')
     if (mseCanvas) {
-      this._mseCtx    = mseCanvas.getContext('2d')
+      this._mseGL = createWebGL2Context(mseCanvas, { transparent: true })
+      setBackgroundColor(this._mseGL, TRANSPARENT)
+      this._msePlot = new WebglLineRoll(this._mseGL, MSE_ROLL, 5)
+      MSE_COLORS.forEach((c, i) => this._msePlot.setLineColor(c, i))
       this._mseValueEl = document.getElementById('bio-mse-value')
+      this._mseValEls  = [0, 1, 2, 3, 4].map(i => document.getElementById(`mse-val-${i}`))
     }
 
     // PPG — single filtered infrared trace
@@ -519,44 +547,34 @@ export default class BioDataDisplay {
     this._specAudioCtx.putImageData(imgData, canvas.width - COL_WIDTH, 0)
   }
 
-  // ── MSE bar chart ──────────────────────────────────────────────────────────
+  // ── MSE timeseries ─────────────────────────────────────────────────────────
 
   _updateMse() {
     const cMgr = App.complexityManager
-    if (!cMgr || !this._mseCtx) return
+    if (!cMgr || !this._msePlot) return
 
-    const ctx    = this._mseCtx
-    const canvas = ctx.canvas
-    const W = canvas.width, H = canvas.height
+    // Map [0, MSE_Y_MAX] → [-1, +1] for webgl-plot (0 = bottom, MSE_Y_MAX = top).
+    // The raw mseCurve holds steady between 0.2 Hz recomputations, so the plot
+    // shows a staircase — each step is a real update.
     const curve = cMgr.mseCurve
-    const nBars = curve.length
-
-    ctx.clearRect(0, 0, W, H)
-
-    // Soft grid line at y=1 (typical SampEn baseline)
-    const yAxisMax = 2.5                      // SampEn rarely exceeds ~2.5 in practice
-    const y1 = H - (1 / yAxisMax) * H
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
-    ctx.beginPath(); ctx.moveTo(0, y1); ctx.lineTo(W, y1); ctx.stroke()
-
-    const gap   = 3
-    const barW  = (W - gap * (nBars + 1)) / nBars
-    for (let i = 0; i < nBars; i++) {
-      const v = Math.max(0, Math.min(yAxisMax, curve[i]))
-      const h = (v / yAxisMax) * (H - 2)
-      const x = gap + i * (barW + gap)
-      // Color gradient violet→green→amber across scales to emphasise the curve shape
-      const t = nBars > 1 ? i / (nBars - 1) : 0
-      const r = Math.round(167 * (1 - t) + 251 * t)
-      const g = Math.round(139 * (1 - t) + 191 * t)
-      const b = Math.round(250 * (1 - t) +  36 * t)
-      ctx.fillStyle = `rgb(${r},${g},${b})`
-      ctx.fillRect(x, H - h - 1, barW, h)
+    const N = curve.length
+    const y = new Array(N)
+    for (let i = 0; i < N; i++) {
+      y[i] = Math.max(-1, Math.min(1, (curve[i] ?? 0) / MSE_Y_MAX * 2 - 1))
     }
+    this._msePlot.addPoint(y)
+    this._mseGL.clear(this._mseGL.COLOR_BUFFER_BIT)
+    this._msePlot.draw()
 
     if (this._mseValueEl) {
       const c = cMgr.complexity
       this._mseValueEl.textContent = c > 0 ? c.toFixed(2) : ''
+    }
+    if (this._mseValEls) {
+      for (let i = 0; i < N; i++) {
+        const el = this._mseValEls[i]
+        if (el) el.textContent = (curve[i] ?? 0).toFixed(2)
+      }
     }
   }
 
