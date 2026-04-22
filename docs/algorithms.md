@@ -671,16 +671,18 @@ rich cross-scale temporal structure — so-called "healthy" complexity.
 - `σ` computed once on the aggregated window; r is **not** recomputed per scale
   so values at different scales remain on a common axis
 
-### Stage 3 — Coarse-graining at τ = 1…NUM_SCALES
+### Stage 3 — Coarse-graining at τ ∈ SCALES
 
-For each scale τ ∈ {1…`NUM_SCALES = 6`}:
+For each scale τ ∈ `SCALES = [1, 3, 5, 7, 9]`:
 
 ```
 y[j] = (1/τ) · Σₖ₌₀^(τ-1)  x[j·τ + k],   j = 0 … ⌊N/τ⌋-1
 ```
 
-τ = 1 returns the original signal (no copy). τ = 6 reduces the 2048-sample
-window to 341 samples, which is still plenty for SampEn convergence.
+Odd scales widen the temporal range beyond the original 1..6 convention while
+keeping per-scale cost manageable. τ = 1 returns the original signal (no copy).
+τ = 9 reduces the 2048-sample window to 227 samples — still within SampEn's
+usable range for m=2.
 
 ### Stage 4 — Sample Entropy (m=2)
 
@@ -695,17 +697,18 @@ SampEn(m, r, N) = -ln( A / B )
 - Early exit on any dimension mismatch keeps the naïve O(N²·m) loop tolerable
 - `B = 0` or `A = 0` → returns 0 (undefined log); caller treats as "insufficient data"
 
-### Stage 5 — Output smoothing
+### Stage 5 — Output
 
-- Each scale's SampEn is EMA-smoothed (`EMA = 0.4`) across updates to reduce
-  jitter between the ~0.2 Hz recomputations
-- `complexity` = mean of the smoothed curve — a convenient scalar bio source
+- Each scale's raw SampEn is written directly to `mseCurve[i]` on each update;
+  there is no temporal smoothing, so steps in the plot reflect real 0.2 Hz
+  recomputations
+- `complexity` = mean of the curve — a convenient scalar bio source
 
 ### Update cadence
 
 - `UPDATE_INTERVAL_MS = 5000` (rate-limited to 0.2 Hz)
-- At scale 1, N = 2048, inner loop ≈ 2M iterations. Scale 2 → 524K.
-  Total cost per update ~3–5M comparisons, runs synchronously in a few tens of ms
+- At scale 1, N = 2048, inner loop ≈ 2M iterations. Scale 9 → ~25K.
+  Total cost per update ~2–3M comparisons, runs synchronously in a few tens of ms
 - If this causes visible hitches on slower machines, move to a Web Worker (the
   entire computation takes one `buf` copy + scalar outputs, so worker transfer is cheap)
 
@@ -713,18 +716,23 @@ SampEn(m, r, N) = -ln( A / B )
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `NUM_SCALES` | 6 | Coarse-graining scales |
+| `SCALES` | `[1, 3, 5, 7, 9]` | Coarse-graining scales (τ values) |
+| `NUM_SCALES` | 5 | `SCALES.length` |
 | `EMBED_DIM` | 2 | SampEn embedding dimension m |
 | `TOL_COEF` | 0.15 | r = TOL_COEF · σ |
 | `WIN_SAMPLES` | 2048 | Samples per update (8 s at 256 Hz) |
 | `UPDATE_INTERVAL_MS` | 5000 | Minimum interval between updates |
-| `EMA` | 0.4 | Per-scale output smoothing |
 
 ### Display
 
-- `#mse-canvas` (280 × 60 px) in `#bio-panel`: 6 bars, violet→amber gradient.
-  Y-axis scaled to a fixed max of 2.5 (SampEn rarely exceeds this in practice).
-- `#bio-mse-value`: scalar `complexity` to 2 decimals
+- `#mse-canvas` (200 × 75 px) in `#bio-panel`: 5-line rolling timeseries (one line
+  per τ ∈ `SCALES`), violet→amber color gradient across scales. Raw values — no
+  smoothing — so the plot renders as a staircase, each step = one recomputation.
+  Rolling window `MSE_ROLL = 1800` (~30 s at 60 fps) shows ~6 MSE update cycles.
+  Y-axis fixed to `MSE_Y_MAX = 2.5` (SampEn rarely exceeds this in practice).
+- Per-scale legend (`#mse-val-0`…`#mse-val-4`) shows the latest SampEn value for
+  each τ.
+- `#bio-mse-value`: scalar `complexity` (mean of all scales) to 2 decimals
 - Bio source: `'complex'` — mappable to any viz parameter via MAPPING GUI
 
 ### References

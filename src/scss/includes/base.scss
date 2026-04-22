@@ -363,6 +363,36 @@ a:focus-visible {
   min-width: 2.4rem;
 }
 
+.bio-mse-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+
+  canvas { width: 200px; }   // override the generic 280px rule for mse canvas only
+}
+
+.bio-mse-legend {
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  flex-shrink: 0;
+}
+
+.bio-mse-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.bio-mse-val {
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.55);
+  min-width: 2.4rem;
+}
+
 .bio-spec-body {
   display: flex;
   align-items: stretch;
@@ -539,7 +569,7 @@ body.fullscreen-bio {
     }
   }
 
-  .bio-spec-body, .bio-bands-body {
+  .bio-spec-body, .bio-bands-body, .bio-mse-body {
     flex: 1;
     min-height: 0;
   }
