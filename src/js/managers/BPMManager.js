@@ -1,5 +1,6 @@
 import { EventDispatcher } from 'three'
 import { guess } from 'web-audio-beat-detector'
+import App from '../App'
 
 // --- Constants ---
 const BEAT_EVENT = 'beat'
@@ -38,6 +39,7 @@ export default class BPMManager extends EventDispatcher {
     this.interval = 60000 / bpm
     clearInterval(this.intervalId)
     this.intervalId = setInterval(this.updateBPM.bind(this), this.interval)
+    App.recordingManager?.recordMusicTempo(bpm)
   }
 
   updateBPM() {

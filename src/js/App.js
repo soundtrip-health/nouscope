@@ -265,18 +265,29 @@ export default class App {
     this._recordBtn    = btn
     this._recordTimeEl = timeEl
 
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const rm = App.recordingManager
       if (rm.isRecording) {
-        const blob = rm.stop()
-        this._downloadRecording(blob, rm.startedAtMs)
+        btn.disabled = true
+        const blob = await rm.stop()
+        // Stream mode writes straight to disk and returns null; memory-mode
+        // fallback returns a Blob the browser must download.
+        if (blob) this._downloadRecording(blob, rm.startedAtMs)
+        btn.disabled = false
         btn.classList.remove('active')
         btn.title = 'Record raw data to JSONL'
         timeEl.hidden = true
       } else {
-        rm.start()
+        const eeg = App.eegManager
+        const started = await rm.start({
+          device:     eeg?.deviceName,
+          deviceInfo: eeg?.deviceInfo,
+          channels:   ['TP9', 'AF7', 'AF8', 'TP10'],
+          audioBpm:   App.bpmManager?.bpmValue || null,
+        })
+        if (!started) return   // user cancelled the save-file picker
         btn.classList.add('active')
-        btn.title = 'Stop recording and download JSONL'
+        btn.title = 'Stop recording'
         timeEl.hidden = false
       }
     })

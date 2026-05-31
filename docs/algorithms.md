@@ -746,44 +746,80 @@ SampEn(m, r, N) = -ln( A / B )
 
 **File:** `src/js/managers/RecordingManager.js`
 
-A lightweight in-memory recorder that captures raw sensor samples and derived
-metrics into JSON Lines (JSONL) format while toggled on. On stop, the full
-buffer is assembled into a `Blob` and offered for download via an anchor tag
-with a timestamped filename (`nouscope-<iso>.jsonl`).
+Captures **raw Muse sensor packets** plus nouscope's derived metrics into JSON
+Lines (JSONL) format while toggled on. Raw sensor records preserve the native
+muse-js reading shape (packet `index` / `sequenceId` + per-packet `samples`
+array), so files are byte-compatible with the tested `eeg-recorder` analysis
+pipeline (`eeg-recorder/analysis/utils.py`, `refs/eeg.py`), which reconstructs
+the timeline from packet indices.
 
 ### Record types
 
 | Type | Rate | Fields | Source |
 |---|---|---|---|
-| `meta` | 1× at start | `startedAt`, `sampleRates`, `channels`, `app` | start() |
-| `eeg` | 256 Hz | `ch: [tp9, af7, af8, tp10]` (µV) | `EEGManager._processEEGSample` |
-| `ppg` | 64 Hz | `raw` (unfiltered infrared) | `EEGManager._processPPGSample` |
-| `accel` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processAccel` |
-| `gyro` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processGyro` |
-| `bands` | ~2 Hz | `delta, theta, alpha, beta, gamma` (post-EMA) | `EEGManager._computeBandPower` |
-| `hr` | ~1 Hz | `bpm` (from MSPTDfast) | `EEGManager._runMSPTD` |
-| `entrain` | ~2 Hz | `idx` (smoothed) | `EntrainmentManager.update` |
-| `mse` | ~0.2 Hz | `curve`, `complexity` | `ComplexityManager.update` |
+| `meta` | 1× at start | `startedAt`, `app`, `device`, `deviceInfo`, `electrodeNames`, `sampleRates`, `audioBpm` | `start()` |
+| `eeg` | ~21 packets/s ×4 ch | `index, electrode, timestamp, samples:[12 µV]` | raw `eegReadings` sub |
+| `ppg` | ~11 packets/s ×3 ch | `index, ppgChannel, timestamp, samples:[6]` | `ppgReadings` sub |
+| `accel` | ~17 packets/s | `sequenceId, samples:[{x,y,z}×3]` | `accelerometerData` sub |
+| `gyro` | ~17 packets/s | `sequenceId, samples:[{x,y,z}×3]` | `gyroscopeData` sub |
+| `bands` | ~2 Hz | `t, delta, theta, alpha, beta, gamma` (post-EMA) | `EEGManager._computeBandPower` |
+| `hr` | ~1 Hz | `t, bpm` (from MSPTDfast) | `EEGManager._runMSPTD` |
+| `entrain` | ~2 Hz | `t, idx` (smoothed) | `EntrainmentManager.update` |
+| `mse` | ~0.2 Hz | `t, curve, complexity` | `ComplexityManager.update` |
+| `music` | on track load / BPM change | `t, bpm` | `BPMManager.setBPM` |
 
-- `t` on every record is `performance.now() - startedPerf` in milliseconds (one decimal place)
-- Each type rides on its own data path — no synchronous "tick" — so cadences reflect true per-sample arrival times
+- **Raw sensor records carry no `t`** — they store the native muse-js
+  `index`/`sequenceId`/`timestamp` fields the analysis tools already use to
+  rebuild the timeline. Recording whole readings (rather than the decimated
+  per-sample rows used previously) is what makes the files analysis-compatible.
+- **Derived records carry `t`** = `performance.now() - startedPerf` in
+  milliseconds (one decimal place).
+- Each path rides on its own data stream — no synchronous "tick" — so cadences
+  reflect true per-packet arrival times.
+- EEG raw packets come from a **dedicated `eegReadings` subscription** added
+  alongside the `zipSamples` stream that feeds the band-power pipeline; PPG
+  records **every channel** (not just the infrared channel used for HR).
+
+### Persistence — periodic flush + RAM clearing
+
+Two modes, selected at `start()`:
+
+- **stream** (File System Access API; Chrome/Edge): `start()` prompts for a save
+  location (requires the record-button click as the user gesture) and opens a
+  long-lived `FileSystemWritableFileStream`. Records accumulate in a small
+  `_pending` buffer; a `setInterval` flush (`FLUSH_INTERVAL_MS = 4000`) writes
+  the batch to the stream and **clears `_pending`**, so RAM stays bounded
+  regardless of session length and data is streamed to disk incrementally
+  instead of held until Stop. Flushes are serialized via a `_flushing` guard so
+  `write()` calls never overlap. `stop()` drains the buffer and `close()`s the
+  stream — no download needed.
+- **memory** (fallback when the API is unavailable, or the user dismisses the
+  picker → recording simply doesn't start): flushed chunks accumulate in
+  `_lines` and `stop()` returns a `Blob` the browser downloads as
+  `nouscope-<iso>.jsonl`.
 
 ### Design choices
 
-- **Hook pattern**: Each data path calls `App.recordingManager?.recordX(...)` directly.
-  When not recording, the call is a no-op (early `isRecording` check); overhead is one optional chaining + one branch per sample.
-- **Pre-serialization**: `JSON.stringify(obj)` is called at record time, so the final `Blob` is just `lines.join('\n')` — no deep walk over the accumulated object graph on stop.
-- **Raw PPG**: `ppg.raw` is the unfiltered infrared value from Muse so downstream users can apply their own filtering / beat detection.
-- **IMU**: samples are packet-averaged (3 samples per Muse reading) before recording, matching the display buffers. Raw per-sample logging would triple the IMU rate at marginal analytic value.
+- **Hook pattern**: each data path calls `App.recordingManager?.recordX(...)`
+  directly; when not recording the call is a no-op (early `isRecording` check) —
+  one optional chain + one branch per packet.
+- **Pre-serialization**: `JSON.stringify(obj)` runs at record time, so a flush
+  is just `pending.join('\n')` — no deep walk over an accumulated object graph.
+- **Crash resilience**: in stream mode at most `FLUSH_INTERVAL_MS` of data is
+  in RAM; everything older has been written to the disk stream. (Note: the
+  File System Access API commits the swap file to the target on `close()`; an
+  abrupt crash leaves a recoverable swap file rather than auto-finalizing.)
 
 ### Memory profile
 
-- Per-sample overhead ~70 bytes (JSON + newline). One hour of full-stream recording ≈ 90 MB.
-- 4-hour sessions would push ~360 MB and may stress the browser. For long sessions prefer the File System Access API (Chrome/Edge) — not currently implemented.
+- Stream mode: bounded — only the last ≤4 s of records plus a one-batch write
+  buffer are resident, so multi-hour sessions are safe.
+- Memory fallback: ~the same per-packet byte cost as before; a full-stream hour
+  is on the order of tens of MB. Prefer stream mode for long sessions.
 
 ### UI
 
 - `⏺ ` button in `#eeg-controls` (visible only when EEG is connected).
 - Active state: red border + pulsing outline animation.
 - Elapsed time (`MM:SS`) shown next to the button while recording.
-- Click again to stop → immediate download.
+- Click to start (prompts for file in stream mode); click again to stop.
