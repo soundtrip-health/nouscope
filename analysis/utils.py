@@ -48,6 +48,7 @@ TEMPO_HOP_S = 0.5  # ~2 Hz update
 
 CH_NAMES = ["TP9", "AF7", "AF8", "TP10"]
 Q_WEIGHT = {"good": 1.0, "marginal": 0.5, "poor": 0.0}
+PPG_INFRARED = 1  # ppgChannel 1 — mirrors EEGManager's choice for heart-rate
 
 
 @dataclass
@@ -66,13 +67,98 @@ class Recording:
     duration_s: float
 
 
+_COUNTER_MODULUS = 1 << 16  # muse-js index/sequenceId counters are 16-bit
+
+
+def _unwrap_counter(state: dict, key, raw_value: int) -> int:
+    """Correct a 16-bit hardware counter (`index`/`sequenceId`) for
+    wraparound. `state` accumulates `{key: (prev_raw, wraps)}` across calls —
+    call once per reading, in file order, per independent counter stream
+    (e.g. one per electrode/ppgChannel). A backward jump of more than half
+    the modulus is treated as one wrap, not a real time-reversal.
+
+    We reconstruct time from this counter rather than the raw `timestamp`
+    field: `timestamp` turned out to be a genuine device clock, but at the
+    ~1.8e12 ms magnitude these recordings carry, it has clearly been through
+    a float32 cast somewhere upstream — float32 only resolves ~131k-unit
+    steps at that magnitude, so per-packet timestamp deltas (true spacing
+    46.875 ms) mostly round to 0 and then jump in ~131k-unit multiples of
+    that same 46.875 ms once enough real time accumulates. The counter is an
+    exact integer with no such precision loss.
+    """
+    prev = state.get(key)
+    wraps = 0 if prev is None else prev[1] + (1 if prev[0] - raw_value > _COUNTER_MODULUS // 2 else 0)
+    state[key] = (raw_value, wraps)
+    return raw_value + wraps * _COUNTER_MODULUS
+
+
+def _reconstruct_eeg_packets(eeg_by_idx: dict[int, dict[int, np.ndarray]]) -> list[tuple[float, np.ndarray]]:
+    """Merge per-electrode packets sharing an (unwrapped) muse-js `index`
+    into one (12, 4) block per packet. `index` advances once per packet-group
+    (~21.33/s), so relative time is
+    `(index - first_index) * samples_per_packet / EEG_FS`. Groups missing an
+    electrode (a dropped BLE notification) are skipped — they surface as a
+    gap downstream, same as any other dropout."""
+    idxs = sorted(eeg_by_idx)
+    if not idxs:
+        return []
+    seq_start = idxs[0]
+    packets = []
+    for idx in idxs:
+        chans = eeg_by_idx[idx]
+        if len(chans) < 4:
+            continue
+        block = np.stack([chans[e] for e in range(4)], axis=1)  # (12, 4)
+        t = (idx - seq_start) * (block.shape[0] / EEG_FS)
+        packets.append((t, block))
+    return packets
+
+
+def _reconstruct_indexed_packets(
+    by_idx: dict[int, np.ndarray], samples_per_packet: int, fs: float
+) -> list[tuple[float, np.ndarray]]:
+    """Relative-time packets from a single (unwrapped) index-keyed stream
+    (e.g. one PPG channel), same reconstruction as `_reconstruct_eeg_packets`."""
+    idxs = sorted(by_idx)
+    if not idxs:
+        return []
+    seq_start = idxs[0]
+    return [((idx - seq_start) * (samples_per_packet / fs), by_idx[idx]) for idx in idxs]
+
+
+def _reconstruct_seq_packets(
+    raw: list[tuple[int, np.ndarray]], samples_per_packet: int, fs: float
+) -> list[tuple[float, np.ndarray]]:
+    """Relative-time packets from an (unwrapped) `sequenceId`-keyed stream
+    (accel/gyro)."""
+    if not raw:
+        return []
+    raw = sorted(raw, key=lambda p: p[0])
+    seq_start = raw[0][0]
+    return [((seq_id - seq_start) * (samples_per_packet / fs), block) for seq_id, block in raw]
+
+
 def load_jsonl(path: str | Path) -> Recording:
+    """Parse a Nouscope recording. Raw sensor records (`eeg`/`ppg`/`accel`/
+    `gyro`) mirror the native muse-js reading shape and carry no relative `t`
+    — only a 16-bit `index`/`sequenceId` counter (unwrapped via
+    `_unwrap_counter`, see its docstring for why we don't use the `timestamp`
+    field despite it looking like the more natural clock). Each raw stream's
+    own t=0 is its own first sample, NOT necessarily aligned to the
+    `t`-bearing derived streams (`bands`/`hr`/`mse`/`entrain`, which use the
+    recorder's performance.now()-based clock) — there can be a small offset
+    between "recorded" and "recomputed" series in the overview plot.
+    """
     path = Path(path)
     meta: dict = {}
-    eeg_buf: dict[float, list[list[float]]] = {}
-    ppg_buf: dict[float, list[float]] = {}
-    accel: list[tuple[float, np.ndarray]] = []
-    gyro: list[tuple[float, np.ndarray]] = []
+    eeg_by_idx: dict[int, dict[int, np.ndarray]] = {}
+    eeg_idx_state: dict[int, tuple[int, int]] = {}
+    ppg_ir_by_idx: dict[int, np.ndarray] = {}
+    ppg_idx_state: dict[int, tuple[int, int]] = {}
+    accel_raw: list[tuple[int, np.ndarray]] = []
+    accel_idx_state: dict[int, tuple[int, int]] = {}
+    gyro_raw: list[tuple[int, np.ndarray]] = []
+    gyro_idx_state: dict[int, tuple[int, int]] = {}
     bands_rows, hr_rows, mse_rows, entrain_rows = [], [], [], []
 
     with path.open() as fp:
@@ -81,29 +167,38 @@ def load_jsonl(path: str | Path) -> Recording:
             if not raw:
                 continue
             r = json.loads(raw)
-            t = r["t"] / 1000.0  # ms → s
             tp = r.get("type")
             if tp == "meta":
                 meta = r
             elif tp == "eeg":
-                eeg_buf.setdefault(t, []).append(r["ch"])
+                e = r["electrode"]
+                idx = _unwrap_counter(eeg_idx_state, e, r["index"])
+                eeg_by_idx.setdefault(idx, {})[e] = np.asarray(r["samples"], dtype=np.float64)
             elif tp == "ppg":
-                ppg_buf.setdefault(t, []).append(r["raw"])
+                ch = r["ppgChannel"]
+                idx = _unwrap_counter(ppg_idx_state, ch, r["index"])
+                if ch == PPG_INFRARED:
+                    ppg_ir_by_idx[idx] = np.asarray(r["samples"], dtype=np.float64)
             elif tp == "accel":
-                accel.append((t, np.array([r["x"], r["y"], r["z"]], dtype=np.float64)))
+                idx = _unwrap_counter(accel_idx_state, 0, r["sequenceId"])
+                accel_raw.append((idx, np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
             elif tp == "gyro":
-                gyro.append((t, np.array([r["x"], r["y"], r["z"]], dtype=np.float64)))
+                idx = _unwrap_counter(gyro_idx_state, 0, r["sequenceId"])
+                gyro_raw.append((idx, np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
             elif tp == "bands":
+                t = r["t"] / 1000.0
                 bands_rows.append({"t": t, **{k: r[k] for k in ("delta", "theta", "alpha", "beta", "gamma")}})
             elif tp == "hr":
-                hr_rows.append({"t": t, "bpm": r["bpm"]})
+                hr_rows.append({"t": r["t"] / 1000.0, "bpm": r["bpm"]})
             elif tp == "mse":
-                mse_rows.append({"t": t, "complexity": r["complexity"], "curve": r["curve"]})
+                mse_rows.append({"t": r["t"] / 1000.0, "complexity": r["complexity"], "curve": r["curve"]})
             elif tp == "entrain":
-                entrain_rows.append({"t": t, "idx": r["idx"]})
+                entrain_rows.append({"t": r["t"] / 1000.0, "idx": r["idx"]})
 
-    eeg_packets = sorted(((t, np.asarray(s, dtype=np.float64)) for t, s in eeg_buf.items()), key=lambda p: p[0])
-    ppg_packets = sorted(((t, np.asarray(s, dtype=np.float64)) for t, s in ppg_buf.items()), key=lambda p: p[0])
+    eeg_packets = _reconstruct_eeg_packets(eeg_by_idx)
+    ppg_packets = _reconstruct_indexed_packets(ppg_ir_by_idx, samples_per_packet=6, fs=PPG_FS)
+    imu_accel = _reconstruct_seq_packets(accel_raw, samples_per_packet=3, fs=IMU_FS)
+    imu_gyro = _reconstruct_seq_packets(gyro_raw, samples_per_packet=3, fs=IMU_FS)
 
     last_t = max((p[0] for p in eeg_packets), default=0.0)
     if eeg_packets:
@@ -113,8 +208,8 @@ def load_jsonl(path: str | Path) -> Recording:
         meta=meta,
         eeg_packets=eeg_packets,
         ppg_packets=ppg_packets,
-        imu_accel=sorted(accel, key=lambda p: p[0]),
-        imu_gyro=sorted(gyro, key=lambda p: p[0]),
+        imu_accel=imu_accel,
+        imu_gyro=imu_gyro,
         bands=pd.DataFrame(bands_rows),
         hr=pd.DataFrame(hr_rows),
         mse=pd.DataFrame(mse_rows),
