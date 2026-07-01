@@ -25,3 +25,13 @@ yarn-error.log*
 
 # Demo audio track — place your own royalty-free MP3 at public/audio/demo.mp3
 public/audio/demo.mp3
+
+# Python
+__pycache__/
+*.pyc
+
+# graphify knowledge-graph output (generated, regenerable local tooling)
+graphify-out/
+
+# Recording data + generated analysis plots (large / participant biometric data)
+analysis/data/
