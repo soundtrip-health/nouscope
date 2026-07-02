@@ -10,8 +10,16 @@ These are positive/negative controls for the PLV math, not a unit-test framework
 run. They validate the three properties that make the tool trustworthy:
   1. a known phase-lock is detected (PLV -> ~1 where injected, baseline elsewhere);
   2. the lock is frequency-specific (a detuned reference sees ~nothing);
-  3. a tempo mismatch (122 vs 124 bpm) visibly erodes the lock over a long run —
-     the concrete demonstration of why the exact tempo matters.
+  3. a tempo mismatch (122 vs 124 bpm) measurably degrades the lock — the concrete
+     demonstration of why the exact tempo matters.
+
+Note on (3): 124 vs 122 bpm differ by ~0.033 Hz, so the wrong reference drifts a
+full cycle relative to the signal in ~30 s — i.e. within a single PLV window. The
+degradation is therefore intra-window dephasing (constant regardless of run
+length), not error accumulating over the 20-min run. That whole-run accumulation
+is the *sample-clock* failure mode (a ~160 ppm rate error is negligible per window
+but slides over 20 min); the tempo error is large enough to bite inside one window.
+The two clock problems fail differently — this control exercises the tempo one.
 """
 import numpy as np
 
