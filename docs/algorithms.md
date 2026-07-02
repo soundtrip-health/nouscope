@@ -823,3 +823,98 @@ Two modes, selected at `start()`:
 - Active state: red border + pulsing outline animation.
 - Elapsed time (`MM:SS`) shown next to the button while recording.
 - Click to start (prompts for file in stream mode); click again to stop.
+
+---
+
+## §9 — Offline Phase-Locking Entrainment (ITC/PLV)
+
+**Files:** `analysis/entrainment.py`, `analysis/entrainment_plotting.py`,
+`analysis/nouscope_entrainment.py`, `analysis/test_entrainment.py`
+
+The realtime `EntrainmentManager` (§6) and the offline tempogram
+(`utils.eeg_tempogram_timeseries`) are **power-based** — they compare tempogram
+*magnitude*. Slow-wave power rises under both drowsiness and genuine entrainment,
+so power cannot separate them. This offline pipeline measures **phase
+consistency** instead: does the brain hold a stable timing offset relative to the
+musical beat grid? It needs no reference audio — it runs against the *nominal*
+beat ladder from `meta.audioBpm` and re-runs unchanged when the exact tempo lands
+(only `fundamental_hz` changes). Reuses `utils.py` for loading, gridding,
+quality-weighting, and gap handling.
+
+### Stage 0 — Sample-clock QC (`verify_sample_clock`)
+
+`utils.py` reconstructs the EEG timeline as `index × 12 / 256`, i.e. it *assumes*
+exactly 256 Hz. Phase error accumulates linearly, so a wrong rate slides the EEG
+out of alignment with the beat over a 20-min run. The device `timestamp` is
+unusable (float32-mangled — its long-baseline span implies ~10⁷ s for a 27-min
+file). Instead we cross-check the index-derived EEG duration against the
+`performance.now()`-based derived streams (`bands`/`hr`/`mse`/`entrain`):
+`effective_fs = n_eeg_samples / real_duration`. Measured on the three sessions:
+**256.03–256.05 Hz (+130…+200 ppm)** — well within tolerance and ~100× smaller
+than the 122-vs-124 bpm tempo uncertainty. The corrected `effective_fs` feeds all
+downstream phase math. Precision is ~±150 ppm (start/stop offset); sub-100 ppm
+calibration needs alignment to the reference audio.
+
+### Stage 1 — Quality-weighted signal (`quality_weighted_signal`)
+
+Collapse the 4-channel EEG to one signal using `utils._quality_weights` (drop up
+to 2 worst channels; good=1.0, marginal=0.5) resolved per signal-quality window
+and applied per sample. Samples are NaN where a weighted channel is missing or all
+channels are poor. ≤50 ms gaps are then interpolated (`interpolate_short_gaps`,
+`GAP_MAX=13`); longer gaps stay NaN and are skipped.
+
+### Stage 2 — Narrowband analytic phase (`morlet_analytic`)
+
+Complex Morlet wavelet at each ladder frequency (`N_CYCLES_FILTER=6`),
+energy-normalised, applied per contiguous non-NaN segment via `fftconvolve`
+(edges NaN). Returns the complex analytic signal — `angle` = instantaneous phase,
+`abs` = amplitude.
+
+### Stage 3 — Phase-locking value (`_plv_power_series`)
+
+Reference beat-grid oscillator `ψ(t) = 2π·f₀·t` (using the corrected `effective_fs`).
+Relative phase `Δ(t) = angle(z) − ψ`; over a sliding window,
+**`PLV = |mean(exp(iΔ))|`** (1 = perfectly locked, ~0 = random). Window length =
+`PLV_WIN_CYCLES=8` cycles, clipped to [6, 30] s; common eval grid `EVAL_HOP_S=2` s;
+a window needs ≥`MIN_VALID_FRAC=0.5` valid samples. Band power = mean `|z|²` on the
+same window (the power view for the discriminator).
+
+### Beat ladder
+
+Multiples of the beat `f₀ = audioBpm/60` (nominal 2.067 Hz at 124 bpm):
+×4 (16th), ×3 (triplet), ×2 (8th), ×1 (beat), ×½ (in-2), ×⅓ (in-3), ×⅙ (phrase).
+
+### Null floor — pre-music quiet baseline (`_baseline_floor`)
+
+**Not a Fourier/circular-shift surrogate.** For a steady-state frequency-tagging
+design those fail: phase-scramble keeps the beat-frequency line locked (floor ≈ 1.0,
+explains the effect away) and a global circular shift is a constant phase offset
+that PLV is invariant to. The valid null is the **pre-music quiet segment** — PLV
+there is finite-window bias + endogenous rhythm with no stimulus, so entrainment =
+PLV *rising above baseline* during music. Frequency specificity (PLV peaks at the
+ladder, not at neighbours) is the second axis, via the off-ladder scan. `test_entrainment.py` validates detection, frequency
+specificity, and tempo-mismatch erosion on synthetic signals.
+
+### Views
+
+- **Discriminator** (`segments`): per-rung PLV and power over pre / music / post
+  windows (nominal 0–2 / 2–22 / 22–end min — assumed; recordings carry no onset
+  marker). The money plot: power up in quiet-drowsy *and* music, PLV up only in music.
+- **Ladder matrix**: PLV(rung, time) heatmap.
+- **Ring-down** (`_fit_ringdown`): fit `A·exp(-(t-t₀)/τ)+C` to the beat-rung PLV
+  after the music offset — persistence τ vs step drop.
+- **Off-ladder scan** (`_off_ladder_scan`): PLV on a fine 0.3–8 Hz grid over the
+  music segment; flags peaks above the broadband (median+MAD) floor not on a rung
+  (e.g. ~5 Hz endogenous theta, Wollman 2020).
+- **Bistable meter**: in-2 (½×) vs in-3 (⅓×) PLV over time — competition/switching,
+  per subject (never averaged).
+
+Constants live at the top of `entrainment.py`. Output figure:
+`data/session{n}.entrainment.png`. N=3 → per-subject case studies, not group stats.
+
+### References
+
+- Nozaradan, S., Peretz, I., et al. (2012). Tagging the neuronal entrainment to beat and meter. *J. Neurosci.*
+- Stober, S., et al. (2016). Brain Beats.
+- Wollman, I., et al. (2020). Neural entrainment to ~5 Hz endogenous theta.
+- Kaneshiro, B., et al. (2020). Stimulus-response correlation (SRC), natural music. *NeuroImage.* (SRC pending audio.)
