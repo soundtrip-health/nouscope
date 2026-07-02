@@ -368,7 +368,6 @@ def analyse_entrainment(path, fundamental_hz: float | None = None,
     sq = signal_quality(eeg)
     sig = quality_weighted_signal(eeg, sq)
     sig = interpolate_short_gaps(sig, max_gap=GAP_MAX)
-    filled = np.nan_to_num(sig, nan=0.0)  # gap-free copy for the off-ladder scan
 
     duration = len(sig) / fs
     tgrid = np.arange(EVAL_HOP_S, duration, EVAL_HOP_S)
@@ -410,7 +409,7 @@ def analyse_entrainment(path, fundamental_hz: float | None = None,
     # P5 off-ladder scan over the music segment
     tsamp = np.arange(len(sig)) / fs
     music_mask_samp = (tsamp >= MUSIC_START_S) & (tsamp < MUSIC_END_S)
-    off_ladder = _off_ladder_scan(filled, fs, music_mask_samp,
+    off_ladder = _off_ladder_scan(sig, fs, music_mask_samp,
                                   [f for f, _, _ in ladder])
 
     # P3 bistable meter: competition between in-2 (1/2×) and in-3 (1/3×)

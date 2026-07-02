@@ -411,6 +411,20 @@ def _channel_band_power(sig: np.ndarray) -> dict:
     return out
 
 
+def _weights_at(sq_df: pd.DataFrame, sq_t: np.ndarray, t_centre: float) -> tuple[np.ndarray, float]:
+    """Quality weights (and total weight) for the signal-quality window covering
+    `t_centre`. Shared by the window-based consumers (`band_power_timeseries`,
+    `mse_timeseries`, `eeg_tempogram_timeseries`): pick the latest quality labels
+    at or before the window centre, then delegate to `_quality_weights`. Falls
+    back to all-good when no quality frame exists."""
+    if sq_t.size:
+        i = max(0, int(np.searchsorted(sq_t, t_centre, side="right") - 1))
+        labels = [sq_df.iloc[i][f"q_{c}"] for c in CH_NAMES]
+    else:
+        labels = ["good"] * 4
+    return _quality_weights(labels)
+
+
 def _quality_weights(labels: list[str]) -> tuple[np.ndarray, float]:
     """Drop up to 2 worst channels, weight the rest (good=1.0, marginal=0.5).
     Mirrors EEGManager._getChannelWeights with default badChannelThreshold='poor'."""
@@ -450,12 +464,6 @@ def band_power_timeseries(eeg: np.ndarray, sq_df: pd.DataFrame, fs: float = EEG_
     for end in range(EEG_WIN, n + 1, EEG_HOP):
         start = end - EEG_WIN
         t_centre = (start + EEG_WIN / 2) / fs
-        # Latest signal-quality labels at or before t_centre
-        if len(sq_t):
-            i = max(0, int(np.searchsorted(sq_t, t_centre, side="right") - 1))
-            labels = [sq_df.iloc[i][f"q_{c}"] for c in CH_NAMES]
-        else:
-            labels = ["good"] * 4
 
         # Per-channel band power
         ch_bands = []
@@ -470,7 +478,7 @@ def band_power_timeseries(eeg: np.ndarray, sq_df: pd.DataFrame, fs: float = EEG_
             rows.append({"t": t_centre, **{b: np.nan for b in band_names}, "valid": False})
             continue
 
-        weights, total_w = _quality_weights(labels)
+        weights, total_w = _weights_at(sq_df, sq_t, t_centre)
         raw = {b: float(sum(ch_bands[c][b] * weights[c] for c in range(4))) if total_w > 0 else 0.0 for b in band_names}
 
         # Periodic aperiodic refit on quality-weighted Morlet powers at AP_FIT_FREQS
@@ -549,12 +557,7 @@ def mse_timeseries(
         start = end - win
         t_centre = (start + win / 2) / fs
         block = eeg[start:end]  # (win, 4)
-        if sq_t.size:
-            i = max(0, int(np.searchsorted(sq_t, t_centre, side="right") - 1))
-            labels = [sq_df.iloc[i][f"q_{c}"] for c in CH_NAMES]
-        else:
-            labels = ["good"] * 4
-        weights, total_w = _quality_weights(labels)
+        weights, total_w = _weights_at(sq_df, sq_t, t_centre)
         if total_w == 0:
             rows.append({"t": t_centre, "complexity": np.nan, **{f"s{s}": np.nan for s in scales}})
             continue
@@ -624,12 +627,7 @@ def eeg_tempogram_timeseries(
         start = end - win
         t_centre = (start + win / 2) / fs
         block = eeg[start:end]
-        if sq_t.size:
-            i = max(0, int(np.searchsorted(sq_t, t_centre, side="right") - 1))
-            labels = [sq_df.iloc[i][f"q_{c}"] for c in CH_NAMES]
-        else:
-            labels = ["good"] * 4
-        weights, total_w = _quality_weights(labels)
+        weights, total_w = _weights_at(sq_df, sq_t, t_centre)
         if total_w == 0:
             times.append(t_centre)
             cols.append(np.full(len(freqs), np.nan))
