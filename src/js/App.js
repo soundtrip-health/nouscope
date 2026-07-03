@@ -1,6 +1,3 @@
-import * as THREE from 'three'
-import ReativeParticles from './entities/ReactiveParticles'
-import * as dat from 'dat.gui'
 import BPMManager from './managers/BPMManager'
 import AudioManager from './managers/AudioManager'
 import EEGManager from './managers/EEGManager'
@@ -8,23 +5,16 @@ import EntrainmentManager from './managers/EntrainmentManager'
 import ComplexityManager from './managers/ComplexityManager'
 import RecordingManager from './managers/RecordingManager'
 import BioDataDisplay from './ui/BioDataDisplay'
-import JellyfinManager from './managers/JellyfinManager'
-import JellyfinBrowser from './ui/JellyfinBrowser'
-
-const DEMO_TRACK_URL = './audio/demo.mp3'
 
 /**
  * App — top-level orchestrator.
  *
- * Manages the Three.js scene, camera, renderer, and all manager instances.
- * On user interaction (click or file upload), loads audio, detects BPM,
- * then starts the particle visualizer and render loop.
+ * A Muse EEG/PPG/IMU biometric visualizer. The live bio-data panel is the
+ * visualization; there is no 3D scene. Audio playback is optional — loading a
+ * local file enables the neural-entrainment analysis (music tempo vs. EEG
+ * tempogram). The render loop runs immediately so EEG plots work with no audio.
  */
 export default class App {
-  //THREE objects
-  static holder = null
-  static gui = null
-
   //Managers
   static audioManager = null
   static bpmManager = null
@@ -34,131 +24,50 @@ export default class App {
   static recordingManager = null
 
   constructor() {
-    const overlay = document.querySelector('.user_interaction')
     const input = document.getElementById('audio-upload')
 
-    // File upload: first load initializes everything; subsequent uploads swap the track
+    // File upload: first load starts audio; subsequent uploads swap the track.
     input.addEventListener('change', (e) => {
       const file = e.target.files[0]
       if (!file) return
       e.target.value = '' // allow re-selecting the same file
-      if (this.renderer) {
+      if (App.audioManager) {
         this._swapAudio(file)
       } else {
-        overlay.removeEventListener('click', this._overlayClickHandler)
-        this.init(file)
+        this._startAudio(file)
       }
     })
 
-    // Click anywhere on overlay: load demo track
-    this._overlayClickHandler = (e) => {
-      overlay.removeEventListener('click', this._overlayClickHandler)
-      this.init(DEMO_TRACK_URL)
-    }
-    overlay.addEventListener('click', this._overlayClickHandler)
-
     this._setupEEG()
-    this._setupJellyfin()
     this._setupRecording()
     this._setupFullscreen()
 
-    // Start the render/update loop immediately so EEG plots work before music starts
+    // Start the update loop immediately so EEG/bio plots work before (or without) audio.
     this.update()
   }
 
   /**
-   * Initialize scene, renderer, camera and kick off audio loading.
-   * @param {File|string} source — File object or URL string for the audio
+   * Load a local audio file, detect BPM, and begin the entrainment analysis.
+   * Called once on the first file upload; later uploads go through _swapAudio.
+   * @param {File} file — audio File from the upload input
    */
-  init(source) {
-    document.querySelector('.user_interaction__label').textContent = 'Loading...'
-
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: true,
-    })
-
-    this.renderer.setClearColor(0x000000, 0)
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
-    this.renderer.autoClear = false
-    document.querySelector('.content').appendChild(this.renderer.domElement)
-
-    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 10000)
-    this.camera.position.z = 12
-    this.camera.frustumCulled = false
-
-    this.scene = new THREE.Scene()
-    this.scene.add(this.camera)
-
-    App.holder = new THREE.Object3D()
-    App.holder.name = 'holder'
-    this.scene.add(App.holder)
-    App.holder.sortObjects = false
-
-    App.gui = new dat.GUI()
-
-    this.createManagers(source)
-
-    this.resize()
-    window.addEventListener('resize', () => this.resize())
-  }
-
-  /**
-   * Load audio, detect BPM, then create particles and start the render loop.
-   * @param {File|string} source — passed through to AudioManager.loadAudioBuffer()
-   */
-  async createManagers(source) {
+  async _startAudio(file) {
+    App.audioManager = new AudioManager()
     try {
-      App.audioManager = new AudioManager()
-      await App.audioManager.loadAudioBuffer(source)
+      await App.audioManager.loadAudioBuffer(file)
     } catch (err) {
-      // Demo track missing or fetch failed — user can upload via the Track button
       console.error('Audio load failed:', err)
-      document.querySelector('.user_interaction__label').textContent =
-        'Could not load demo track. Upload a file using the Track button.'
+      App.audioManager = null
       return
     }
 
     App.bpmManager = new BPMManager()
-    App.bpmManager.addEventListener('beat', () => {
-      this.particles.onBPMBeat()
-    })
     await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
 
     App.entrainmentManager = new EntrainmentManager()
 
-    document.querySelector('.user_interaction').remove()
-
     App.audioManager.play()
     this._setupPauseBtn()
-
-    this.particles = new ReativeParticles()
-    this.particles.init()
-
-    // If EEG was connected before music started, apply EEG-active defaults
-    if (App.eegManager?.isConnected) {
-      this.particles.properties.autoMix = false
-      this.particles.properties.autoRotate = false
-      this.particles.properties.headControl = true
-    }
-  }
-
-  /** Wire up Jellyfin browser button and create manager + browser instances. */
-  _setupJellyfin() {
-    const jellyfinManager = new JellyfinManager()
-    const jellyfinBrowser = new JellyfinBrowser(jellyfinManager, (url) => {
-      if (this.renderer) {
-        this._swapAudio(url)
-      } else {
-        const overlay = document.querySelector('.user_interaction')
-        overlay?.removeEventListener('click', this._overlayClickHandler)
-        this.init(url)
-      }
-    })
-
-    document.getElementById('jellyfin-btn').addEventListener('click', () => {
-      jellyfinBrowser.show()
-    })
   }
 
   /** Wire up EEG connect/disconnect UI and create the EEGManager instance. */
@@ -234,12 +143,6 @@ export default class App {
           toggleBtn.hidden = false
           if (this._recordBtn)     this._recordBtn.hidden = false
           if (this._fullscreenBtn) this._fullscreenBtn.hidden = false
-          // Switch to EEG-driven defaults: head control on, auto-mix/rotate off
-          if (this.particles) {
-            this.particles.properties.autoMix = false
-            this.particles.properties.autoRotate = false
-            this.particles.properties.headControl = true
-          }
           // Init plots on first connect; reset read pointers on subsequent connects
           if (!this._bioDisplay) {
             this._bioDisplay = new BioDataDisplay()
@@ -351,7 +254,7 @@ export default class App {
     this._pauseBtn.hidden = false
   }
 
-  /** Swap in a new audio track while the visualizer is running. */
+  /** Swap in a new audio track while playback is running. */
   async _swapAudio(file) {
     if (App.audioManager.isPlaying) {
       App.audioManager.audio.stop()
@@ -386,17 +289,7 @@ export default class App {
     if (this._bioVisible) this._bioDisplay?.update()
   }
 
-  /** Handle window resize — update camera aspect and renderer size. */
-  resize() {
-    this.width = window.innerWidth
-    this.height = window.innerHeight
-
-    this.camera.aspect = this.width / this.height
-    this.camera.updateProjectionMatrix()
-    this.renderer.setSize(this.width, this.height)
-  }
-
-  /** Main render loop — called every animation frame. */
+  /** Main update loop — called every animation frame. */
   update() {
     requestAnimationFrame(() => this.update())
 
@@ -409,11 +302,6 @@ export default class App {
 
     this._updateBioPanel()
 
-    this.particles?.update(
-      App.eegManager?.bandPower,
-      App.eegManager?.heartPulse ?? 0,
-      App.eegManager?.headPose ?? null,
-    )
     App.audioManager?.update()
     App.entrainmentManager?.update(performance.now())
     App.complexityManager?.update(performance.now())
@@ -425,7 +313,5 @@ export default class App {
       const ss = (s % 60).toString().padStart(2, '0')
       this._recordTimeEl.textContent = `${mm}:${ss}`
     }
-
-    if (this.renderer) this.renderer.render(this.scene, this.camera)
   }
 }
