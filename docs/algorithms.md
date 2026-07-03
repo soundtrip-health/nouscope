@@ -746,44 +746,175 @@ SampEn(m, r, N) = -ln( A / B )
 
 **File:** `src/js/managers/RecordingManager.js`
 
-A lightweight in-memory recorder that captures raw sensor samples and derived
-metrics into JSON Lines (JSONL) format while toggled on. On stop, the full
-buffer is assembled into a `Blob` and offered for download via an anchor tag
-with a timestamped filename (`nouscope-<iso>.jsonl`).
+Captures **raw Muse sensor packets** plus nouscope's derived metrics into JSON
+Lines (JSONL) format while toggled on. Raw sensor records preserve the native
+muse-js reading shape (packet `index` / `sequenceId` + per-packet `samples`
+array), so files are byte-compatible with the tested `eeg-recorder` analysis
+pipeline (`eeg-recorder/analysis/utils.py`, `refs/eeg.py`), which reconstructs
+the timeline from packet indices.
 
 ### Record types
 
 | Type | Rate | Fields | Source |
 |---|---|---|---|
-| `meta` | 1× at start | `startedAt`, `sampleRates`, `channels`, `app` | start() |
-| `eeg` | 256 Hz | `ch: [tp9, af7, af8, tp10]` (µV) | `EEGManager._processEEGSample` |
-| `ppg` | 64 Hz | `raw` (unfiltered infrared) | `EEGManager._processPPGSample` |
-| `accel` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processAccel` |
-| `gyro` | ~52 Hz | `x, y, z` (packet-averaged) | `EEGManager._processGyro` |
-| `bands` | ~2 Hz | `delta, theta, alpha, beta, gamma` (post-EMA) | `EEGManager._computeBandPower` |
-| `hr` | ~1 Hz | `bpm` (from MSPTDfast) | `EEGManager._runMSPTD` |
-| `entrain` | ~2 Hz | `idx` (smoothed) | `EntrainmentManager.update` |
-| `mse` | ~0.2 Hz | `curve`, `complexity` | `ComplexityManager.update` |
+| `meta` | 1× at start | `startedAt`, `app`, `device`, `deviceInfo`, `electrodeNames`, `sampleRates`, `audioBpm` | `start()` |
+| `eeg` | ~21 packets/s ×4 ch | `index, electrode, timestamp, samples:[12 µV]` | raw `eegReadings` sub |
+| `ppg` | ~11 packets/s ×3 ch | `index, ppgChannel, timestamp, samples:[6]` | `ppgReadings` sub |
+| `accel` | ~17 packets/s | `sequenceId, samples:[{x,y,z}×3]` | `accelerometerData` sub |
+| `gyro` | ~17 packets/s | `sequenceId, samples:[{x,y,z}×3]` | `gyroscopeData` sub |
+| `bands` | ~2 Hz | `t, delta, theta, alpha, beta, gamma` (post-EMA) | `EEGManager._computeBandPower` |
+| `hr` | ~1 Hz | `t, bpm` (from MSPTDfast) | `EEGManager._runMSPTD` |
+| `entrain` | ~2 Hz | `t, idx` (smoothed) | `EntrainmentManager.update` |
+| `mse` | ~0.2 Hz | `t, curve, complexity` | `ComplexityManager.update` |
+| `music` | on track load / BPM change | `t, bpm` | `BPMManager.setBPM` |
 
-- `t` on every record is `performance.now() - startedPerf` in milliseconds (one decimal place)
-- Each type rides on its own data path — no synchronous "tick" — so cadences reflect true per-sample arrival times
+- **Raw sensor records carry no `t`** — they store the native muse-js
+  `index`/`sequenceId`/`timestamp` fields the analysis tools already use to
+  rebuild the timeline. Recording whole readings (rather than the decimated
+  per-sample rows used previously) is what makes the files analysis-compatible.
+- **Derived records carry `t`** = `performance.now() - startedPerf` in
+  milliseconds (one decimal place).
+- Each path rides on its own data stream — no synchronous "tick" — so cadences
+  reflect true per-packet arrival times.
+- EEG raw packets come from a **dedicated `eegReadings` subscription** added
+  alongside the `zipSamples` stream that feeds the band-power pipeline; PPG
+  records **every channel** (not just the infrared channel used for HR).
+
+### Persistence — periodic flush + RAM clearing
+
+Two modes, selected at `start()`:
+
+- **stream** (File System Access API; Chrome/Edge): `start()` prompts for a save
+  location (requires the record-button click as the user gesture) and opens a
+  long-lived `FileSystemWritableFileStream`. Records accumulate in a small
+  `_pending` buffer; a `setInterval` flush (`FLUSH_INTERVAL_MS = 4000`) writes
+  the batch to the stream and **clears `_pending`**, so RAM stays bounded
+  regardless of session length and data is streamed to disk incrementally
+  instead of held until Stop. Flushes are serialized via a `_flushing` guard so
+  `write()` calls never overlap. `stop()` drains the buffer and `close()`s the
+  stream — no download needed.
+- **memory** (fallback when the API is unavailable, or the user dismisses the
+  picker → recording simply doesn't start): flushed chunks accumulate in
+  `_lines` and `stop()` returns a `Blob` the browser downloads as
+  `nouscope-<iso>.jsonl`.
 
 ### Design choices
 
-- **Hook pattern**: Each data path calls `App.recordingManager?.recordX(...)` directly.
-  When not recording, the call is a no-op (early `isRecording` check); overhead is one optional chaining + one branch per sample.
-- **Pre-serialization**: `JSON.stringify(obj)` is called at record time, so the final `Blob` is just `lines.join('\n')` — no deep walk over the accumulated object graph on stop.
-- **Raw PPG**: `ppg.raw` is the unfiltered infrared value from Muse so downstream users can apply their own filtering / beat detection.
-- **IMU**: samples are packet-averaged (3 samples per Muse reading) before recording, matching the display buffers. Raw per-sample logging would triple the IMU rate at marginal analytic value.
+- **Hook pattern**: each data path calls `App.recordingManager?.recordX(...)`
+  directly; when not recording the call is a no-op (early `isRecording` check) —
+  one optional chain + one branch per packet.
+- **Pre-serialization**: `JSON.stringify(obj)` runs at record time, so a flush
+  is just `pending.join('\n')` — no deep walk over an accumulated object graph.
+- **Crash resilience**: in stream mode at most `FLUSH_INTERVAL_MS` of data is
+  in RAM; everything older has been written to the disk stream. (Note: the
+  File System Access API commits the swap file to the target on `close()`; an
+  abrupt crash leaves a recoverable swap file rather than auto-finalizing.)
 
 ### Memory profile
 
-- Per-sample overhead ~70 bytes (JSON + newline). One hour of full-stream recording ≈ 90 MB.
-- 4-hour sessions would push ~360 MB and may stress the browser. For long sessions prefer the File System Access API (Chrome/Edge) — not currently implemented.
+- Stream mode: bounded — only the last ≤4 s of records plus a one-batch write
+  buffer are resident, so multi-hour sessions are safe.
+- Memory fallback: ~the same per-packet byte cost as before; a full-stream hour
+  is on the order of tens of MB. Prefer stream mode for long sessions.
 
 ### UI
 
 - `⏺ ` button in `#eeg-controls` (visible only when EEG is connected).
 - Active state: red border + pulsing outline animation.
 - Elapsed time (`MM:SS`) shown next to the button while recording.
-- Click again to stop → immediate download.
+- Click to start (prompts for file in stream mode); click again to stop.
+
+---
+
+## §9 — Offline Phase-Locking Entrainment (ITC/PLV)
+
+**Files:** `analysis/entrainment.py`, `analysis/entrainment_plotting.py`,
+`analysis/nouscope_entrainment.py`, `analysis/test_entrainment.py`
+
+The realtime `EntrainmentManager` (§6) and the offline tempogram
+(`utils.eeg_tempogram_timeseries`) are **power-based** — they compare tempogram
+*magnitude*. Slow-wave power rises under both drowsiness and genuine entrainment,
+so power cannot separate them. This offline pipeline measures **phase
+consistency** instead: does the brain hold a stable timing offset relative to the
+musical beat grid? It needs no reference audio — it runs against the *nominal*
+beat ladder from `meta.audioBpm` and re-runs unchanged when the exact tempo lands
+(only `fundamental_hz` changes). Reuses `utils.py` for loading, gridding,
+quality-weighting, and gap handling.
+
+### Stage 0 — Sample-clock QC (`verify_sample_clock`)
+
+`utils.py` reconstructs the EEG timeline as `index × 12 / 256`, i.e. it *assumes*
+exactly 256 Hz. Phase error accumulates linearly, so a wrong rate slides the EEG
+out of alignment with the beat over a 20-min run. The device `timestamp` is
+unusable (float32-mangled — its long-baseline span implies ~10⁷ s for a 27-min
+file). Instead we cross-check the index-derived EEG duration against the
+`performance.now()`-based derived streams (`bands`/`hr`/`mse`/`entrain`):
+`effective_fs = n_eeg_samples / real_duration`. Measured on the three sessions:
+**256.03–256.05 Hz (+130…+200 ppm)** — well within tolerance and ~100× smaller
+than the 122-vs-124 bpm tempo uncertainty. The corrected `effective_fs` feeds all
+downstream phase math. Precision is ~±150 ppm (start/stop offset); sub-100 ppm
+calibration needs alignment to the reference audio.
+
+### Stage 1 — Quality-weighted signal (`quality_weighted_signal`)
+
+Collapse the 4-channel EEG to one signal using `utils._quality_weights` (drop up
+to 2 worst channels; good=1.0, marginal=0.5) resolved per signal-quality window
+and applied per sample. Samples are NaN where a weighted channel is missing or all
+channels are poor. ≤50 ms gaps are then interpolated (`interpolate_short_gaps`,
+`GAP_MAX=13`); longer gaps stay NaN and are skipped.
+
+### Stage 2 — Narrowband analytic phase (`morlet_analytic`)
+
+Complex Morlet wavelet at each ladder frequency (`N_CYCLES_FILTER=6`),
+energy-normalised, applied per contiguous non-NaN segment via `fftconvolve`
+(edges NaN). Returns the complex analytic signal — `angle` = instantaneous phase,
+`abs` = amplitude.
+
+### Stage 3 — Phase-locking value (`_plv_power_series`)
+
+Reference beat-grid oscillator `ψ(t) = 2π·f₀·t` (using the corrected `effective_fs`).
+Relative phase `Δ(t) = angle(z) − ψ`; over a sliding window,
+**`PLV = |mean(exp(iΔ))|`** (1 = perfectly locked, ~0 = random). Window length =
+`PLV_WIN_CYCLES=8` cycles, clipped to [6, 30] s; common eval grid `EVAL_HOP_S=2` s;
+a window needs ≥`MIN_VALID_FRAC=0.5` valid samples. Band power = mean `|z|²` on the
+same window (the power view for the discriminator).
+
+### Beat ladder
+
+Multiples of the beat `f₀ = audioBpm/60` (nominal 2.067 Hz at 124 bpm):
+×4 (16th), ×3 (triplet), ×2 (8th), ×1 (beat), ×½ (in-2), ×⅓ (in-3), ×⅙ (phrase).
+
+### Null floor — pre-music quiet baseline (`_baseline_floor`)
+
+**Not a Fourier/circular-shift surrogate.** For a steady-state frequency-tagging
+design those fail: phase-scramble keeps the beat-frequency line locked (floor ≈ 1.0,
+explains the effect away) and a global circular shift is a constant phase offset
+that PLV is invariant to. The valid null is the **pre-music quiet segment** — PLV
+there is finite-window bias + endogenous rhythm with no stimulus, so entrainment =
+PLV *rising above baseline* during music. Frequency specificity (PLV peaks at the
+ladder, not at neighbours) is the second axis, via the off-ladder scan. `test_entrainment.py` validates detection, frequency
+specificity, and tempo-mismatch erosion on synthetic signals.
+
+### Views
+
+- **Discriminator** (`segments`): per-rung PLV and power over pre / music / post
+  windows (nominal 0–2 / 2–22 / 22–end min — assumed; recordings carry no onset
+  marker). The money plot: power up in quiet-drowsy *and* music, PLV up only in music.
+- **Ladder matrix**: PLV(rung, time) heatmap.
+- **Ring-down** (`_fit_ringdown`): fit `A·exp(-(t-t₀)/τ)+C` to the beat-rung PLV
+  after the music offset — persistence τ vs step drop.
+- **Off-ladder scan** (`_off_ladder_scan`): PLV on a fine 0.3–8 Hz grid over the
+  music segment; flags peaks above the broadband (median+MAD) floor not on a rung
+  (e.g. ~5 Hz endogenous theta, Wollman 2020).
+- **Bistable meter**: in-2 (½×) vs in-3 (⅓×) PLV over time — competition/switching,
+  per subject (never averaged).
+
+Constants live at the top of `entrainment.py`. Output figure:
+`data/session{n}.entrainment.png`. N=3 → per-subject case studies, not group stats.
+
+### References
+
+- Nozaradan, S., Peretz, I., et al. (2012). Tagging the neuronal entrainment to beat and meter. *J. Neurosci.*
+- Stober, S., et al. (2016). Brain Beats.
+- Wollman, I., et al. (2020). Neural entrainment to ~5 Hz endogenous theta.
+- Kaneshiro, B., et al. (2020). Stimulus-response correlation (SRC), natural music. *NeuroImage.* (SRC pending audio.)

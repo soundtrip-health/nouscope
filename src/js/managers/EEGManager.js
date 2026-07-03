@@ -179,6 +179,8 @@ export default class EEGManager {
   headPose    = { pitch: 0, roll: 0 }  // radians from accelerometer
 
   batteryLevel   = null          // 0–100 (%) or null when disconnected
+  deviceName     = null          // Muse device name (for recording metadata)
+  deviceInfo     = null          // muse-js deviceInfo() result (hw/fw/etc), for metadata
   onBatteryLevel = null          // optional callback(level)
   onDisconnected = null          // optional callback
   debug          = false         // set true to log pipeline internals each analysis window
@@ -215,6 +217,7 @@ export default class EEGManager {
   // ── Private ─────────────────────────────────────────────────────────────────
   _client      = null
   _eegSub      = null
+  _eegRawSub   = null
   _ppgSub      = null
   _accelSub    = null
   _gyroSub     = null
@@ -289,16 +292,28 @@ export default class EEGManager {
     await this._client.connect()
     await this._client.start()
     this.isConnected = true
+    this.deviceName  = this._client.deviceName ?? null
+
+    // Device info (hw/fw/etc) for recording metadata — best-effort, non-fatal.
+    try { this.deviceInfo = await this._client.deviceInfo() } catch { this.deviceInfo = null }
 
     this._resetState()
 
-    // EEG bands
+    // Raw per-electrode EEG packets — recorded verbatim in native muse-js shape
+    // so files stay compatible with the eeg-recorder analysis pipeline. The
+    // analysis (band powers, spectrogram) runs off the zipped stream below.
+    this._eegRawSub = this._client.eegReadings.subscribe((reading) => {
+      App.recordingManager?.recordEeg(reading)
+    })
+
+    // EEG bands — zipped per-sample stream feeds the signal-processing pipeline.
     this._eegSub = zipSamples(this._client.eegReadings).subscribe((sample) => {
       this._processEEGSample(sample.data)
     })
 
-    // PPG — infrared channel for cleanest cardiac waveform
+    // PPG — record every channel's raw packet; process infrared for heart rate.
     this._ppgSub = this._client.ppgReadings.subscribe((reading) => {
+      App.recordingManager?.recordPpg(reading)
       if (reading.ppgChannel === PPG_INFRARED) {
         for (const s of reading.samples) this._processPPGSample(s)
       }
@@ -306,11 +321,13 @@ export default class EEGManager {
 
     // IMU — accelerometer for head-tilt estimation
     this._accelSub = this._client.accelerometerData.subscribe((accel) => {
+      App.recordingManager?.recordAccel(accel)
       this._processAccel(accel.samples)
     })
 
     // IMU — gyroscope
     this._gyroSub = this._client.gyroscopeData.subscribe((gyro) => {
+      App.recordingManager?.recordGyro(gyro)
       this._processGyro(gyro.samples)
     })
 
@@ -332,6 +349,7 @@ export default class EEGManager {
    */
   disconnect() {
     this._eegSub?.unsubscribe()
+    this._eegRawSub?.unsubscribe()
     this._ppgSub?.unsubscribe()
     this._accelSub?.unsubscribe()
     this._gyroSub?.unsubscribe()
@@ -396,6 +414,8 @@ export default class EEGManager {
   _handleDisconnect() {
     this.isConnected = false
     this.batteryLevel = null
+    this.deviceName = null
+    this.deviceInfo = null
     this._resetState()
     this.onDisconnected?.()
   }
@@ -404,10 +424,6 @@ export default class EEGManager {
 
   _processEEGSample(channelData) {
     this.eegSampleCount++
-
-    App.recordingManager?.recordEeg(
-      channelData[0], channelData[1], channelData[2], channelData[3],
-    )
 
     for (let ch = 0; ch < 4; ch++) {
       const v = channelData[ch]
@@ -909,8 +925,6 @@ export default class EEGManager {
    *   4. Every ~1 second, run MSPTDfast on the buffer to update heartRate
    */
   _processPPGSample(raw) {
-    App.recordingManager?.recordPpg(raw)
-
     // 1. High-pass (remove DC & baseline wander)
     const hp = HP_ALPHA * (this._hpPrevY + raw - this._hpPrevX)
     this._hpPrevX = raw
@@ -1009,7 +1023,6 @@ export default class EEGManager {
 
     // Push raw average to display buffer
     this.imuSampleCount++
-    App.recordingManager?.recordAccel(ax, ay, az)
     this.accelDisplay.x.push(ax)
     this.accelDisplay.y.push(ay)
     this.accelDisplay.z.push(az)
@@ -1037,8 +1050,6 @@ export default class EEGManager {
     gx /= samples.length
     gy /= samples.length
     gz /= samples.length
-
-    App.recordingManager?.recordGyro(gx, gy, gz)
 
     this.gyroDisplay.x.push(gx)
     this.gyroDisplay.y.push(gy)
