@@ -25,11 +25,10 @@ No test suite is configured.
 4. `_setupFullscreen()` — wires the `⛶` full-screen bio-panel toggle + Escape key
 5. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
 
-Audio is optional. On the first `↑ Track` upload, `_startAudio(file)`:
-6. `AudioManager.loadAudioBuffer(file)` — reads the `File` into an AudioBuffer
-7. `BPMManager.detectBPM()` — analyzes the buffer with `web-audio-beat-detector` (exposes `bpmValue` for recording metadata)
-8. `EntrainmentManager` — instantiated (precomputes DFT kernels for tempogram analysis)
-9. `AudioManager.play()` + the `⏸` pause button appear
+Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
+
+- **`↑ Track` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
+- **`🎤` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
 There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.
 
@@ -38,7 +37,7 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | File | Responsibility |
 |------|----------------|
 | `src/js/App.js` | Manager coordination, UI wiring, update loop (no renderer/scene) |
-| `src/js/managers/AudioManager.js` | Audio loading (File or URL), Three.js AudioListener/AudioAnalyser, spectral-flux novelty ring buffer for entrainment |
+| `src/js/managers/AudioManager.js` | Novelty source for entrainment — either a decoded local file (looped via THREE.Audio) or live muted microphone input (`getUserMedia` → AnalyserNode); shared spectral-flux novelty ring buffer. `source` = `'buffer'`\|`'mic'` |
 | `src/js/managers/BPMManager.js` | Tempo detection via `web-audio-beat-detector`; exposes `bpmValue` (recording metadata). No beat events. |
 | `src/js/managers/EntrainmentManager.js` | Real-time EEG–music entrainment: parallel audio/EEG tempograms (0.5–5 Hz), z-score selective enhancement comparison, entrainment index (0–1) |
 | `src/js/managers/ComplexityManager.js` | Multiscale entropy (MSE) on quality-weighted 4-channel EEG average; SampEn at 6 scales, updated ~0.2 Hz; exposes `mseCurve` + `complexity` scalar |

@@ -26,17 +26,17 @@ export default class App {
   constructor() {
     const input = document.getElementById('audio-upload')
 
-    // File upload: first load starts audio; subsequent uploads swap the track.
+    // File upload: loads (or replaces) the buffer audio source.
     input.addEventListener('change', (e) => {
       const file = e.target.files[0]
       if (!file) return
       e.target.value = '' // allow re-selecting the same file
-      if (App.audioManager) {
-        this._swapAudio(file)
-      } else {
-        this._startAudio(file)
-      }
+      this._loadAudioFile(file)
     })
+
+    // Mic button: toggle live microphone input as the (muted) audio source.
+    this._micBtn = document.getElementById('mic-btn')
+    this._micBtn.addEventListener('click', () => this._toggleMic())
 
     this._setupEEG()
     this._setupRecording()
@@ -46,28 +46,68 @@ export default class App {
     this.update()
   }
 
+  /** Lazily create the audio + entrainment managers (idempotent). */
+  _ensureAudioInfra() {
+    if (!App.audioManager) App.audioManager = new AudioManager()
+    if (!App.entrainmentManager) App.entrainmentManager = new EntrainmentManager()
+  }
+
   /**
-   * Load a local audio file, detect BPM, and begin the entrainment analysis.
-   * Called once on the first file upload; later uploads go through _swapAudio.
+   * Load a local audio file as the (looping) buffer source, detect its BPM, and
+   * play it. Replaces any current source, including live-mic input.
    * @param {File} file — audio File from the upload input
    */
-  async _startAudio(file) {
-    App.audioManager = new AudioManager()
+  async _loadAudioFile(file) {
+    this._ensureAudioInfra()
     try {
       await App.audioManager.loadAudioBuffer(file)
     } catch (err) {
       console.error('Audio load failed:', err)
-      App.audioManager = null
       return
     }
 
-    App.bpmManager = new BPMManager()
+    if (!App.bpmManager) App.bpmManager = new BPMManager()
     await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
-
-    App.entrainmentManager = new EntrainmentManager()
 
     App.audioManager.play()
     this._setupPauseBtn()
+    this._updateMicButton()
+  }
+
+  /** Toggle live microphone input as the (muted, analysis-only) audio source. */
+  async _toggleMic() {
+    this._ensureAudioInfra()
+    const am = App.audioManager
+
+    if (am.isMic) {
+      am.stopMic()
+    } else {
+      this._micBtn.disabled = true
+      try {
+        await am.startMic()
+      } catch (err) {
+        // Permission denied or no device — leave the current source untouched.
+        console.error('Microphone access failed:', err)
+        this._micBtn.disabled = false
+        return
+      }
+      this._micBtn.disabled = false
+      // Live input can't be paused — hide the buffer pause button while mic is on.
+      if (this._pauseBtn) this._pauseBtn.hidden = true
+    }
+    this._updateMicButton()
+  }
+
+  /** Reflect the current mic state in the mic button + pause button visibility. */
+  _updateMicButton() {
+    if (!this._micBtn) return
+    const active = !!App.audioManager?.isMic
+    this._micBtn.classList.toggle('active', active)
+    this._micBtn.title = active ? 'Stop microphone input' : 'Use microphone as audio source'
+    // Restore the pause button when a buffer source is (again) active.
+    if (!active && this._pauseBtn && App.audioManager?.source === 'buffer') {
+      this._pauseBtn.hidden = false
+    }
   }
 
   /** Wire up EEG connect/disconnect UI and create the EEGManager instance. */
@@ -252,22 +292,6 @@ export default class App {
       }
     })
     this._pauseBtn.hidden = false
-  }
-
-  /** Swap in a new audio track while playback is running. */
-  async _swapAudio(file) {
-    if (App.audioManager.isPlaying) {
-      App.audioManager.audio.stop()
-      App.audioManager.isPlaying = false
-    }
-    try {
-      await App.audioManager.loadAudioBuffer(file)
-      await App.bpmManager.detectBPM(App.audioManager.audio.buffer)
-      App.audioManager.play()
-      if (this._pauseBtn) this._pauseBtn.textContent = '⏸'
-    } catch (err) {
-      console.error('Audio swap failed:', err)
-    }
   }
 
   /** Update signal quality dots, bio-panel HR readout, and plots each frame. */

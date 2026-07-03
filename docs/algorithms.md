@@ -36,6 +36,15 @@ Each novelty sample is pushed with a timestamp into a ring buffer (`noveltyRing`
 
 `AudioManager.update()` runs `collectAudioData()` + `_sampleNovelty()` every frame while playing.
 
+### Novelty source: file or live microphone
+
+The novelty curve can be driven by either of two mutually-exclusive sources, selected by `AudioManager.source` (`'buffer'` | `'mic'`):
+
+- **`'buffer'`** — a decoded local file, played (looped) via `THREE.Audio`; magnitudes read from the `THREE.AudioAnalyser` (`getFrequencyData()`).
+- **`'mic'`** — live microphone input. `getUserMedia({ audio })` (with `echoCancellation`/`noiseSuppression`/`autoGainControl` disabled so the spectrum is unmodified) feeds a `MediaStreamAudioSourceNode → AnalyserNode`. The analyser is **not** connected to the context destination, so capture is silent (analysis only, no feedback). Magnitudes are read with `getByteFrequencyData()`.
+
+Both paths yield 0–255 byte magnitudes over the same 512 bins, so `_sampleNovelty()` and everything downstream (tempogram, entrainment index) are identical regardless of source. BPM detection is skipped for the live-mic source — there is no finite buffer to analyze, and the entrainment index derives its own tempograms and does not require it.
+
 ---
 
 ## 2. BPM Detection
