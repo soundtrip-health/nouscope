@@ -482,8 +482,6 @@ a:focus-visible {
   &.poor     { background: #ef5350; box-shadow: 0 0 4px #ef5350; }
 }
 
-.bio-toggle,
-.bio-fullscreen,
 .bio-record {
   background: none;
   border: 1px solid rgba(255, 255, 255, 0.25);
@@ -501,14 +499,7 @@ a:focus-visible {
     border-color: rgba(255, 255, 255, 0.6);
   }
 
-  &.active {
-    color: #00e676;
-    border-color: #00e676;
-  }
-}
-
-.bio-record {
-  // Record uses red when active instead of green
+  // Record uses red when active
   &.active {
     color: #ef5350;
     border-color: #ef5350;
@@ -579,6 +570,18 @@ body.fullscreen-bio {
 
   // First section (EEG) spans full width for clarity
   .bio-section:first-child { grid-column: 1 / -1; }
+
+  // Larger, more legible text throughout the full-screen data view.
+  .bio-label            { font-size: 0.9rem; }
+  .bio-hr,
+  .bio-entrain-value,
+  .bio-mse-value,
+  .bio-imu-legend       { font-size: 0.85rem; }
+  .bio-band-legend,
+  .bio-mse-legend       { font-size: 0.9rem; }
+  .bio-band-val,
+  .bio-mse-val          { font-size: 0.8rem; min-width: 3rem; }
+  .bio-spec-axis        { font-size: 0.7rem; min-width: 1.6rem; }
 
   // Keep controls on top and clickable
   .eeg-controls { z-index: 1005; }

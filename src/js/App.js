@@ -40,7 +40,6 @@ export default class App {
 
     this._setupEEG()
     this._setupRecording()
-    this._setupFullscreen()
 
     // Start the update loop immediately so EEG/bio plots work before (or without) audio.
     this.update()
@@ -119,13 +118,11 @@ export default class App {
     const btn         = document.getElementById('eeg-connect')
     const batteryEl   = document.getElementById('eeg-status')
     const batteryFill = batteryEl.querySelector('.battery-fill')
-    const toggleBtn   = document.getElementById('bio-toggle')
     const panel       = document.getElementById('bio-panel')
     this._hrDisplay   = document.getElementById('heart-rate')
     this._bioHr       = document.getElementById('bio-hr')
     this._qualityDots = document.querySelectorAll('.quality-dot')
     this._bioPanel    = panel
-    this._bioToggle   = toggleBtn
     this._bioVisible  = false
 
     const updateBattery = (level) => {
@@ -147,27 +144,17 @@ export default class App {
 
     controls.style.display = 'flex'
 
-    toggleBtn.addEventListener('click', () => {
-      this._bioVisible = !this._bioVisible
-      panel.hidden = !this._bioVisible
-      toggleBtn.classList.toggle('active', this._bioVisible)
-    })
-
     App.eegManager.onBatteryLevel = (level) => updateBattery(level)
 
     App.eegManager.onDisconnected = () => {
       btn.textContent = 'Connect EEG'
       btn.disabled = false
       updateBattery(null)
-      toggleBtn.hidden = true
+      // Hide the data view and exit full-screen mode.
       panel.hidden = true
       this._bioVisible = false
-      toggleBtn.classList.remove('active')
-      if (this._recordBtn)     this._recordBtn.hidden = true
-      if (this._fullscreenBtn) this._fullscreenBtn.hidden = true
-      // Exit fullscreen mode if active, since the panel is now hidden
       document.body.classList.remove('fullscreen-bio')
-      this._fullscreenBtn?.classList.remove('active')
+      if (this._recordBtn) this._recordBtn.hidden = true
     }
 
     btn.addEventListener('click', async () => {
@@ -180,9 +167,7 @@ export default class App {
           await App.eegManager.connect()
           btn.textContent = 'Disconnect EEG'
           btn.disabled = false
-          toggleBtn.hidden = false
-          if (this._recordBtn)     this._recordBtn.hidden = false
-          if (this._fullscreenBtn) this._fullscreenBtn.hidden = false
+          if (this._recordBtn) this._recordBtn.hidden = false
           // Init plots on first connect; reset read pointers on subsequent connects
           if (!this._bioDisplay) {
             this._bioDisplay = new BioDataDisplay()
@@ -190,6 +175,10 @@ export default class App {
           } else {
             this._bioDisplay.resetIndices()
           }
+          // The full-screen data view is the default: show it automatically.
+          panel.hidden = false
+          this._bioVisible = true
+          document.body.classList.add('fullscreen-bio')
         } catch (err) {
           console.error('EEG connect failed:', err)
           btn.textContent = 'Connect EEG'
@@ -247,32 +236,6 @@ export default class App {
     a.click()
     a.remove()
     URL.revokeObjectURL(url)
-  }
-
-  /** Wire up the full-screen bio-panel button + Escape-to-exit. */
-  _setupFullscreen() {
-    const btn = document.getElementById('bio-fullscreen')
-    this._fullscreenBtn = btn
-
-    const toggle = () => {
-      const active = document.body.classList.toggle('fullscreen-bio')
-      btn.classList.toggle('active', active)
-      // Make sure the panel is visible when entering fullscreen
-      if (active) {
-        const panel = document.getElementById('bio-panel')
-        panel.hidden = false
-        this._bioVisible = true
-        this._bioToggle?.classList.add('active')
-      }
-    }
-
-    btn.addEventListener('click', toggle)
-
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && document.body.classList.contains('fullscreen-bio')) {
-        toggle()
-      }
-    })
   }
 
   /** Show the pause button and wire its click handler (idempotent). */
