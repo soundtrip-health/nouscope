@@ -56,13 +56,16 @@ export default class AnalysisDisplay {
     const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`an-band-item-${b}`))
     this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`an-band-val-${b}`))
+    this._bandAvgEls  = BAND_NAMES.map(b => document.getElementById(`an-band-avg-${b}`))
 
     // MSE — 5-line timeseries (one per τ scale)
     this._mseGL = this._ctx('an-mse-canvas')
     this._msePlot = new WebglLineRoll(this._mseGL, OUT_N, 5)
     colorVars(MSE_TOKENS).forEach((c, i) => this._msePlot.setLineColor(c, i))
-    this._mseValueEl = document.getElementById('an-mse-value')
-    this._mseValEls  = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-val-${i}`))
+    this._mseValueEl       = document.getElementById('an-mse-value')
+    this._mseAvgEl         = document.getElementById('an-mse-avg')
+    this._mseValEls        = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-val-${i}`))
+    this._mseScaleAvgEls   = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-avg-${i}`))
 
     // PPG — single trace, min/max envelope
     this._ppgGL = this._ctx('an-ppg-canvas')
@@ -75,8 +78,10 @@ export default class AnalysisDisplay {
     colorVars(IMU_TOKENS).forEach((c, i) => this._imuPlot.setLineColor(c, i))
 
     // Readouts
-    this._hrEl          = document.getElementById('an-hr')
+    this._hrEl           = document.getElementById('an-hr')
+    this._hrAvgEl        = document.getElementById('an-hr-avg')
     this._entrainValueEl = document.getElementById('an-entrain-value')
+    this._entrainAvgEl   = document.getElementById('an-entrain-avg')
     this._entrainFillEl  = document.getElementById('an-entrain-fill')
     this._qualityDots    = document.querySelectorAll('#an-quality-dots .quality-dot')
 
@@ -147,7 +152,7 @@ export default class AnalysisDisplay {
     this._renderSpec(this._specCtx, store.specColumns('main', t0, t1), t0, t1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
     this._renderSpec(this._specLoCtx, store.specColumns('lo', t0, t1), t0, t1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
     this._renderAudioSpec(store, t0, t1)
-    this._renderReadouts(store, cursor)
+    this._renderReadouts(store, t0, t1, cursor)
     this._renderPlayhead(t0, t1, cursor)
   }
 
@@ -392,14 +397,26 @@ export default class AnalysisDisplay {
 
   // ── Scalar readouts at the playhead ──────────────────────────────────────────
 
-  _renderReadouts(store, t) {
+  /**
+   * Instant values at the playhead `t`, plus the average over the visible
+   * window `[t0, t1]` via `store.windowMean` — the window average is what
+   * turns these from a live readout into an actual analysis surface: scrubbing
+   * a window tells you "what's typical here", not just "what is it right now".
+   */
+  _renderReadouts(store, t0, t1, t) {
     const hr = store.sampleAt('hr', t)
     if (this._hrEl) this._hrEl.textContent = hr && hr.bpm > 0 ? `${Math.round(hr.bpm)} bpm` : ''
+    const [hrAvg] = store.windowMean(store.hr, t0, t1, [r => (r.bpm > 0 ? r.bpm : NaN)])
+    if (this._hrAvgEl) this._hrAvgEl.textContent = hrAvg != null ? `avg ${Math.round(hrAvg)}` : ''
 
     const bands = store.sampleAt('bands', t)
     const normNames = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     for (let i = 0; i < 5; i++) {
       if (this._bandValEls[i]) this._bandValEls[i].textContent = bands ? bands[normNames[i]].toFixed(2) : '—'
+    }
+    const bandAvgs = store.windowMean(store.bands, t0, t1, normNames.map(k => r => r[k]))
+    for (let i = 0; i < 5; i++) {
+      if (this._bandAvgEls[i]) this._bandAvgEls[i].textContent = bandAvgs[i] != null ? bandAvgs[i].toFixed(2) : '—'
     }
 
     const mse = store.sampleAt('mse', t)
@@ -407,11 +424,21 @@ export default class AnalysisDisplay {
     for (let i = 0; i < 5; i++) {
       if (this._mseValEls[i]) this._mseValEls[i].textContent = mse && mse.curve[i] != null ? mse.curve[i].toFixed(2) : '—'
     }
+    const mseAvgs = store.windowMean(store.mse, t0, t1, [r => r.complexity, ...[0, 1, 2, 3, 4].map(i => r => r.curve[i])])
+    if (this._mseAvgEl) this._mseAvgEl.textContent = mseAvgs[0] != null ? `avg ${mseAvgs[0].toFixed(2)}` : ''
+    for (let i = 0; i < 5; i++) {
+      if (this._mseScaleAvgEls[i]) {
+        const v = mseAvgs[i + 1]
+        this._mseScaleAvgEls[i].textContent = v != null ? v.toFixed(2) : '—'
+      }
+    }
 
     const entrain = store.sampleAt('entrain', t)
     const val = entrain ? entrain.idx : 0
     if (this._entrainFillEl) this._entrainFillEl.style.width = `${(val * 100).toFixed(1)}%`
     if (this._entrainValueEl) this._entrainValueEl.textContent = val > 0.01 ? `${(val * 100).toFixed(0)}%` : ''
+    const [entrainAvg] = store.windowMean(store.entrain, t0, t1, [r => r.idx])
+    if (this._entrainAvgEl) this._entrainAvgEl.textContent = entrainAvg != null ? `avg ${Math.round(entrainAvg * 100)}%` : ''
 
     const q = store.qualityAt(t)
     this._qualityDots.forEach((dot, i) => {

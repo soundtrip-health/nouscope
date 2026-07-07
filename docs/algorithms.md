@@ -809,7 +809,16 @@ from the store on each seek/frame (no scroll/append):
   scales, `paintSpecColumn`, `specColumnsScale`) live in `src/js/ui/bioRender.js`,
   used by both renderers.
 - **Scalar readouts** (HR, band/MSE legends, entrainment meter, quality dots) are
-  sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`.
+  sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`. Each
+  also gets its **window average** over `[t0, t1]` via `SessionStore.windowMean`
+  — binary-searches to the window start (same as `specColumns()`, so cost scales
+  with the window's record count, not the whole session), and takes a list of
+  per-record accessors so multiple fields off one series (5 bands, or MSE's
+  aggregate + 5 τ-scales) cost a single pass. Headline scalars (HR, MSE
+  complexity, entrainment) show `avg X` next to the instant value; the per-item
+  legend rows (5 bands, 5 τ-scales) show just the average number. These derived
+  series are low-rate (≤2 Hz, unlike raw EEG), so this needs no throttling the
+  way the quality ribbon does.
 - **Playhead cursor** — every panel is wrapped in a `position: relative` `.an-plot-wrap`
   containing a `.an-playhead-line` hairline, positioned each frame by `_renderPlayhead`
   as a CSS `left` percentage (`(cursor − t0) / (t1 − t0)`), not drawn into the canvas

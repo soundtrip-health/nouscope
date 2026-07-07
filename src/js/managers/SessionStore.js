@@ -692,6 +692,40 @@ export default class SessionStore {
   }
 
   /**
+   * Mean of one or more numeric accessors over records in `arr` (sorted by t,
+   * e.g. `this.hr`/`this.bands`/`this.mse`/`this.entrain`) whose time falls in
+   * [t0, t1]. `fields` is a list of `(record) => number` accessors, so
+   * multiple fields off the same series (e.g. all 5 EEG bands) cost one scan
+   * instead of one per field. An accessor returning NaN for a record just
+   * skips that sample (e.g. filtering out a placeholder `bpm: 0`).
+   * Binary-searches to the window start first, same as `specColumns()`, so
+   * cost scales with the window's record count, not the whole session.
+   * @returns {(number|null)[]} one mean per field, in the same order as
+   *   `fields`; null where no valid samples exist in the window.
+   */
+  windowMean(arr, t0, t1, fields) {
+    const sums = fields.map(() => 0)
+    const counts = fields.map(() => 0)
+    if (arr.length) {
+      let lo = 0, hi = arr.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (arr[mid].t < t0) lo = mid + 1
+        else hi = mid
+      }
+      for (let i = lo; i < arr.length && arr[i].t <= t1; i++) {
+        const rec = arr[i]
+        for (let f = 0; f < fields.length; f++) {
+          const v = fields[f](rec)
+          if (v == null || Number.isNaN(v)) continue
+          sums[f] += v; counts[f]++
+        }
+      }
+    }
+    return sums.map((sum, f) => (counts[f] ? sum / counts[f] : null))
+  }
+
+  /**
    * Per-channel signal quality sampled at `outN` evenly-spaced points across
    * the whole session, for the scrub-track ribbon. Returns one array per EEG
    * channel (TP9, AF7, AF8, TP10 — the same order as `EEG_OFFSETS`/`EEG_TOKENS`
