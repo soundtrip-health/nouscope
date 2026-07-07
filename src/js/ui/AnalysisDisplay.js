@@ -29,6 +29,7 @@ import {
  */
 
 const OUT_N = 280   // output columns across each plot (matches canvas width)
+const PPG_RAW_SAMPLE_CAP = 20000   // ~5 min at 64 Hz — see `_ppgSignal`
 
 export default class AnalysisDisplay {
   constructor() {
@@ -208,11 +209,14 @@ export default class AnalysisDisplay {
   }
 
   _renderEEG(store, t0, t1) {
-    const { channels } = store.rangeEEG(t0, t1)
-    const lines = channels.map((c, ch) => {
-      const e = this._envelope(c, OUT_N)
-      const off = EEG_OFFSETS[ch]
-      for (let i = 0; i < e.length; i++) e[i] = off + (e[i] / EEG_SCALE) * EEG_AMPLITUDE
+    // `GriddedStream.envelope` sources from a precomputed min/max mip pyramid once
+    // the window is wide enough, so this stays cheap even in "All" mode on a long
+    // session — see SessionStore.js for why the naive per-frame raw scan was the
+    // main cause of laggy scrubbing at large window sizes.
+    const lines = [0, 1, 2, 3].map((ch, i) => {
+      const e = store.eeg.envelope(ch, t0, t1, OUT_N)
+      const off = EEG_OFFSETS[i]
+      for (let j = 0; j < e.length; j++) e[j] = off + (e[j] / EEG_SCALE) * EEG_AMPLITUDE
       return e
     })
     this._eegGL.clear(this._eegGL.COLOR_BUFFER_BIT)
@@ -221,7 +225,7 @@ export default class AnalysisDisplay {
   }
 
   _renderPPG(store, t0, t1) {
-    const { data, fs } = store.rangePPG(t0, t1)
+    const { data, fs } = this._ppgSignal(store, t0, t1)
     // Stored PPG is the RAW infrared signal (big DC offset + slow drift), so the
     // pulse is a tiny ripple. Detrend (subtract a ~1 s moving average) to isolate
     // the pulsatile AC, then scale by its robust peak so heartbeats fill the panel.
@@ -232,6 +236,25 @@ export default class AnalysisDisplay {
     this._ppgGL.clear(this._ppgGL.COLOR_BUFFER_BIT)
     this._ppgPlot.addPoints([env])
     this._drawRoll(this._ppgPlot)
+  }
+
+  /**
+   * Samples to feed the detrend/robust-scale pipeline above. For ordinary
+   * windows, the exact raw signal (unchanged behavior). Detrending every raw
+   * sample every frame is the same O(window) cost problem the EEG/IMU mip
+   * pyramid solves, so above a sample cap — reached only by very wide windows
+   * like "All" on a long session — source from a bounded-size min/max-decimated
+   * proxy instead. The moving-average detrend just needs to see the same slow
+   * DC drift, which a min/max envelope still carries even though it's sparser.
+   */
+  _ppgSignal(store, t0, t1) {
+    const fs = store.ppg.fs
+    const n = Math.ceil((t1 - t0) * fs)
+    if (n <= PPG_RAW_SAMPLE_CAP) return store.rangePPG(t0, t1)
+    const proxyN = Math.floor(PPG_RAW_SAMPLE_CAP / 2)
+    const data = store.ppg.envelope(0, t0, t1, proxyN)   // interleaved [min,max] × proxyN
+    const proxyFs = (proxyN * 2) / Math.max(1e-6, t1 - t0)
+    return { data, fs: proxyFs }
   }
 
   /** Subtract a centred moving average (window `win` samples), NaN-aware. O(n). */
@@ -265,9 +288,8 @@ export default class AnalysisDisplay {
   }
 
   _renderIMU(store, t0, t1) {
-    const { accel, gyro } = store.rangeIMU(t0, t1)
-    const ea = accel.map(c => this._envelope(c, OUT_N))
-    const eg = gyro.map(c => this._envelope(c, OUT_N))
+    const ea = [0, 1, 2].map(c => store.accel.envelope(c, t0, t1, OUT_N))
+    const eg = [0, 1, 2].map(c => store.gyro.envelope(c, t0, t1, OUT_N))
     for (let i = 0; i < ea[0].length; i++) {
       ea[0][i] /= ACCEL_SCALE; ea[1][i] /= ACCEL_SCALE; ea[2][i] /= ACCEL_SCALE
       eg[0][i] /= GYRO_SCALE;  eg[1][i] /= GYRO_SCALE;  eg[2][i] /= GYRO_SCALE

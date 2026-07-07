@@ -45,6 +45,12 @@ export const SPEC_MIN_RANGE    = 2     // minimum log₁₀ dynamic range
 export const SPEC_SCALE_WIN    = 30    // columns in sliding window for robust ceiling (~15 s at 2 Hz)
 export const SPEC_SCALE_PCT    = 0.9   // percentile of window used as scale ceiling
 export const SPEC_FLOOR_PCT    = 0.05  // low percentile used as scale floor (artifact-robust)
+// Cap on values examined per `specColumnsScale` call: a wide analysis window can hold
+// thousands of columns, and sorting every bin of every one of them every frame is the
+// cost that made scrubbing at large window sizes laggy. Striding down to a bounded
+// sample keeps the percentile estimate stable while making the cost flat regardless of
+// window width.
+export const SPEC_SCALE_SAMPLE_CAP = 4000
 // log₁₀ cap ≈ 200 µV amplitude (Hann-DFT power ≈ A² × N²/16; log₁₀(200² × 4096) ≈ 8.2)
 export const SPEC_LOG_CAP      = 8.2
 
@@ -110,8 +116,13 @@ export function viridisRGB(norm) {
  * @returns {{lo:number, range:number}|null} null if no usable values
  */
 export function specColumnsScale(columns, startIdx, endIdx, cap = Infinity) {
+  const binsPerCol = endIdx - startIdx
+  const maxCols = Math.max(1, Math.floor(SPEC_SCALE_SAMPLE_CAP / binsPerCol))
+  const stride = Math.max(1, Math.ceil(columns.length / maxCols))
+
   const vals = []
-  for (const { col } of columns) {
+  for (let c = 0; c < columns.length; c += stride) {
+    const col = columns[c].col
     for (let i = startIdx; i < endIdx; i++) {
       const v = col[i]
       if (Number.isNaN(v) || v <= -9) continue   // skip gaps / near-zero padding

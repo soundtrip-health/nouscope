@@ -34,6 +34,14 @@ const EEG_SPP   = 12
 const PPG_SPP   = 6
 const IMU_SPP   = 3
 
+// Min/max mip pyramid (see `GriddedStream.envelope`): each level's bucket groups
+// MIP_GROUP buckets from the level below it (level 0 groups raw samples), so a
+// window spanning the whole session only has to touch a bounded number of coarse
+// buckets instead of every raw sample — the cost that made scrubbing/playing a
+// wide analysis window laggy.
+const MIP_GROUP       = 8
+const MIP_LEVEL_COUNT = 4   // bucket sizes: 8, 64, 512, 4096 raw samples
+
 // Spectrogram recompute (file path) — mirrors EEGManager's display pipeline.
 // Bin counts (SPEC_MAIN_BINS=50, SPEC_LO_BINS=76) come from bioRender (imported above).
 const SPEC_HOP        = 128            // 128 samples @256 Hz → ~2 columns/s
@@ -56,6 +64,22 @@ class GriddedStream {
     this.length = 0     // logical sample count (max end written)
     this.seqStart = null
     this.startOffset = 0  // grid samples added to every write (re-anchor after reconnect)
+
+    // Min/max mip pyramid — one Float32Array per level, interleaved [min,max]
+    // per (bucket, channel). Built lazily/incrementally in `_syncMips`, only as
+    // far as `length` has grown, so ingestion itself pays nothing extra.
+    this._mipFactors = []
+    this._mip = []       // Float32Array per level, or null until first built
+    this._mipCap = []    // buckets allocated, per level
+    this._mipBuilt = []  // buckets folded in so far, per level
+    let factor = MIP_GROUP
+    for (let l = 0; l < MIP_LEVEL_COUNT; l++) {
+      this._mipFactors.push(factor)
+      this._mip.push(null)
+      this._mipCap.push(0)
+      this._mipBuilt.push(0)
+      factor *= MIP_GROUP
+    }
   }
 
   _ensure(samples) {
@@ -106,6 +130,154 @@ class GriddedStream {
     const hi = Math.min(this.length, s1)
     const nc = this.nChannels
     for (let s = lo; s < hi; s++) out[s - s0] = this._data[s * nc + channel]
+    return out
+  }
+
+  _ensureMip(level, buckets) {
+    if (buckets <= this._mipCap[level]) return
+    let cap = this._mipCap[level] || Math.max(buckets, 1024)
+    while (cap < buckets) cap *= 2
+    const nc = this.nChannels
+    const next = new Float32Array(cap * nc * 2).fill(NaN)
+    const prev = this._mip[level]
+    if (prev) next.set(prev.subarray(0, this._mipCap[level] * nc * 2))
+    this._mip[level] = next
+    this._mipCap[level] = cap
+  }
+
+  /**
+   * Extend every mip level up to the current `length`. Level 0 is folded from
+   * raw samples; each level above is folded from `MIP_GROUP` buckets of the
+   * level below (not from raw data), so the total build cost across all levels
+   * is a small constant multiple of the raw sample count — and since only the
+   * newly-arrived tail is processed each call, a per-frame call during live
+   * capture or playback is essentially free once the pyramid is caught up.
+   */
+  _syncMips() {
+    const nc = this.nChannels
+    let sourceIsRaw = true
+    let prevBuckets = this.length
+    for (let l = 0; l < this._mipFactors.length; l++) {
+      const factor = this._mipFactors[l]
+      const targetBuckets = sourceIsRaw
+        ? Math.floor(this.length / factor)
+        : Math.floor(prevBuckets / MIP_GROUP)
+      if (targetBuckets <= this._mipBuilt[l]) break   // nothing new here or in any coarser level
+
+      this._ensureMip(l, targetBuckets)
+      const mip = this._mip[l]
+      const built = this._mipBuilt[l]
+
+      if (sourceIsRaw) {
+        const data = this._data
+        for (let b = built; b < targetBuckets; b++) {
+          const s0 = b * factor, s1 = s0 + factor
+          for (let c = 0; c < nc; c++) {
+            let mn = Infinity, mx = -Infinity
+            for (let s = s0; s < s1; s++) {
+              const v = data[s * nc + c]
+              if (Number.isNaN(v)) continue
+              if (v < mn) mn = v
+              if (v > mx) mx = v
+            }
+            const idx = (b * nc + c) * 2
+            if (mn === Infinity) { mip[idx] = NaN; mip[idx + 1] = NaN } else { mip[idx] = mn; mip[idx + 1] = mx }
+          }
+        }
+      } else {
+        const below = this._mip[l - 1]
+        for (let b = built; b < targetBuckets; b++) {
+          const g0 = b * MIP_GROUP, g1 = g0 + MIP_GROUP
+          for (let c = 0; c < nc; c++) {
+            let mn = Infinity, mx = -Infinity
+            for (let g = g0; g < g1; g++) {
+              const idx = (g * nc + c) * 2
+              const gmn = below[idx]
+              if (Number.isNaN(gmn)) continue
+              const gmx = below[idx + 1]
+              if (gmn < mn) mn = gmn
+              if (gmx > mx) mx = gmx
+            }
+            const idx = (b * nc + c) * 2
+            if (mn === Infinity) { mip[idx] = NaN; mip[idx + 1] = NaN } else { mip[idx] = mn; mip[idx + 1] = mx }
+          }
+        }
+      }
+
+      this._mipBuilt[l] = targetBuckets
+      prevBuckets = targetBuckets
+      sourceIsRaw = false
+    }
+  }
+
+  /**
+   * Min/max-decimate one channel over [t0, t1) seconds into `outN` buckets —
+   * a Float32Array of length outN*2 ([min,max] per bucket), the same contract
+   * AnalysisDisplay's `_envelope` expects. Uses the mip pyramid when the window
+   * is wide enough that a coarse level still covers it with at least 2 buckets
+   * per output column, so cost stays roughly O(outN) instead of O(window·fs)
+   * even for an "All" window spanning a long session. Falls back to scanning
+   * raw samples directly for anything too narrow for the coarsest levels to
+   * usefully resolve (ordinary fixed-window scrubbing).
+   */
+  envelope(channel, t0, t1, outN) {
+    const s0 = Math.max(0, Math.floor(t0 * this.fs))
+    const s1 = Math.min(this.length, Math.ceil(t1 * this.fs))
+    if (s1 <= s0) return new Float32Array(outN * 2)
+
+    this._syncMips()
+    for (let l = this._mipFactors.length - 1; l >= 0; l--) {
+      const factor = this._mipFactors[l]
+      const bStart = Math.floor(s0 / factor)
+      const bEnd = Math.min(this._mipBuilt[l], Math.floor(s1 / factor))
+      const M = bEnd - bStart
+      if (M >= outN * 2) return this._envelopeFromMip(l, channel, bStart, M, outN)
+    }
+    return this._envelopeFromRaw(channel, s0, s1, outN)
+  }
+
+  _envelopeFromMip(level, channel, bStart, M, outN) {
+    const mip = this._mip[level]
+    const nc = this.nChannels
+    const out = new Float32Array(outN * 2)
+    for (let i = 0; i < outN; i++) {
+      const a = bStart + Math.floor((i * M) / outN)
+      const b = bStart + Math.max(1, Math.floor(((i + 1) * M) / outN))
+      let mn = Infinity, mx = -Infinity
+      for (let bucket = a; bucket < b; bucket++) {
+        const idx = (bucket * nc + channel) * 2
+        const bmn = mip[idx]
+        if (Number.isNaN(bmn)) continue
+        const bmx = mip[idx + 1]
+        if (bmn < mn) mn = bmn
+        if (bmx > mx) mx = bmx
+      }
+      if (mn === Infinity) { mn = 0; mx = 0 }
+      out[i * 2] = mn
+      out[i * 2 + 1] = mx
+    }
+    return out
+  }
+
+  _envelopeFromRaw(channel, s0, s1, outN) {
+    const nc = this.nChannels
+    const data = this._data
+    const M = s1 - s0
+    const out = new Float32Array(outN * 2)
+    for (let i = 0; i < outN; i++) {
+      const a = s0 + Math.floor((i * M) / outN)
+      const b = s0 + Math.max(1, Math.floor(((i + 1) * M) / outN))
+      let mn = Infinity, mx = -Infinity
+      for (let s = a; s < b; s++) {
+        const v = data[s * nc + channel]
+        if (Number.isNaN(v)) continue
+        if (v < mn) mn = v
+        if (v > mx) mx = v
+      }
+      if (mn === Infinity) { mn = 0; mx = 0 }
+      out[i * 2] = mn
+      out[i * 2 + 1] = mx
+    }
     return out
   }
 }
@@ -449,34 +621,15 @@ export default class SessionStore {
   // ── Queries (used by AnalysisDisplay) ────────────────────────────────────────
 
   /**
-   * EEG channel slice over [t0, t1] seconds. Returns per-channel Float32Arrays
-   * plus the sample offset, for the analysis renderer to decimate.
+   * PPG channel slice over [t0, t1] seconds. EEG/IMU go through
+   * `GriddedStream.envelope` instead (mip-backed decimation); PPG keeps a raw
+   * slice because its detrend pass needs contiguous samples — see
+   * `AnalysisDisplay._ppgSignal`.
    */
-  rangeEEG(t0, t1) {
-    const s0 = Math.floor(t0 * EEG_FS)
-    const s1 = Math.ceil(t1 * EEG_FS)
-    return {
-      fs: EEG_FS,
-      s0,
-      channels: [0, 1, 2, 3].map(c => this.eeg.channelSlice(c, s0, s1)),
-    }
-  }
-
   rangePPG(t0, t1) {
     const s0 = Math.floor(t0 * PPG_FS)
     const s1 = Math.ceil(t1 * PPG_FS)
     return { fs: PPG_FS, s0, data: this.ppg.channelSlice(0, s0, s1) }
-  }
-
-  rangeIMU(t0, t1) {
-    const s0 = Math.floor(t0 * IMU_FS)
-    const s1 = Math.ceil(t1 * IMU_FS)
-    return {
-      fs: IMU_FS,
-      s0,
-      accel: [0, 1, 2].map(c => this.accel.channelSlice(c, s0, s1)),
-      gyro:  [0, 1, 2].map(c => this.gyro.channelSlice(c, s0, s1)),
-    }
   }
 
   /** Spectrogram columns whose time falls in [t0, t1]. */

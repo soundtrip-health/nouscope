@@ -740,6 +740,16 @@ series can sit a small offset apart. Cross-checked against `analysis/utils.py` o
 Buffers are growable segmented `Float32Array`s (~21 MB/hour, EEG-dominated) — the
 whole session is held in RAM.
 
+Each stream also maintains a **min/max mip pyramid** (`GriddedStream._syncMips`):
+level 0 buckets groups of 8 raw samples into `[min,max]`, and each level above
+groups 8 buckets from the level below (bucket sizes 8, 64, 512, 4096 samples).
+Levels are extended lazily and incrementally — each level is folded from the one
+below it, not from raw data, so the total build cost across all levels is a small
+constant multiple of the raw sample count, and a call when nothing new has arrived
+is a no-op. This exists purely for the Analysis tab's windowed rendering below: it
+lets a wide window (e.g. **All** on a long session) decimate to `OUT_N` display
+columns by touching a bounded number of coarse buckets instead of every raw sample.
+
 ### Spectrograms
 
 The JSONL carries no spectrogram columns, only the raw EEG they derive from.
@@ -768,11 +778,20 @@ from the store on each seek/frame (no scroll/append):
   `addPoints`. The roll's `x = a_position.x − uShift` shader has `uShift` re-set to
   `shift − 1` before each draw so a full-capacity batch centres in clip space.
   Raw signals are **min/max-decimated** into `OUT_N` buckets (2 points per bucket)
-  so spikes survive long windows; derived series are step/hold-sampled. The band
-  y-scale is a **stable session-wide running max** (`SessionStore.bandsScale`), not
-  per-window, so it doesn't jump while scrubbing. PPG is stored **raw** (big DC +
-  drift), so `_renderPPG` detrends it (subtract a ~1 s centred moving average) and
-  scales by a robust (~95th-pct) AC peak so heartbeats fill the panel.
+  so spikes survive long windows; derived series are step/hold-sampled. EEG and IMU
+  decimate via `GriddedStream.envelope`, which sources from the mip pyramid above
+  once the window is wide enough for a coarse level to still give ≥2 buckets per
+  output column, falling back to scanning raw samples directly for anything
+  narrower — this is what keeps scrubbing/playing at a large window size (e.g.
+  **All** on a multi-minute session) from re-scanning the whole window every
+  frame. The band y-scale is a **stable session-wide running max**
+  (`SessionStore.bandsScale`), not per-window, so it doesn't jump while scrubbing.
+  PPG is stored **raw** (big DC + drift), so `_renderPPG` detrends it (subtract a
+  ~1 s centred moving average) and scales by a robust (~95th-pct) AC peak so
+  heartbeats fill the panel; above `PPG_RAW_SAMPLE_CAP` (~5 min at 64 Hz) it
+  detrends a bounded-size mip-decimated proxy instead of every raw sample, since
+  the moving average only needs the same slow DC drift, which the proxy still
+  carries.
 - **Resolution** — `AnalysisDisplay.resize()` (and `BioDataDisplay.resize()` for the
   live line plots) sizes each canvas's drawing buffer to its on-screen size ×
   devicePixelRatio (capped 2×) and updates the GL viewport, so the fullscreen grid
@@ -783,8 +802,12 @@ from the store on each seek/frame (no scroll/append):
   5th percentile, ceiling = 90th percentile, EEG values clamped to `SPEC_LOG_CAP`),
   the random-access equivalent of the live panel's sliding-window + decaying-floor
   scale, so the two views agree on identical data and a single artifact column can't
-  wash the window out. Shared draw primitives (viridis LUT, EEG scales, `paintSpecColumn`,
-  `specColumnsScale`) live in `src/js/ui/bioRender.js`, used by both renderers.
+  wash the window out. The percentile is computed from a **bounded, strided sample**
+  of the window's columns (capped at `SPEC_SCALE_SAMPLE_CAP` values) rather than
+  every bin of every column, so a wide window with thousands of columns doesn't
+  sort a six-figure array every frame. Shared draw primitives (viridis LUT, EEG
+  scales, `paintSpecColumn`, `specColumnsScale`) live in `src/js/ui/bioRender.js`,
+  used by both renderers.
 - **Scalar readouts** (HR, band/MSE legends, entrainment meter, quality dots) are
   sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`.
 - **Playhead cursor** — every panel is wrapped in a `position: relative` `.an-plot-wrap`
