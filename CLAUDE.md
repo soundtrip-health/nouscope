@@ -28,7 +28,7 @@ No test suite is configured.
 Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
 
 - **`↑ Track` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
-- **`🎤` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
+- **`Microphone` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
 There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.
 
@@ -41,9 +41,13 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/managers/BPMManager.js` | Tempo detection via `web-audio-beat-detector`; exposes `bpmValue` (recording metadata). No beat events. |
 | `src/js/managers/EntrainmentManager.js` | Real-time EEG–music entrainment: parallel audio/EEG tempograms (0.5–5 Hz), z-score selective enhancement comparison, entrainment index (0–1) |
 | `src/js/managers/ComplexityManager.js` | Multiscale entropy (MSE) on quality-weighted 4-channel EEG average; SampEn at 6 scales, updated ~0.2 Hz; exposes `mseCurve` + `complexity` scalar |
-| `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file |
+| `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file. `onRecord` sink fans every record to `SessionStore` too. |
 | `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
+| `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. |
 | `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; spectrograms; audio tempogram; entrainment meter; signal quality dots |
+| `src/js/ui/AnalysisDisplay.js` | Random-access counterpart to BioDataDisplay: `renderWindow(store, t0, t1, cursor)` redraws all panels for an arbitrary window from a `SessionStore` (min/max-decimated line plots, time-mapped spectrogram blits) |
+| `src/js/ui/Scrubber.js` | Movie-style transport for the Analysis tab: playhead cursor, window width, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts |
+| `src/js/ui/bioRender.js` | Shared render primitives (viridis LUT, EEG/IMU scales, color tokens, `paintSpecColumn`) used by both BioDataDisplay and AnalysisDisplay |
 
 ### Update Loop
 
@@ -120,6 +124,15 @@ There is no 3D render step — the bio-panel canvases are updated directly by `B
 - **EEG Bands** relative-power chart + **Complexity (MSE)** bar chart.
 - Signal quality shown as colored dots (green/yellow/red) per EEG channel.
 - Panel and toggle hidden when EEG is disconnected.
+
+### Analysis Tab — Scrubbable Session Review
+
+A second in-app view (not a separate page — the Muse BT connection and managers stay alive) that shows the same panels over a long, seekable window. See `docs/algorithms.md §9` for the algorithms.
+
+- **View tabs** (`#view-tabs`, top-center): `◉ Live` / `🎬 Analysis`. Shown once EEG is connected or a recording is loaded. Live toggles `body.fullscreen-bio`; Analysis toggles `body.analysis-mode` (reuses the same fullscreen grid via a shared SCSS selector list; only one `.bio-panel` is un-`hidden` at a time).
+- **Two data sources, one store**: while EEG is connected an always-on capture (`RecordingManager.captureActive` → `onRecord` → `SessionStore.ingest`) feeds the timeline live/DVR — no explicit recording needed; `⏺` additionally writes the JSONL file. `↑ Recording` loads a saved `.jsonl` into the same store. Live spectrogram/tempogram columns are tapped from the live managers each frame (`App._tapLiveColumns`); for loaded files spectrograms are recomputed from EEG (audio tempogram can't be — no audio stored).
+- **`#analysis-panel`** mirrors `#bio-panel`'s sections with `an-`-prefixed IDs; rendered by `AnalysisDisplay.renderWindow`.
+- **Scrubber** (`#scrubber`, fixed bottom bar): play/pause, click/drag timeline, ● LIVE (follow the growing edge), speed (1×/2×/4×), window width (3s…All). Keyboard: Space, ←/→, Home/End.
 
 ### Standing Rules
 

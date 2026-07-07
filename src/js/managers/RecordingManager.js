@@ -47,6 +47,18 @@ export default class RecordingManager {
   startedAtMs  = 0     // wall-clock ms since epoch at start — for file naming
   sampleCount  = 0     // total JSONL lines recorded (for UI display)
 
+  // Optional live sink: called with every record object as it is produced, so a
+  // consumer (e.g. SessionStore, powering the Analysis tab) can build a
+  // scrubbable timeline in parallel with — and independent of — the JSONL file.
+  // `captureActive` lets records flow to the sink even when not writing a file,
+  // so the Analysis tab shows live Muse data (DVR) without an explicit recording.
+  onRecord      = null
+  captureActive = false
+
+  /** Start/stop forwarding records to `onRecord` independent of disk recording. */
+  enableCapture()  { this.captureActive = true }
+  disableCapture() { this.captureActive = false }
+
   _mode        = 'memory' // 'stream' | 'memory'
   _pending     = []       // pre-stringified lines awaiting flush
   _lines       = []       // memory-mode: flushed chunks (joined on stop)
@@ -153,7 +165,7 @@ export default class RecordingManager {
 
   /** @param {{index, electrode, timestamp, samples:number[]}} reading */
   recordEeg(reading) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({
       type: 'eeg',
       index: reading.index,
@@ -165,7 +177,7 @@ export default class RecordingManager {
 
   /** @param {{index, ppgChannel, timestamp, samples:number[]}} reading */
   recordPpg(reading) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({
       type: 'ppg',
       index: reading.index,
@@ -177,20 +189,20 @@ export default class RecordingManager {
 
   /** @param {{sequenceId, samples:{x,y,z}[]}} reading */
   recordAccel(reading) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({ type: 'accel', sequenceId: reading.sequenceId, samples: reading.samples })
   }
 
   /** @param {{sequenceId, samples:{x,y,z}[]}} reading */
   recordGyro(reading) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({ type: 'gyro', sequenceId: reading.sequenceId, samples: reading.samples })
   }
 
   // ── Derived-metric hooks ───────────────────────────────────────────────────
 
   recordBands(bp) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({
       type: 'bands', t: this._t(),
       delta: bp.delta, theta: bp.theta, alpha: bp.alpha, beta: bp.beta, gamma: bp.gamma,
@@ -198,17 +210,17 @@ export default class RecordingManager {
   }
 
   recordHr(bpm) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({ type: 'hr', t: this._t(), bpm })
   }
 
   recordEntrain(idx) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({ type: 'entrain', t: this._t(), idx })
   }
 
   recordMse(curve, complexity) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({
       type: 'mse', t: this._t(),
       curve: Array.from(curve).map(v => +v.toFixed(4)),
@@ -217,7 +229,7 @@ export default class RecordingManager {
   }
 
   recordMusicTempo(bpm) {
-    if (!this.isRecording) return
+    if (!this.isRecording && !this.captureActive) return
     this._push({ type: 'music', t: this._t(), bpm: +bpm.toFixed(2) })
   }
 
@@ -228,6 +240,15 @@ export default class RecordingManager {
   }
 
   _push(obj) {
+    // Fan out to the live/DVR sink only while capture is active. Gating on
+    // captureActive (not just "always") is essential: when a saved file is loaded
+    // for review, capture is disabled but the user may still press ⏺ to record a
+    // fresh file — those live records must NOT leak into the loaded session's
+    // store, whose counter state would mis-place them and corrupt the timeline.
+    if (this.captureActive) this.onRecord?.(obj)
+    // Only buffer to the JSONL file while actually recording; when the record is
+    // flowing purely to the live sink (captureActive), keep RAM at zero.
+    if (!this.isRecording) return
     this._pending.push(JSON.stringify(obj))
     this.sampleCount++
   }

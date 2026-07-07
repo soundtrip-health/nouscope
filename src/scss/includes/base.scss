@@ -145,6 +145,21 @@ a:focus-visible {
   align-items: center;
   gap: 0.6rem;
 
+  // Uniform box height across every control (buttons + upload labels) so the
+  // bar reads as one row; each keeps its own horizontal padding / font.
+  // `:not([hidden])` so this display rule doesn't override the hidden attribute
+  // on the pause / record buttons.
+  button:not([hidden]),
+  .controls-upload-btn:not([hidden]) {
+    height: 2rem;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
   #eeg-connect {
     background: none;
     border: 1px solid var(--border-control);
@@ -188,8 +203,9 @@ a:focus-visible {
     border: 1px solid var(--border-control);
     color: var(--color-text);
     font-family: inherit;
-    font-size: 0.85rem;
-    padding: 0.3rem 0.6rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    padding: 0.3rem 0.8rem;
     cursor: pointer;
     transition: border-color 0.2s, background 0.2s, color 0.2s;
 
@@ -541,7 +557,11 @@ a:focus-visible {
 // Full-viewport data view. Lays out all bio sections in a responsive grid.
 // CSS-scales canvases (image-rendering: pixelated on spectrograms keeps columns
 // crisp; webgl-plot line traces scale smoothly).
-body.fullscreen-bio {
+// Shared by the live fullscreen view and the Analysis tab — only one .bio-panel
+// is un-`hidden` at a time (App manages the `hidden` attributes), so the grid
+// layout below applies to whichever panel is active.
+body.fullscreen-bio,
+body.analysis-mode {
   .bio-panel {
     position: fixed;
     inset: 0;
@@ -594,6 +614,173 @@ body.fullscreen-bio {
 
   // Keep controls on top and clickable
   .eeg-controls { z-index: 1005; }
+}
+
+// ── Analysis tab ────────────────────────────────────────────────────────────
+// The analysis panel reuses the fullscreen grid above, but leaves room at the
+// bottom for the scrubber and hides the live panel.
+// Only the active panel becomes the fullscreen grid; the inactive one's grid
+// rule (shared selector above) would otherwise beat its [hidden] on specificity.
+body.fullscreen-bio #analysis-panel { display: none !important; }
+body.analysis-mode  #bio-panel      { display: none !important; }
+
+body.analysis-mode {
+  #analysis-panel {
+    height: calc(100vh - 4.5rem);
+    max-height: calc(100vh - 4.5rem);
+    bottom: 4.5rem;
+  }
+
+  // Lift the live controls above the full-width scrubber so Connect/Record stay
+  // reachable while reviewing.
+  .eeg-controls {
+    bottom: 4.75rem;
+    z-index: 1007;
+  }
+}
+
+// View tabs — top-center switch between Live and Analysis.
+.view-tabs {
+  position: fixed;
+  top: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1006;
+  display: flex;
+  gap: 0.25rem;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  padding: 0.2rem;
+
+  &[hidden] { display: none; }
+}
+
+.view-tab {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+
+  &:hover { color: var(--color-text); }
+
+  &.active {
+    color: var(--color-bg);
+    background: var(--color-text);
+  }
+}
+
+// Movie-style scrubber.
+.scrubber {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1006;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1.5rem;
+  background: var(--surface-panel);
+  border-top: 1px solid var(--border-hairline);
+
+  &[hidden] { display: none; }
+}
+
+.scrub-play {
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  line-height: 1;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.2s, background 0.2s;
+
+  &:hover { border-color: var(--color-text); background: var(--wash-hover); }
+}
+
+.scrub-time {
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-value);
+  letter-spacing: 0.05em;
+  min-width: 3rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.scrub-track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.scrub-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--entrain-from), var(--entrain-to));
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.scrub-head {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+}
+
+.scrub-btn {
+  position: relative;
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+
+  &:hover { border-color: var(--color-text); background: var(--wash-hover); }
+
+  &.active {
+    color: var(--status-record);
+    border-color: var(--status-record);
+  }
+}
+
+// The window <select> overlays its label so the current value shows as text.
+.scrub-window-label {
+  select {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+  }
 }
 
 .browser-warning {

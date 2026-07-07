@@ -15,6 +15,7 @@ This document explains the key algorithms that drive Nouscope: how raw biometric
 7. [EEG–Music Entrainment Index](#6--eegmusic-entrainment-index)
 8. [EEG Complexity — Multiscale Entropy](#7--eeg-complexity--multiscale-entropy)
 9. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
+10. [Analysis Tab — Timeline Reconstruction & Scrubbing](#9--analysis-tab--timeline-reconstruction--scrubbing)
 
 ---
 
@@ -687,3 +688,114 @@ Constants live at the top of `entrainment.py`. Output figure:
 - Stober, S., et al. (2016). Brain Beats.
 - Wollman, I., et al. (2020). Neural entrainment to ~5 Hz endogenous theta.
 - Kaneshiro, B., et al. (2020). Stimulus-response correlation (SRC), natural music. *NeuroImage.* (SRC pending audio.)
+
+---
+
+## §9 — Analysis Tab — Timeline Reconstruction & Scrubbing
+
+The **Analysis tab** shows the same panels as the live view but over a long,
+seekable window: record (or load) a session, then scrub it like a movie. It is a
+separate in-app view (the Muse Bluetooth connection and all managers stay alive —
+a separate page would drop them), driven by two new pieces:
+
+- `src/js/managers/SessionStore.js` — the stored, queryable session timeline.
+- `src/js/ui/AnalysisDisplay.js` — a random-access, windowed renderer.
+- `src/js/ui/Scrubber.js` — the movie-style transport (playhead, play, speed, LIVE).
+
+### One schema, two producers
+
+The JSONL record types (§8) are the ingestion schema. `SessionStore.ingest(record)`
+consumes them from either source:
+
+- **Live / DVR** — while EEG is connected, `RecordingManager.captureActive` is
+  on, so every record it produces flows to its `onRecord` sink (pointed at
+  `SessionStore.ingest`) **independent of disk recording** — the Analysis tab
+  reflects the live session with no explicit ⏺. Pressing ⏺ additionally writes
+  the JSONL file; with `captureActive` on but `isRecording` off, records reach
+  the sink with zero file buffering. `SessionStore.startLive()` stamps a capture
+  epoch used for derived-record and column times.
+- **File** — `SessionStore.loadFromText(text)` parses a saved `nouscope-*.jsonl`
+  into the same records.
+
+### Raw-stream reconstruction (JS port of `analysis/utils.py`)
+
+Raw sensor streams are placed on a regular per-stream grid from their native 16-bit
+muse-js counters — a direct port of the offline Python pipeline:
+
+- `_unwrap(state, key, raw)` mirrors `_unwrap_counter` (utils.py:73): a backward
+  jump > ½·2¹⁶ counts as one wrap. We reconstruct time from the counter, **not**
+  the `timestamp` field (which is float32-quantized at the recordings' magnitude).
+- Each packet occupies a contiguous block at grid sample
+  `(unwrapped − seqStart) × samplesPerPacket` (EEG 12/pkt @256 Hz, PPG 6/pkt
+  @64 Hz, accel/gyro 3/pkt @52 Hz). This equals `round(t·fs)` exactly, matching
+  `packets_to_grid` (utils.py:221). Earlier packets win on overlap; unwritten
+  slots stay `NaN` so dropouts remain visible. EEG electrodes are written
+  independently per channel (partial packet-groups still display).
+
+Each raw stream's `t=0` is its own first sample; derived streams (`bands/hr/mse/
+entrain/music`) carry `t` (ms → s). As in the Python pipeline, raw and derived
+series can sit a small offset apart. Cross-checked against `analysis/utils.py` on
+`session1.jsonl`: identical duration and per-stream record counts, 0 % NaN EEG.
+
+Buffers are growable segmented `Float32Array`s (~21 MB/hour, EEG-dominated) — the
+whole session is held in RAM.
+
+### Spectrograms
+
+The JSONL carries no spectrogram columns, only the raw EEG they derive from.
+For the **live/DVR** path, `App._tapLiveColumns()` copies new main/low spectrogram
+columns straight from `EEGManager.spectrumDisplay`/`spectrumLoDisplay` (already
+computed for the live panel) into the store each frame, plus audio-tempogram
+columns from `EntrainmentManager.audioTempogram` at ~2 Hz. For the **file** path,
+`SessionStore.computeSpectrograms()` recomputes the main (1–50 Hz @1 Hz, 256-sample
+window) and low (0.5–8 Hz @0.1 Hz, 2560-sample window) spectrograms with a sliding
+Hann-DFT at a 128-sample hop (~2 cols/s), matching the live layout (§6). The channel
+average is **quality-weighted** (good=1.0, marginal=0.5, poor=0.0) like the live
+EEGManager path, using each channel's whole-signal RMS against the §3/§6 thresholds
+(good<50, marginal<100 µV) — so a railing channel doesn't smear the recomputed
+spectrogram the way the live view never showed it; an all-poor session falls back to
+an equal-weight mean. Bin counts (50 main / 76 low) are imported from `bioRender` so
+the recompute and the render can't drift. The audio tempogram cannot be reconstructed
+offline (no audio is stored), so it is empty for loaded files.
+
+### Windowed rendering
+
+`AnalysisDisplay.renderWindow(store, t0, t1, cursor)` clears and redraws every panel
+from the store on each seek/frame (no scroll/append):
+
+- **Line plots** (EEG/PPG/IMU/bands/MSE) reuse `WebglLineRoll`, refreshed whole
+  each frame by adding exactly the roll's capacity of points via the batched
+  `addPoints`. The roll's `x = a_position.x − uShift` shader has `uShift` re-set to
+  `shift − 1` before each draw so a full-capacity batch centres in clip space.
+  Raw signals are **min/max-decimated** into `OUT_N` buckets (2 points per bucket)
+  so spikes survive long windows; derived series are step/hold-sampled. The band
+  y-scale is a **stable session-wide running max** (`SessionStore.bandsScale`), not
+  per-window, so it doesn't jump while scrubbing. PPG is stored **raw** (big DC +
+  drift), so `_renderPPG` detrends it (subtract a ~1 s centred moving average) and
+  scales by a robust (~95th-pct) AC peak so heartbeats fill the panel.
+- **Resolution** — `AnalysisDisplay.resize()` (and `BioDataDisplay.resize()` for the
+  live line plots) sizes each canvas's drawing buffer to its on-screen size ×
+  devicePixelRatio (capped 2×) and updates the GL viewport, so the fullscreen grid
+  isn't upscaling 280-px buffers. Called on view-enter and window resize.
+- **Spectrograms** build the whole window into one `ImageData` and blit it once,
+  one stored column per output pixel (nearest column in time) — resolution- and
+  zoom-independent. Auto-scaling uses the shared `specColumnsScale` policy (floor =
+  5th percentile, ceiling = 90th percentile, EEG values clamped to `SPEC_LOG_CAP`),
+  the random-access equivalent of the live panel's sliding-window + decaying-floor
+  scale, so the two views agree on identical data and a single artifact column can't
+  wash the window out. Shared draw primitives (viridis LUT, EEG scales, `paintSpecColumn`,
+  `specColumnsScale`) live in `src/js/ui/bioRender.js`, used by both renderers.
+- **Scalar readouts** (HR, band/MSE legends, entrainment meter, quality dots) are
+  sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`.
+
+### Scrubber
+
+`Scrubber` owns a cursor (s) and window width W. A fixed width renders the sliding
+window `[cursor − W, cursor]` (ends at the playhead); **All** (W = 0) renders the
+whole session `[0, duration]` on every graph, with the playhead marking the
+position used for the scalar readouts. A `requestAnimationFrame` loop advances the
+cursor at `speed × realtime` while playing, snaps it to the growing leading edge
+while **following** (● LIVE — shown only for a live session, hidden for loaded
+files), and otherwise renders only when dirty (seek, window change, new data).
+Click/drag the track to seek; Space toggles play, ←/→ step, Home/End jump to
+start/live.

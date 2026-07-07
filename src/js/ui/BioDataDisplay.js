@@ -1,13 +1,21 @@
 import { WebglLineRoll, createWebGL2Context, setBackgroundColor } from 'webgl-plot'
 import App from '../App'
 import { colorVar, colorVars } from './palette'
+import {
+  TRANSPARENT,
+  EEG_SCALE, EEG_AMPLITUDE, EEG_OFFSETS,
+  ACCEL_SCALE, GYRO_SCALE,
+  MSE_Y_MAX,
+  EEG_TOKENS, BAND_TOKENS, IMU_TOKENS, MSE_TOKENS,
+  SPEC_BINS, SPEC_START_IDX, SPEC_DISPLAY_BINS, SPEC_PX_PER_BIN, SPEC_COL_WIDTH,
+  SPEC_SCALE_DECAY, SPEC_MIN_RANGE, SPEC_SCALE_WIN, SPEC_SCALE_PCT, SPEC_LOG_CAP,
+  SPEC_LO_BINS, SPEC_LO_PX_PER_BIN,
+  paintSpecColumn,
+} from './bioRender'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Constants (live scroll display only — see bioRender.js for shared ones) ────
 
 const EEG_ROLL      = 512   // 2 s at 256 Hz
-const EEG_SCALE     = 200   // µV mapped to full per-channel half-height
-const EEG_AMPLITUDE = 0.22  // normalized half-height per channel stripe
-const EEG_OFFSETS   = [0.75, 0.25, -0.25, -0.75]  // TP9, AF7, AF8, TP10
 
 const BAND_ROLL        = 300   // ~5 s at ~60 fps polling rate
 const BAND_YMAX_MIN    = 0.2   // minimum visible Y range (prevents zero-range when all flat)
@@ -18,78 +26,10 @@ const BAND_LERP        = 0.08  // per-frame EMA toward bandPower (~0.5 s to 90% 
 // several update cycles. MSE recomputes at ~0.2 Hz; the plot holds the raw value
 // flat between updates (no smoothing), so steps reflect actual recomputations.
 const MSE_ROLL   = 1800  // 30 s at ~60 fps — covers ~6 MSE update cycles
-const MSE_Y_MAX  = 2.5   // SampEn rarely exceeds this; used to map values into [-1, +1]
 
 const PPG_ROLL = 384  // 6 s at 64 Hz — matches MSPTD analysis window
 
-const IMU_ROLL    = 208    // 4 s at ~52 Hz
-const ACCEL_SCALE = 2.0    // ±2 g (Muse full range)
-const GYRO_SCALE  = 300    // ±300 dps
-
-// ── Colors ────────────────────────────────────────────────────────────────────
-// Trace colors are read from the CSS design tokens at init time (see palette.js
-// + src/scss/includes/_tokens.scss) so the plots never drift from the stylesheet.
-
-const EEG_TOKENS  = ['--eeg-tp9', '--eeg-af7', '--eeg-af8', '--eeg-tp10']
-const BAND_TOKENS = ['--band-delta', '--band-theta', '--band-alpha', '--band-beta', '--band-gamma']
-const IMU_TOKENS  = ['--imu-accel-x', '--imu-accel-y', '--imu-accel-z',
-                     '--imu-gyro-x', '--imu-gyro-y', '--imu-gyro-z']
-// MSE scale colors — violet→amber across the 5 scales (τ=1 → τ=9)
-const MSE_TOKENS  = ['--mse-1', '--mse-2', '--mse-3', '--mse-4', '--mse-5']
-
-// ── Spectrogram ──────────────────────────────────────────────────────────────
-
-const SPEC_BINS        = 50
-const SPEC_START_BIN   = 8     // first Hz to display in main spec (1–7 Hz shown in lo-spec only)
-const SPEC_START_IDX   = SPEC_START_BIN - 1              // array index for SPEC_START_BIN
-const SPEC_DISPLAY_BINS = SPEC_BINS - SPEC_START_IDX     // bins shown: 8–50 Hz = 43
-const SPEC_PX_PER_BIN  = 2     // vertical pixels per frequency bin
-const SPEC_COL_WIDTH   = 2     // horizontal pixels per time column (scroll speed)
-const SPEC_SCALE_DECAY = 0.995   // running floor decay per column (keeps noise floor from anchoring)
-const SPEC_MIN_RANGE   = 2      // minimum log₁₀ dynamic range
-const SPEC_SCALE_WIN   = 30     // columns in sliding window for robust ceiling (~15 s at 2 Hz)
-const SPEC_SCALE_PCT   = 0.9    // percentile of window used as scale ceiling
-// log₁₀ cap ≈ 200 µV amplitude (Hann-DFT power ≈ A² × N²/16; log₁₀(200² × 4096) ≈ 8.2)
-const SPEC_LOG_CAP     = 8.2
-
-// Low-end spectrogram (0.5–8.0 Hz at 0.1 Hz resolution, hi-res entrainment view)
-const SPEC_LO_BINS       = 76  // 0.5–8.0 Hz at 0.1 Hz steps
-const SPEC_LO_PX_PER_BIN = 1   // 1 pixel per bin → 76 px tall
-
-// Viridis colormap — piecewise-linear from 9 key stops, precomputed to 256-entry LUT
-const _VIRIDIS_STOPS = [
-  [0.000,  68,   1,  84],
-  [0.125,  72,  36, 117],
-  [0.250,  59,  82, 139],
-  [0.375,  44, 114, 142],
-  [0.500,  33, 145, 140],
-  [0.625,  57, 175, 120],
-  [0.750, 122, 209,  81],
-  [0.875, 189, 223,  38],
-  [1.000, 253, 231,  37],
-]
-
-const VIRIDIS_LUT = (() => {
-  const lut = new Array(256)
-  for (let i = 0; i < 256; i++) {
-    const t = i / 255
-    let seg = 1
-    while (seg < _VIRIDIS_STOPS.length - 1 && t > _VIRIDIS_STOPS[seg][0]) seg++
-    const [t0, r0, g0, b0] = _VIRIDIS_STOPS[seg - 1]
-    const [t1, r1, g1, b1] = _VIRIDIS_STOPS[seg]
-    const f = t1 > t0 ? (t - t0) / (t1 - t0) : 0
-    lut[i] = [
-      Math.round(r0 + f * (r1 - r0)),
-      Math.round(g0 + f * (g1 - g0)),
-      Math.round(b0 + f * (b1 - b0)),
-    ]
-  }
-  return lut
-})()
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-const TRANSPARENT = [0, 0, 0, 0]
+const IMU_ROLL = 208   // 4 s at ~52 Hz
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -207,6 +147,26 @@ export default class BioDataDisplay {
     this.resetIndices()
   }
 
+  /**
+   * Match the WebGL line-plot drawing buffers to their on-screen size (× dpr) so
+   * the fullscreen grid isn't upscaling 280-px buffers into blurry lines. The 2D
+   * spectrograms are left at their native buffer — they scroll in over time, so a
+   * wider buffer would start mostly black and lose scroll history on resize.
+   */
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    for (const gl of [this._eegGL, this._bandGL, this._mseGL, this._ppgGL, this._imuGL]) {
+      if (!gl) continue
+      const c = gl.canvas
+      const r = c.getBoundingClientRect()
+      if (!r.width || !r.height) continue
+      const w = Math.max(1, Math.round(r.width * dpr))
+      const h = Math.max(1, Math.round(r.height * dpr))
+      if (c.width !== w || c.height !== h) { c.width = w; c.height = h }
+      gl.viewport(0, 0, c.width, c.height)
+    }
+  }
+
   /** Reset read pointers to the current sample counts — call on each reconnect. */
   resetIndices() {
     const mgr = App.eegManager
@@ -303,22 +263,11 @@ export default class BioDataDisplay {
       const range = Math.max(specHi - this._specLo, SPEC_MIN_RANGE)
 
       // Draw new column at right edge — each bin spans SPEC_PX_PER_BIN rows
-      for (let i = SPEC_START_IDX; i < SPEC_BINS; i++) {
-        const norm = (col[i] - this._specLo) / range
-        const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
-        const [r, g, b] = VIRIDIS_LUT[idx]
-        const binInDisplay = i - SPEC_START_IDX
-        for (let p = 0; p < SPEC_PX_PER_BIN; p++) {
-          const y = H - 1 - (binInDisplay * SPEC_PX_PER_BIN + p)
-          for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
-            const off = (y * SPEC_COL_WIDTH + cx) * 4
-            imgData.data[off]     = r
-            imgData.data[off + 1] = g
-            imgData.data[off + 2] = b
-            imgData.data[off + 3] = 255
-          }
-        }
-      }
+      paintSpecColumn(imgData, col, {
+        lo: this._specLo, range, H,
+        colWidth: SPEC_COL_WIDTH, pxPerBin: SPEC_PX_PER_BIN,
+        startIdx: SPEC_START_IDX, endIdx: SPEC_BINS,
+      })
 
       this._specCtx.putImageData(imgData, canvas.width - SPEC_COL_WIDTH, 0)
     }
@@ -364,19 +313,11 @@ export default class BioDataDisplay {
       const range = Math.max(specLoHi - this._specLoLo, SPEC_MIN_RANGE)
 
       // Draw new column at right edge — 1 pixel per bin
-      for (let i = 0; i < SPEC_LO_BINS; i++) {
-        const norm = (col[i] - this._specLoLo) / range
-        const idx = Math.max(0, Math.min(255, Math.round(norm * 255)))
-        const [r, g, b] = VIRIDIS_LUT[idx]
-        const y = H - 1 - i
-        for (let cx = 0; cx < SPEC_COL_WIDTH; cx++) {
-          const off = (y * SPEC_COL_WIDTH + cx) * 4
-          imgData.data[off]     = r
-          imgData.data[off + 1] = g
-          imgData.data[off + 2] = b
-          imgData.data[off + 3] = 255
-        }
-      }
+      paintSpecColumn(imgData, col, {
+        lo: this._specLoLo, range, H,
+        colWidth: SPEC_COL_WIDTH, pxPerBin: SPEC_LO_PX_PER_BIN,
+        startIdx: 0, endIdx: SPEC_LO_BINS,
+      })
 
       this._specLoCtx.putImageData(imgData, canvas.width - SPEC_COL_WIDTH, 0)
     }
@@ -478,9 +419,11 @@ export default class BioDataDisplay {
     const imgData = this._specAudioCtx.createImageData(COL_WIDTH, H)
 
     // Convert to log scale for display (consistent with other spectrograms)
+    const logCol = new Float32Array(BINS)
     let colMax = -Infinity
     for (let i = 0; i < BINS; i++) {
       const logVal = Math.log10(spec[i] + 1e-10)
+      logCol[i] = logVal
       if (logVal > colMax) colMax = logVal
       if (logVal < this._specAudioLo) this._specAudioLo = logVal
     }
@@ -496,20 +439,11 @@ export default class BioDataDisplay {
       : this._specAudioLo + SPEC_MIN_RANGE
     const range = Math.max(hi - this._specAudioLo, SPEC_MIN_RANGE)
 
-    for (let i = 0; i < BINS; i++) {
-      const logVal = Math.log10(spec[i] + 1e-10)
-      const norm = (logVal - this._specAudioLo) / range
-      const idx  = Math.max(0, Math.min(255, Math.round(norm * 255)))
-      const [r, g, b] = VIRIDIS_LUT[idx]
-      const y = H - 1 - i
-      for (let cx = 0; cx < COL_WIDTH; cx++) {
-        const off = (y * COL_WIDTH + cx) * 4
-        imgData.data[off]     = r
-        imgData.data[off + 1] = g
-        imgData.data[off + 2] = b
-        imgData.data[off + 3] = 255
-      }
-    }
+    paintSpecColumn(imgData, logCol, {
+      lo: this._specAudioLo, range, H,
+      colWidth: COL_WIDTH, pxPerBin: 1,
+      startIdx: 0, endIdx: BINS,
+    })
 
     this._specAudioCtx.putImageData(imgData, canvas.width - COL_WIDTH, 0)
   }
