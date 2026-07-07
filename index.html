@@ -273,9 +273,13 @@
       <div class="scrubber" id="scrubber" hidden>
         <button class="scrub-play" id="scrub-play" title="Play / pause (Space)">▶</button>
         <span class="scrub-time" id="scrub-time">00:00</span>
-        <div class="scrub-track" id="scrub-track" title="Click or drag to seek">
-          <div class="scrub-fill" id="scrub-fill"></div>
-          <div class="scrub-head" id="scrub-head"></div>
+        <div class="scrub-timeline" id="scrub-timeline" title="Click or drag to seek">
+          <div class="scrub-track" id="scrub-track">
+            <div class="scrub-fill" id="scrub-fill"></div>
+            <div class="scrub-head" id="scrub-head"></div>
+          </div>
+          <canvas class="scrub-ribbon" id="scrub-ribbon"></canvas>
+          <div class="scrub-ticks" id="scrub-ticks"></div>
         </div>
         <span class="scrub-time scrub-duration" id="scrub-duration">00:00</span>
         <button class="scrub-btn" id="scrub-live" title="Jump to the latest data">● LIVE</button>

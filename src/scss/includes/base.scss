@@ -691,12 +691,26 @@ body.analysis-mode {
   cursor: pointer;
   transition: color 0.2s, background 0.2s;
 
-  &:hover { color: var(--color-text); }
+  &:hover:not(:disabled) { color: var(--color-text); }
 
   &.active {
     color: var(--color-bg);
     background: var(--color-text);
   }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// Live doubles as a connection indicator, not just a tab: red once a Muse is
+// connected (so it's obvious the tab is now clickable), further dimmed by the
+// shared `:disabled` rule above while there's nothing live to show.
+#tab-live:not(:disabled):not(.active) {
+  color: var(--status-record);
+
+  &:hover { background: rgba(var(--status-record-rgb), 0.12); }
 }
 
 // Movie-style scrubber.
@@ -742,13 +756,46 @@ body.analysis-mode {
   flex-shrink: 0;
 }
 
-.scrub-track {
+.scrub-timeline {
   position: relative;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.scrub-track {
+  position: relative;
+  width: 100%;
   height: 8px;
   background: rgba(255, 255, 255, 0.12);
   border-radius: 4px;
-  cursor: pointer;
+}
+
+.scrub-ribbon {
+  display: block;
+  width: 100%;
+  height: 20px;   // 4 stacked per-channel rows (TP9/AF7/AF8/TP10), each with a gap below it
+  border-radius: 2px;
+}
+
+// Event ticks (music BPM changes, recording gaps) — one absolutely-positioned
+// hairline per event, spanning the track + ribbon like chapter markers.
+.scrub-ticks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.scrub-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+
+  &.scrub-tick--music { background: var(--color-text); opacity: 0.6; }
+  &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
 }
 
 .scrub-fill {

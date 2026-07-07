@@ -825,5 +825,28 @@ position used for the scalar readouts. A `requestAnimationFrame` loop advances t
 cursor at `speed × realtime` while playing, snaps it to the growing leading edge
 while **following** (● LIVE — shown only for a live session, hidden for loaded
 files), and otherwise renders only when dirty (seek, window change, new data).
-Click/drag the track to seek; Space toggles play, ←/→ step, Home/End jump to
-start/live.
+
+**Timeline ribbon + ticks** — `#scrub-timeline` wraps the plain progress track
+(`#scrub-track`) with two more layers so a seek target is visible before you seek:
+
+- A **quality ribbon** (`#scrub-ribbon`, a `<canvas>`) — `SessionStore.qualityRibbon(outN)`
+  samples `qualityAt(t)` at `outN` (300) evenly-spaced points across the whole
+  session, returning **one array per EEG channel** rather than collapsing to a
+  single worst-of-4 value (an earlier version did that; it made one bad electrode
+  look like the whole signal had dropped out). Painted as 4 stacked rows
+  (TP9/AF7/AF8/TP10, top→bottom — the same channel order as `EEG_OFFSETS`/
+  `EEG_TOKENS` everywhere else), each a flat good/marginal/poor color band.
+- **Event ticks** (`#scrub-ticks`) — one absolutely-positioned hairline per `store.music`
+  record (BPM changes) and per `SessionStore.gaps()` interval (a real dropout: every
+  EEG channel simultaneously NaN for ≥1 s, as opposed to one noisy channel — scanned
+  incrementally in `_scanGaps`, same pattern as `bandsScale()`). Same `left: X%`
+  technique as the Analysis panel's `.an-playhead-line`.
+
+Both are rebuilt in `_renderTimeline`, but **throttled**, not rebuilt every frame:
+a loaded file has a fixed duration and builds once; a live/DVR session re-samples
+at most once a second as it grows. Rebuilding on every animation frame would
+reintroduce the same per-frame-cost problem the line plots had before their mip-
+pyramid fix.
+
+Click/drag anywhere on `#scrub-timeline` (track, ribbon, or ticks — not just the
+8px track) to seek; Space toggles play, ←/→ step, Home/End jump to start/live.

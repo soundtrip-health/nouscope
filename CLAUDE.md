@@ -46,7 +46,7 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. |
 | `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; spectrograms; audio tempogram; entrainment meter; signal quality dots |
 | `src/js/ui/AnalysisDisplay.js` | Random-access counterpart to BioDataDisplay: `renderWindow(store, t0, t1, cursor)` redraws all panels for an arbitrary window from a `SessionStore` (min/max-decimated line plots, time-mapped spectrogram blits) |
-| `src/js/ui/Scrubber.js` | Movie-style transport for the Analysis tab: playhead cursor, window width, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts |
+| `src/js/ui/Scrubber.js` | Movie-style transport for the Analysis tab: playhead cursor, window width, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track |
 | `src/js/ui/bioRender.js` | Shared render primitives (viridis LUT, EEG/IMU scales, color tokens, `paintSpecColumn`) used by both BioDataDisplay and AnalysisDisplay |
 
 ### Update Loop
@@ -129,10 +129,10 @@ There is no 3D render step — the bio-panel canvases are updated directly by `B
 
 A second in-app view (not a separate page — the Muse BT connection and managers stay alive) that shows the same panels over a long, seekable window. See `docs/algorithms.md §9` for the algorithms.
 
-- **View tabs** (`#view-tabs`, top-center): `◉ Live` / `🎬 Analysis`. Shown once EEG is connected or a recording is loaded. Live toggles `body.fullscreen-bio`; Analysis toggles `body.analysis-mode` (reuses the same fullscreen grid via a shared SCSS selector list; only one `.bio-panel` is un-`hidden` at a time).
+- **View tabs** (`#view-tabs`, top-center): `◉ Live` / `🎬 Analysis`. Shown once EEG is connected or a recording is loaded. Live toggles `body.fullscreen-bio`; Analysis toggles `body.analysis-mode` (reuses the same fullscreen grid via a shared SCSS selector list; only one `.bio-panel` is un-`hidden` at a time). `◉ Live` doubles as a connection indicator: greyed out and disabled with no Muse connected, red once one is (so it's obvious the tab just became clickable).
 - **Two data sources, one store**: while EEG is connected an always-on capture (`RecordingManager.captureActive` → `onRecord` → `SessionStore.ingest`) feeds the timeline live/DVR — no explicit recording needed; `⏺` additionally writes the JSONL file. `↑ Recording` loads a saved `.jsonl` into the same store. Live spectrogram/tempogram columns are tapped from the live managers each frame (`App._tapLiveColumns`); for loaded files spectrograms are recomputed from EEG (audio tempogram can't be — no audio stored).
 - **`#analysis-panel`** mirrors `#bio-panel`'s sections with `an-`-prefixed IDs; rendered by `AnalysisDisplay.renderWindow`.
-- **Scrubber** (`#scrubber`, fixed bottom bar): play/pause, click/drag timeline, ● LIVE (follow the growing edge), speed (1×/2×/4×), window width (3s…All). Keyboard: Space, ←/→, Home/End.
+- **Scrubber** (`#scrubber`, fixed bottom bar): play/pause, click/drag timeline, ● LIVE (follow the growing edge), speed (1×/2×/4×), window width (3s…All). Keyboard: Space, ←/→, Home/End. The timeline (`#scrub-timeline`) also carries a per-channel signal-quality ribbon and event ticks (music BPM changes, recording gaps) — see `docs/algorithms.md §9`.
 
 ### Standing Rules
 

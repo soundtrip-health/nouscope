@@ -320,6 +320,9 @@ export default class SessionStore {
     // Analysis y-axis doesn't jump as the visible window changes (incremental).
     this._bandsMax = 0; this._bandsScanned = 0
 
+    // Recording-gap scan state (see `gaps()`/`_scanGaps()`) — incremental like above.
+    this._gapList = []; this._gapScanned = 0; this._gapRunStart = null
+
     this._empty = true
   }
 
@@ -686,5 +689,64 @@ export default class SessionStore {
       q.push(rms < 50 ? 'good' : rms < 100 ? 'marginal' : 'poor')
     }
     return q
+  }
+
+  /**
+   * Per-channel signal quality sampled at `outN` evenly-spaced points across
+   * the whole session, for the scrub-track ribbon. Returns one array per EEG
+   * channel (TP9, AF7, AF8, TP10 — the same order as `EEG_OFFSETS`/`EEG_TOKENS`
+   * everywhere else) rather than collapsing to a single worst-channel value —
+   * a single bad electrode should read as "one bad electrode", not as "the
+   * whole signal dropped out".
+   * @returns {('good'|'marginal'|'poor')[][]} 4 arrays, each length `outN`
+   */
+  qualityRibbon(outN) {
+    const dur = this.duration()
+    const out = [0, 1, 2, 3].map(() => new Array(outN).fill('poor'))
+    if (dur <= 0) return out
+    for (let i = 0; i < outN; i++) {
+      const t = (dur * (i + 0.5)) / outN
+      const q = this.qualityAt(t)
+      for (let c = 0; c < 4; c++) out[c][i] = q[c]
+    }
+    return out
+  }
+
+  /**
+   * Contiguous spans (seconds) where every EEG channel is simultaneously
+   * unwritten (NaN) — a real dropout (BT disconnect/reconnect), as opposed to
+   * one noisy/railing channel (`qualityAt` already covers that). Scanned
+   * incrementally from `_gapScanned` forward, same pattern as `bandsScale()`,
+   * so cost stays proportional to new samples, not session length.
+   * @returns {{t0:number, t1:number}[]}
+   */
+  gaps() {
+    this._scanGaps()
+    return this._gapList
+  }
+
+  _scanGaps() {
+    const nc = this.eeg.nChannels
+    const data = this.eeg._data
+    const fs = this.eeg.fs
+    const n = this.eeg.length
+    const minRunSamples = fs   // ignore dropouts shorter than ~1 s
+
+    let s = this._gapScanned
+    let runStart = this._gapRunStart
+    for (; s < n; s++) {
+      let allNaN = true
+      for (let c = 0; c < nc; c++) {
+        if (!Number.isNaN(data[s * nc + c])) { allNaN = false; break }
+      }
+      if (allNaN) {
+        if (runStart === null) runStart = s
+      } else if (runStart !== null) {
+        if (s - runStart >= minRunSamples) this._gapList.push({ t0: runStart / fs, t1: s / fs })
+        runStart = null
+      }
+    }
+    this._gapScanned = n
+    this._gapRunStart = runStart   // may still be open at the tail (live growing)
   }
 }

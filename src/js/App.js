@@ -276,6 +276,7 @@ export default class App {
     window.addEventListener('resize', () => {
       if (this._view === 'analysis') {
         this._analysisDisplay.resize()
+        this._scrubber.resize()
         this._scrubber.refresh()
       } else if (this._bioVisible) {
         this._bioDisplay?.resize()
@@ -385,6 +386,7 @@ export default class App {
       const live = App.sessionStore.source === 'live' && App.eegManager?.isConnected
       this._scrubber.setStore(App.sessionStore)
       this._scrubber.setActive(true, live ? { follow: true } : { atStart: true })
+      this._scrubber.resize()   // #scrubber just became visible; size the ribbon canvas now
     } else {
       document.body.classList.remove('analysis-mode')
       this._scrubber.setActive(false)
