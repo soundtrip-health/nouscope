@@ -46,7 +46,7 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. |
 | `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; spectrograms; audio tempogram; entrainment meter; signal quality dots |
 | `src/js/ui/AnalysisDisplay.js` | Random-access counterpart to BioDataDisplay: `renderWindow(store, t0, t1, cursor)` redraws all panels for an arbitrary window from a `SessionStore` (min/max-decimated line plots, time-mapped spectrogram blits) |
-| `src/js/ui/Scrubber.js` | Movie-style transport for the Analysis tab: playhead cursor, window width, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track |
+| `src/js/ui/Scrubber.js` | Movie-style transport for the Analysis tab: playhead cursor, window width, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track; hover-time preview pill |
 | `src/js/ui/bioRender.js` | Shared render primitives (viridis LUT, EEG/IMU scales, color tokens, `paintSpecColumn`) used by both BioDataDisplay and AnalysisDisplay |
 
 ### Update Loop

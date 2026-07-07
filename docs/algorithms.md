@@ -850,3 +850,10 @@ pyramid fix.
 
 Click/drag anywhere on `#scrub-timeline` (track, ribbon, or ticks — not just the
 8px track) to seek; Space toggles play, ←/→ step, Home/End jump to start/live.
+
+**Hover-time preview** (`#scrub-hover-time`) — a floating pill that tracks the
+pointer on hover *and* during an active drag, showing what a click there would
+seek to before it's committed. Positioned/updated purely from pointer events
+(`_showHoverTime`, `Scrubber.js`) — no store queries, no render-loop involvement,
+so it can't reintroduce the per-frame-cost concerns above. Clamped by its own
+measured width so it can't overflow past the timeline's left/right edges.

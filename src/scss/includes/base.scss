@@ -798,6 +798,27 @@ body.analysis-mode {
   &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
 }
 
+// Floating time preview that tracks the pointer on hover/drag, before a seek
+// is committed — standard scrubber affordance so a click's target is visible
+// in advance. Positioned in JS (see `Scrubber._showHoverTime`).
+.scrub-hover-time {
+  position: absolute;
+  bottom: 100%;
+  margin-bottom: 6px;
+  transform: translateX(-50%);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-value);
+  white-space: nowrap;
+  pointer-events: none;
+
+  &[hidden] { display: none; }
+}
+
 .scrub-fill {
   position: absolute;
   left: 0;

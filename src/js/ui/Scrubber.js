@@ -58,6 +58,7 @@ export default class Scrubber {
       head:     $('scrub-head'),
       ribbon:   $('scrub-ribbon'),
       ticks:    $('scrub-ticks'),
+      hoverTime: $('scrub-hover-time'),
       live:     $('scrub-live'),
       speed:    $('scrub-speed'),
       window:   $('scrub-window'),
@@ -79,25 +80,36 @@ export default class Scrubber {
 
     // Timeline drag / click-to-seek — the whole timeline (track + ribbon + ticks)
     // is clickable, not just the 8px track.
-    const seekFromEvent = (e) => {
+    const fracFromEvent = (e) => {
       const rect = this._els.timeline.getBoundingClientRect()
-      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      this.seek(frac * this._durationOr0())
+      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     }
+    const seekFromEvent = (e) => this.seek(fracFromEvent(e) * this._durationOr0())
     this._els.timeline.addEventListener('pointerdown', (e) => {
       this._dragging = true
       this._following = false
       this._els.timeline.setPointerCapture(e.pointerId)
       seekFromEvent(e)
+      this._showHoverTime(e)
     })
-    this._els.timeline.addEventListener('pointermove', (e) => { if (this._dragging) seekFromEvent(e) })
+    this._els.timeline.addEventListener('pointermove', (e) => {
+      if (this._dragging) seekFromEvent(e)
+      this._showHoverTime(e)
+    })
+    this._els.timeline.addEventListener('pointerleave', () => { this._els.hoverTime.hidden = true })
     const endDrag = (e) => {
+      // Touch has no real hover/pointerleave, so nothing else would hide the
+      // pill after a touch drag ends. Mouse/pen still get a pointerleave when
+      // the cursor actually moves away — hiding here too would just flash it
+      // off right at release while the cursor is still sitting there hovering.
+      if (e.pointerType === 'touch') this._els.hoverTime.hidden = true
       if (!this._dragging) return
       this._dragging = false
       try { this._els.timeline.releasePointerCapture(e.pointerId) } catch {}
     }
     this._els.timeline.addEventListener('pointerup', endDrag)
     this._els.timeline.addEventListener('pointercancel', endDrag)
+    this._fracFromEvent = fracFromEvent
 
     // Keyboard (only acts while the scrubber is active).
     this._onKey = (e) => {
@@ -139,6 +151,23 @@ export default class Scrubber {
       this._ribbonDirty = true
       this._dirty = true
     }
+  }
+
+  /**
+   * Show/update the floating time pill at the pointer's position — the preview
+   * of where a click would seek to, before it's committed. Clamped so it can't
+   * overflow past the timeline's left/right edges.
+   */
+  _showHoverTime(e) {
+    const dur = this._durationOr0()
+    if (dur <= 0) return
+    const frac = this._fracFromEvent(e)
+    this._els.hoverTime.textContent = fmt(frac * dur)
+    this._els.hoverTime.hidden = false
+    const rect = this._els.timeline.getBoundingClientRect()
+    const half = this._els.hoverTime.offsetWidth / 2
+    const rawLeft = frac * rect.width
+    this._els.hoverTime.style.left = `${Math.max(half, Math.min(rect.width - half, rawLeft))}px`
   }
 
   /** ● LIVE only means something for a growing live session — hide it for files. */
