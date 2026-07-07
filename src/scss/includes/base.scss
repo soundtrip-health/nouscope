@@ -489,6 +489,31 @@ a:focus-visible {
   height: auto;
 }
 
+// ── Analysis-tab playhead cursor ────────────────────────────────────────────
+// Each analysis canvas is wrapped so a hairline can be absolutely positioned
+// over it at the playhead's x-fraction (set via JS `style.left`). The wrap
+// takes over the `flex: 1` sizing the bare canvas used to get from its flex
+// container (`.bio-section` column, or the `bio-*-body` rows), so swapping in
+// the wrapper doesn't change any panel's layout.
+.an-plot-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.an-playhead-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;   // default to the right edge (fixed-window mode) until JS positions it
+  width: 1px;
+  background: var(--color-text);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 1;
+}
+
 .eeg-quality-dots {
   display: flex;
   gap: 0.3rem;

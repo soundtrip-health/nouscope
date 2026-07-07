@@ -787,6 +787,11 @@ from the store on each seek/frame (no scroll/append):
   `specColumnsScale`) live in `src/js/ui/bioRender.js`, used by both renderers.
 - **Scalar readouts** (HR, band/MSE legends, entrainment meter, quality dots) are
   sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`.
+- **Playhead cursor** — every panel is wrapped in a `position: relative` `.an-plot-wrap`
+  containing a `.an-playhead-line` hairline, positioned each frame by `_renderPlayhead`
+  as a CSS `left` percentage (`(cursor − t0) / (t1 − t0)`), not drawn into the canvas
+  itself. In fixed-window mode `cursor === t1`, so it sits at the right edge; in
+  **All** mode it marks the actual playhead within the whole-session window.
 
 ### Scrubber
 

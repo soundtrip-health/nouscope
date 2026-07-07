@@ -144,7 +144,10 @@
               <span class="quality-dot" data-ch="3" title="TP10"></span>
             </div>
           </div>
-          <canvas id="an-eeg-canvas" width="280" height="90"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-eeg-canvas" width="280" height="90"></canvas>
+            <div class="an-playhead-line" id="an-eeg-cursor"></div>
+          </div>
         </div>
         <div class="bio-section bio-spec-section">
           <div class="bio-section-header">
@@ -155,7 +158,10 @@
               <span>50</span>
               <span>8</span>
             </div>
-            <canvas id="an-spec-canvas" width="280" height="86"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-canvas" width="280" height="86"></canvas>
+              <div class="an-playhead-line" id="an-spec-cursor"></div>
+            </div>
           </div>
         </div>
         <div class="bio-section bio-spec-lo-section">
@@ -168,7 +174,10 @@
               <span>4</span>
               <span>0.5</span>
             </div>
-            <canvas id="an-spec-lo-canvas" width="280" height="76"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-lo-canvas" width="280" height="76"></canvas>
+              <div class="an-playhead-line" id="an-spec-lo-cursor"></div>
+            </div>
           </div>
         </div>
         <div class="bio-section bio-spec-audio-section">
@@ -182,7 +191,10 @@
               <span>2.5</span>
               <span>0.5</span>
             </div>
-            <canvas id="an-spec-audio-canvas" width="280" height="46"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-audio-canvas" width="280" height="46"></canvas>
+              <div class="an-playhead-line" id="an-spec-audio-cursor"></div>
+            </div>
           </div>
           <div class="bio-entrain-bar" id="an-entrain-bar">
             <div class="bio-entrain-fill" id="an-entrain-fill"></div>
@@ -193,7 +205,10 @@
             <span class="bio-label">EEG BANDS</span>
           </div>
           <div class="bio-bands-body">
-            <canvas id="an-band-canvas" width="200" height="75"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-band-canvas" width="200" height="75"></canvas>
+              <div class="an-playhead-line" id="an-band-cursor"></div>
+            </div>
             <div class="bio-band-legend">
               <div class="bio-band-item" id="an-band-item-delta"><span class="glyph-delta">δ</span><span class="bio-band-val" id="an-band-val-delta">—</span></div>
               <div class="bio-band-item" id="an-band-item-theta"><span class="glyph-theta">θ</span><span class="bio-band-val" id="an-band-val-theta">—</span></div>
@@ -209,7 +224,10 @@
             <span class="bio-mse-value" id="an-mse-value"></span>
           </div>
           <div class="bio-mse-body">
-            <canvas id="an-mse-canvas" width="200" height="75"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-mse-canvas" width="200" height="75"></canvas>
+              <div class="an-playhead-line" id="an-mse-cursor"></div>
+            </div>
             <div class="bio-mse-legend">
               <div class="bio-mse-item"><span class="glyph-mse-1">τ=1</span><span class="bio-mse-val" id="an-mse-val-0">—</span></div>
               <div class="bio-mse-item"><span class="glyph-mse-2">τ=3</span><span class="bio-mse-val" id="an-mse-val-1">—</span></div>
@@ -224,7 +242,10 @@
             <span class="bio-label">PPG</span>
             <span class="bio-hr" id="an-hr"></span>
           </div>
-          <canvas id="an-ppg-canvas" width="280" height="60"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-ppg-canvas" width="280" height="60"></canvas>
+            <div class="an-playhead-line" id="an-ppg-cursor"></div>
+          </div>
         </div>
         <div class="bio-section">
           <div class="bio-section-header">
@@ -234,7 +255,10 @@
               <span class="glyph-imu-gyro">G</span>
             </span>
           </div>
-          <canvas id="an-imu-canvas" width="280" height="60"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-imu-canvas" width="280" height="60"></canvas>
+            <div class="an-playhead-line" id="an-imu-cursor"></div>
+          </div>
         </div>
       </div>
 

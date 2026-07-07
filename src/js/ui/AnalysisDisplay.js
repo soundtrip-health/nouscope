@@ -79,6 +79,11 @@ export default class AnalysisDisplay {
     this._entrainFillEl  = document.getElementById('an-entrain-fill')
     this._qualityDots    = document.querySelectorAll('#an-quality-dots .quality-dot')
 
+    // Playhead cursor — one hairline per panel, positioned by x-fraction (see _renderPlayhead)
+    this._playheadEls = ['eeg', 'spec', 'spec-lo', 'spec-audio', 'band', 'mse', 'ppg', 'imu']
+      .map(id => document.getElementById(`an-${id}-cursor`))
+      .filter(Boolean)
+
     this._inited = true
   }
 
@@ -142,6 +147,22 @@ export default class AnalysisDisplay {
     this._renderSpec(this._specLoCtx, store.specColumns('lo', t0, t1), t0, t1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
     this._renderAudioSpec(store, t0, t1)
     this._renderReadouts(store, cursor)
+    this._renderPlayhead(t0, t1, cursor)
+  }
+
+  // ── Playhead cursor ──────────────────────────────────────────────────────
+
+  /**
+   * Position the vertical cursor hairline on every panel at the playhead's
+   * x-fraction across [t0, t1]. In fixed-window mode `cursor === t1`, so this
+   * pins the hairline to the right edge; in "All" mode it marks the actual
+   * playhead position within the whole-session window.
+   */
+  _renderPlayhead(t0, t1, cursor) {
+    const span = t1 - t0
+    const frac = span > 0 ? Math.max(0, Math.min(1, (cursor - t0) / span)) : 1
+    const pct = `${(frac * 100).toFixed(2)}%`
+    for (const el of this._playheadEls) el.style.left = pct
   }
 
   // ── Line plots ────────────────────────────────────────────────────────────

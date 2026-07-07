@@ -33,5 +33,8 @@ __pycache__/
 # graphify knowledge-graph output (generated, regenerable local tooling)
 graphify-out/
 
+# Playwright MCP browser tool artifacts (page snapshots, console logs)
+.playwright-mcp/
+
 # Recording data + generated analysis plots (large / participant biometric data)
 analysis/data/
