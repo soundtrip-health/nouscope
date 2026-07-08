@@ -27,6 +27,8 @@
   </head>
   <body class="demo-1">
     <main>
+      <span class="session-label" id="scrub-session-label"></span>
+
       <div class="bio-panel" id="bio-panel" hidden>
         <div class="bio-section">
           <div class="bio-section-header">
@@ -268,8 +270,8 @@
       <!-- View tabs: switch between the live panel and the analysis panel.
            Shown once EEG is connected or a recording is loaded. -->
       <div class="view-tabs" id="view-tabs" hidden>
-        <button class="view-tab active" id="tab-live">◉ Live</button>
-        <button class="view-tab" id="tab-analysis">🎬 Analysis</button>
+        <button class="view-tab active" id="tab-live">Live</button>
+        <button class="view-tab" id="tab-analysis">Analysis</button>
       </div>
 
       <!-- Movie-style scrubber for the analysis panel (shown in analysis mode). -->

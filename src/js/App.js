@@ -293,6 +293,9 @@ export default class App {
     // (first connect, or re-arming live after a loaded file).
     if (store.source === 'live' && !store.isEmpty()) store.continueLive()
     else store.startLive()
+    // Clear any loaded-file label — this is now a live/DVR session.
+    const label = document.getElementById('scrub-session-label')
+    if (label) label.textContent = ''
     App.recordingManager.enableCapture()
     const eeg = App.eegManager
     this._specTapIdx     = eeg?.spectrumSampleCount ?? 0
@@ -423,6 +426,14 @@ export default class App {
     } catch (err) {
       console.error('Recording parse failed:', err)
       return
+    }
+    // Show the filename + recording date in the scrubber so the loaded session
+    // isn't anonymous — the user can tell which file they're reviewing.
+    const label = document.getElementById('scrub-session-label')
+    if (label) {
+      const ts = App.sessionStore.meta?.startedAt
+      const when = ts ? new Date(ts).toLocaleString() : 'unknown date'
+      label.textContent = `${file.name} — ${when}`
     }
     this._maybeShowTabs()
     this._setView('analysis')

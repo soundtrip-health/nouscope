@@ -693,9 +693,10 @@ body.analysis-mode {
 }
 
 // View tabs — top-center switch between Live and Analysis.
+// Sits in the padding strip above the fullscreen grid so it doesn't overlap the graphs.
 .view-tabs {
   position: fixed;
-  top: 1.5rem;
+  top: 0.4rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 1006;
@@ -719,7 +720,10 @@ body.analysis-mode {
   cursor: pointer;
   transition: color 0.2s, background 0.2s;
 
-  &:hover:not(:disabled) { color: var(--color-text); }
+  &:hover:not(:disabled) {
+    color: var(--color-text);
+    background: var(--wash-hover);
+  }
 
   &.active {
     color: var(--color-bg);
@@ -782,6 +786,23 @@ body.analysis-mode {
   min-width: 3rem;
   text-align: center;
   flex-shrink: 0;
+}
+
+.session-label {
+  position: fixed;
+  top: 1.5rem;
+  right: 1.5rem;
+  z-index: 1006;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+
+  &:empty { display: none; }
 }
 
 .scrub-timeline {
