@@ -90,6 +90,9 @@ export default class AnalysisDisplay {
       .map(id => document.getElementById(`an-${id}-cursor`))
       .filter(Boolean)
 
+    // Audio-tempogram section — hidden for loaded files (no audio is stored in JSONL).
+    this._audioSection = document.getElementById('an-audio-section')
+
     this._inited = true
   }
 
@@ -143,6 +146,12 @@ export default class AnalysisDisplay {
   renderWindow(store, t0, t1, cursor = t1) {
     if (!this._inited || !store) return
     if (t1 <= t0) t1 = t0 + 0.001
+
+    // Audio tempogram is unavailable for loaded files (no audio stored in JSONL).
+    // Hide the section entirely so it doesn't read as a broken panel.
+    if (this._audioSection) {
+      this._audioSection.hidden = store.source === 'file' && store.specAudio.length === 0
+    }
 
     this._renderEEG(store, t0, t1)
     this._renderPPG(store, t0, t1)
@@ -361,6 +370,7 @@ export default class AnalysisDisplay {
 
     const span = t1 - t0
     const img = ctx.createImageData(W, H)
+    if (W < 2) return   // need at least 2 columns for a meaningful mapping
     for (let x = 0; x < W; x++) {
       const t = t0 + (x / (W - 1)) * span
       const col = this._nearestColumn(columns, t)

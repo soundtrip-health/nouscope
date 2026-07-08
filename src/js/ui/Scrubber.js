@@ -115,8 +115,8 @@ export default class Scrubber {
     this._onKey = (e) => {
       if (!this._active) return
       if (e.key === ' ') { e.preventDefault(); this.togglePlay() }
-      else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - this._stepSize()) }
-      else if (e.key === 'ArrowRight') { this.seek(this._cursor + this._stepSize()) }
+      else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - 5) }
+      else if (e.key === 'ArrowRight') { this.seek(this._cursor + 5) }
       else if (e.key === 'Home')       { this.seek(0) }
       else if (e.key === 'End')        { this.goLive() }
     }

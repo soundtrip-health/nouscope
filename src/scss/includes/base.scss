@@ -473,7 +473,8 @@ a:focus-visible {
   text-align: right;
 }
 
-#spec-canvas, #spec-lo-canvas, #spec-audio-canvas {
+#spec-canvas, #spec-lo-canvas, #spec-audio-canvas,
+#an-spec-canvas, #an-spec-lo-canvas, #an-spec-audio-canvas {
   image-rendering: pixelated;
 }
 
