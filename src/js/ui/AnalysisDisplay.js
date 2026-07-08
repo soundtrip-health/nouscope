@@ -10,6 +10,7 @@ import {
   SPEC_LOG_CAP,
   SPEC_LO_BINS, SPEC_LO_PX_PER_BIN,
   paintSpecColumn, specColumnsScale,
+  paintNoAudioPlaceholder,
 } from './bioRender'
 
 /**
@@ -92,6 +93,7 @@ export default class AnalysisDisplay {
 
     // Audio-tempogram section — hidden for loaded files (no audio is stored in JSONL).
     this._audioSection = document.getElementById('an-audio-section')
+    this._audioCursorEl = document.getElementById('an-spec-audio-cursor')
 
     this._inited = true
   }
@@ -150,7 +152,9 @@ export default class AnalysisDisplay {
     // Audio tempogram is unavailable for loaded files (no audio stored in JSONL).
     // Hide the section entirely so it doesn't read as a broken panel.
     if (this._audioSection) {
-      this._audioSection.hidden = store.source === 'file' && store.specAudio.length === 0
+      const noAudio = store.specAudio.length === 0
+      this._audioSection.hidden = store.source === 'file' && noAudio
+      if (this._audioCursorEl) this._audioCursorEl.hidden = noAudio
     }
 
     this._renderEEG(store, t0, t1)
@@ -383,9 +387,7 @@ export default class AnalysisDisplay {
   _renderAudioSpec(store, t0, t1) {
     const cols = store.specColumns('audio', t0, t1)
     if (!cols.length) {
-      const c = this._specAudioCtx.canvas
-      this._specAudioCtx.fillStyle = '#000'
-      this._specAudioCtx.fillRect(0, 0, c.width, c.height)
+      paintNoAudioPlaceholder(this._specAudioCtx)
       return
     }
     const bins = cols[0].col.length

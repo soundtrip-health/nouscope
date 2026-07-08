@@ -162,6 +162,22 @@ export function specColumnsScale(columns, startIdx, endIdx, cap = Infinity) {
  * @param {number} [o.startIdx=0] — first bin index to draw
  * @param {number} [o.endIdx=col.length] — one past the last bin index to draw
  */
+/**
+ * Draw a subtle "No Audio" placeholder on a 2D canvas context.
+ * Clears to black, then draws centered, semi-transparent white text.
+ * @param {CanvasRenderingContext2D} ctx
+ */
+export function paintNoAudioPlaceholder(ctx) {
+  const c = ctx.canvas
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, c.width, c.height)
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.25)'
+  ctx.font = '12px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('No Audio', c.width / 2, c.height / 2)
+}
+
 export function paintSpecColumn(imgData, col, o) {
   const startIdx = o.startIdx ?? 0
   const endIdx   = o.endIdx ?? col.length

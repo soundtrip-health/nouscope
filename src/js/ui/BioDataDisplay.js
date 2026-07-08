@@ -11,6 +11,7 @@ import {
   SPEC_SCALE_DECAY, SPEC_MIN_RANGE, SPEC_SCALE_WIN, SPEC_SCALE_PCT, SPEC_LOG_CAP,
   SPEC_LO_BINS, SPEC_LO_PX_PER_BIN,
   paintSpecColumn,
+  paintNoAudioPlaceholder,
 } from './bioRender'
 
 // ── Constants (live scroll display only — see bioRender.js for shared ones) ────
@@ -406,7 +407,10 @@ export default class BioDataDisplay {
   _updateAudioTempogram() {
     const eMgr = App.entrainmentManager
     const spec = eMgr?.audioTempogram
-    if (!spec) return
+    if (!spec) {
+      paintNoAudioPlaceholder(this._specAudioCtx)
+      return
+    }
 
     const BINS      = spec.length    // 46
     const COL_WIDTH = SPEC_COL_WIDTH // 2 px
