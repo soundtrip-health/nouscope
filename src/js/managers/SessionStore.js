@@ -221,12 +221,25 @@ class GriddedStream {
    * (ordinary fixed-window scrubbing).
    *
    * The requested window is mapped onto the output columns *as asked for*, even
-   * where it runs off either end of the data. Clamping the span to the samples
+   * where it runs off the start of the data. Clamping the span to the samples
    * that exist would silently stretch the little data there is across the whole
    * canvas — which is exactly what a fixed-width window sitting at the start of a
    * session does. Out-of-data columns come back as zeros instead.
+   *
+   * The tail is different: the live cursor is `SessionStore.duration()`, which
+   * tracks whichever stream's wall-clock-tagged records (bands/mse/spectrogram
+   * columns, timestamped from `performance.now()`) are furthest along — not this
+   * grid's own counter-based position. If this stream's real sample arrival ever
+   * falls even slightly behind nominal `fs` (BLE overhead, occasional backpressure),
+   * that gap grows every second, and an end `t1` sitting past what's actually been
+   * written would otherwise show a permanently growing blank tail instead of a
+   * fixed-width window of real data. So `t1` (only) is clamped to this stream's own
+   * `durationS()`, sliding the whole window back to keep its width — always the
+   * freshest real data, never live-cursor drift.
    */
   envelope(channel, t0, t1, outN) {
+    const durS = this.durationS()
+    if (t1 > durS) { const span = t1 - t0; t1 = durS; t0 = t1 - span }
     const sA = Math.floor(t0 * this.fs)
     const sB = Math.ceil(t1 * this.fs)
     if (sB <= sA || this.length === 0) return new Float32Array(outN * 2)
@@ -635,9 +648,12 @@ export default class SessionStore {
    * PPG channel slice over [t0, t1] seconds. EEG/IMU go through
    * `GriddedStream.envelope` instead (mip-backed decimation); PPG keeps a raw
    * slice because its detrend pass needs contiguous samples — see
-   * `AnalysisDisplay._ppgSignal`.
+   * `AnalysisDisplay._ppgSignal`. Clamps `t1` to the PPG grid's own real
+   * duration, same reasoning as the tail clamp in `GriddedStream.envelope`.
    */
   rangePPG(t0, t1) {
+    const durS = this.ppg.durationS()
+    if (t1 > durS) { const span = t1 - t0; t1 = durS; t0 = t1 - span }
     const s0 = Math.floor(t0 * PPG_FS)
     const s1 = Math.ceil(t1 * PPG_FS)
     return { fs: PPG_FS, s0, data: this.ppg.channelSlice(0, s0, s1) }
@@ -671,6 +687,21 @@ export default class SessionStore {
       if (arr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
     }
     return ans >= 0 ? arr[ans] : null
+  }
+
+  /**
+   * Time (s) of the most recent record in a derived series (bands/hr/entrain/
+   * mse/music); null if empty. A per-pixel `sampleAt` sweep (bands/mse line
+   * charts) holds this record for every query time past it, which reads as a
+   * flat trace once the live cursor — driven by whichever stream's wall-clock
+   * timestamps are furthest along — outruns this series' own real production
+   * (e.g. band-power/MSE computation is gated on real EEG sample arrival, same
+   * as the raw grids; see the tail clamp in `GriddedStream.envelope`). Callers
+   * doing a right-anchored live window should clamp their end time to this.
+   */
+  lastT(name) {
+    const arr = this[name]
+    return arr && arr.length ? arr[arr.length - 1].t : null
   }
 
   /**

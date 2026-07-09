@@ -402,14 +402,6 @@ a:focus-visible {
   min-width: 2.4rem;
 }
 
-// Window average for this band (the item rows are already `display: flex;
-// gap: 0.3rem`, so this just falls into place after the instant value).
-.bio-band-avg {
-  font-size: 0.55rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-axis);
-}
-
 .bio-mse-body {
   display: flex;
   align-items: stretch;
@@ -438,13 +430,6 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
   color: var(--text-value);
   min-width: 2.4rem;
-}
-
-// Window average for this τ-scale — see `.bio-band-avg` above.
-.bio-mse-avg {
-  font-size: 0.55rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-axis);
 }
 
 .bio-spec-body {
@@ -644,8 +629,6 @@ body.analysis-mode {
   .bio-band-val,
   .bio-mse-val          { font-size: 0.8rem; min-width: 3rem; }
   .bio-window-stat      { font-size: 0.75rem; }
-  .bio-band-avg,
-  .bio-mse-avg          { font-size: 0.7rem; }
   .bio-spec-axis        { font-size: 0.7rem; min-width: 1.6rem; }
 
   // Keep controls on top and clickable
