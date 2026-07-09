@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "muse-js": "github:soundtrip-health/muse-js#muse3",
+    "rxjs": "^7.8.1",
     "three": "^0.174.0",
     "web-audio-beat-detector": "^8.1.56",
     "webgl-plot": "^1.1.2"

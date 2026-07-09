@@ -1,13 +1,13 @@
 /**
  * bioRender — shared rendering primitives for the bio-data visualizations.
  *
- * Both the live scrolling panel (`BioDataDisplay`) and the random-access
- * analysis panel (`AnalysisDisplay`) draw the same traces, spectrograms and
- * charts. The scale factors, color tokens, viridis colormap and per-column
- * spectrogram blit live here so the two renderers can never drift apart.
+ * The scale factors, per-panel time windows, color tokens, viridis colormap and
+ * per-column spectrogram blit that `AnalysisDisplay` draws with all live here,
+ * separate from the renderer, so the numbers that define how the data reads are
+ * in one place rather than buried in drawing code.
  *
  * Nothing here is stateful — these are pure constants and functions. Color
- * tokens are resolved lazily (see palette.js) inside each renderer's init().
+ * tokens are resolved lazily (see palette.js) inside the renderer's init().
  */
 
 // ── Transparent clear color for WebGL plots ─────────────────────────────────
@@ -24,6 +24,37 @@ export const GYRO_SCALE  = 300    // ±300 dps
 
 // ── MSE mapping ─────────────────────────────────────────────────────────────
 export const MSE_Y_MAX = 2.5   // SampEn rarely exceeds this; maps values into [-1, +1]
+
+// ── Per-panel time windows (seconds) ────────────────────────────────────────
+// Each panel shows `[cursor - PANEL_WINDOWS[panel], cursor]`. A single shared
+// window across every panel is wrong: a 2 s span is right for reading individual
+// EEG deflections but shows one MSE step and half a breath of PPG, while the 70 s
+// span the spectrograms need turns the EEG trace into a solid block. These values
+// reproduce the spans the old live scrolling panel had, which were tuned against
+// user feedback:
+//   eeg 512 samples @256 Hz · ppg 384 @64 Hz · imu 208 @52 Hz
+//   bands 300 frames @~60 fps · mse 1800 frames @~60 fps
+//   spectrograms 140 columns (280 px / 2 px per column) @~2 columns/s
+// The audio tempogram scrolled far faster live (a column per frame), which was an
+// artifact of its polling rate rather than a choice; it is pinned to the other two
+// heatmaps here so all three share one time axis.
+export const PANEL_WINDOWS = {
+  eeg:       2,
+  spec:     70,
+  specLo:   70,
+  specAudio: 70,
+  bands:     5,
+  mse:      30,
+  ppg:       6,
+  imu:       4,
+}
+
+// The live band chart lerped toward the ~2 Hz band-power updates at 0.08 per
+// frame, i.e. an exponential with a ~0.21 s time constant, turning the staircase
+// into a continuous curve. The analysis renderer resamples the same records onto
+// pixels, so it applies an equivalent one-pole filter derived from this constant
+// and the per-pixel time step — see AnalysisDisplay._renderBands.
+export const BAND_SMOOTH_TAU = 0.21   // seconds
 
 // ── Color tokens (resolved from CSS at init via palette.js) ─────────────────
 export const EEG_TOKENS  = ['--eeg-tp9', '--eeg-af7', '--eeg-af8', '--eeg-tp10']
@@ -97,17 +128,14 @@ export function viridisRGB(norm) {
 }
 
 /**
- * Robust color scale (floor + range) for a set of spectrogram columns, matching
- * the live renderer's policy so the live and analysis panels can't disagree on
- * identical data: each value is clamped to `cap`, the ceiling is the
+ * Robust color scale (floor + range) for a set of spectrogram columns: each
+ * value is clamped to `cap`, the ceiling is the
  * `SPEC_SCALE_PCT` percentile and the floor is the low `SPEC_FLOOR_PCT`
  * percentile — so a single saturating (e.g. jaw-clench) or near-silent column
  * can't blow the range out the way a raw min/max would.
  *
- * The live scroll renderer (BioDataDisplay) achieves the same robustness with a
- * running window + decaying floor because it sees columns one at a time; the
- * random-access analysis renderer has the whole window at once, so percentiles
- * over the visible columns are the equivalent.
+ * Percentiles are taken over the columns visible in the window, which the
+ * random-access renderer always has in hand at once.
  *
  * @param {{col:ArrayLike<number>}[]} columns
  * @param {number} startIdx — first bin index considered

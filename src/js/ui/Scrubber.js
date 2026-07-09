@@ -1,32 +1,32 @@
 /**
- * Scrubber — the movie-style transport for the Analysis tab.
+ * Scrubber — the movie-style transport under the data panel.
  *
- * Owns a playhead cursor (seconds) and a window width W. The visible window is
- * `[cursor - W, cursor]` (history ending at the playhead, matching the live
- * view's "recent past up to now"); W = 0 means "show the whole session". Each
- * animation frame — while playing, following live, or after a seek — it calls
- * `onFrame(store, t0, t1, cursor)` to redraw and updates its own track UI.
+ * Owns a single piece of view state: the playhead cursor, in seconds from the
+ * session start. Each animation frame — while playing, following live, or after
+ * a seek — it calls `onFrame(store, cursor)` to redraw and updates its own track
+ * UI. How much history each panel shows around that cursor is the renderer's
+ * business, not the scrubber's (see `PANEL_WINDOWS` in bioRender).
  *
  * Kept deliberately dumb about *what* gets drawn: App wires `onFrame` to
- * AnalysisDisplay.renderWindow, so the scrubber works for both a loaded file
- * and a live/DVR session (where the store keeps growing and "● LIVE" follows
- * the leading edge).
+ * AnalysisDisplay.renderAt, so the scrubber works for both a loaded file and a
+ * live/DVR session (where the store keeps growing and "● LIVE" follows the
+ * leading edge).
  */
 
 import { cssVar } from './palette'
 
 const SPEEDS = [1, 2, 4]
+const SEEK_STEP_S = 5           // ← / → keyboard nudge
 const RIBBON_SAMPLES = 300      // ribbon resolution, independent of canvas pixel width
 const RIBBON_REBUILD_MS = 1000  // throttle: re-sample at most this often while a live session grows
 
 export default class Scrubber {
-  /** @param {(store, t0:number, t1:number, cursor:number)=>void} onFrame */
+  /** @param {(store, cursor:number)=>void} onFrame */
   constructor(onFrame) {
     this._onFrame = onFrame
     this._store = null
 
     this._cursor = 0        // playhead time (s)
-    this._window = 30       // visible width (s); 0 = whole session
     this._speedIdx = 0
     this._playing = false
     this._following = false // track the live leading edge
@@ -61,11 +61,9 @@ export default class Scrubber {
       hoverTime: $('scrub-hover-time'),
       live:     $('scrub-live'),
       speed:    $('scrub-speed'),
-      window:   $('scrub-window'),
-      windowText: $('scrub-window-text'),
     }
     this._ribbonCtx = this._els.ribbon.getContext('2d')
-    // Read lazily (matches BioDataDisplay/AnalysisDisplay/palette.js convention) —
+    // Read lazily (matches AnalysisDisplay/palette.js convention) —
     // the stylesheet must be parsed before getComputedStyle can resolve these.
     this._colors = {
       good: cssVar('--status-good'),
@@ -76,7 +74,6 @@ export default class Scrubber {
     this._els.play.addEventListener('click', () => this.togglePlay())
     this._els.live.addEventListener('click', () => this.goLive())
     this._els.speed.addEventListener('click', () => this._cycleSpeed())
-    this._els.window.addEventListener('change', (e) => this._setWindow(+e.target.value))
 
     // Timeline drag / click-to-seek — the whole timeline (track + ribbon + ticks)
     // is clickable, not just the 8px track.
@@ -115,8 +112,8 @@ export default class Scrubber {
     this._onKey = (e) => {
       if (!this._active) return
       if (e.key === ' ') { e.preventDefault(); this.togglePlay() }
-      else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - 5) }
-      else if (e.key === 'ArrowRight') { this.seek(this._cursor + 5) }
+      else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - SEEK_STEP_S) }
+      else if (e.key === 'ArrowRight') { this.seek(this._cursor + SEEK_STEP_S) }
       else if (e.key === 'Home')       { this.seek(0) }
       else if (e.key === 'End')        { this.goLive() }
     }
@@ -142,7 +139,7 @@ export default class Scrubber {
     if (c.width !== w || c.height !== h) {
       // Assigning canvas.width/height clears its drawing buffer, so anything
       // painted before this call (e.g. the first synchronous render triggered
-      // by `setActive()`, before `App._setView` gets to call `resize()`) is
+      // by `setActive()`, before `App._showPanel` gets to call `resize()`) is
       // wiped out right here. `_ribbonDirty` alone isn't enough to recover —
       // it's only checked inside `_render()`, which is gated behind `_dirty`;
       // without also setting that, the ribbon stays blank until something
@@ -191,7 +188,7 @@ export default class Scrubber {
     if (on) {
       const dur = this._durationOr0()
       if (opts.follow) { this._following = true; this._cursor = dur }
-      else if (opts.atStart) { this._following = false; this._cursor = Math.min(this._window || dur, dur) }
+      else if (opts.atStart) { this._following = false; this._cursor = 0 }
       this._dirty = true
       this._lastPerf = performance.now()
       if (!this._raf) this._loop()
@@ -213,6 +210,17 @@ export default class Scrubber {
     this._updatePlayBtn()
   }
 
+  /**
+   * Stop tracking the leading edge without moving the playhead — used when the
+   * headset drops, since the session stops growing and "following" would just
+   * pin the cursor to a frozen duration.
+   */
+  stopFollowing() {
+    this._following = false
+    this._updatePlayBtn()
+    this._dirty = true
+  }
+
   goLive() {
     this._following = true
     this._playing = false
@@ -232,20 +240,9 @@ export default class Scrubber {
 
   _durationOr0() { return this._store ? this._store.duration() : 0 }
 
-  _stepSize() { return this._window ? this._window * 0.1 : Math.max(1, this._durationOr0() * 0.02) }
-
   _cycleSpeed() {
     this._speedIdx = (this._speedIdx + 1) % SPEEDS.length
     this._els.speed.textContent = `${SPEEDS[this._speedIdx]}×`
-  }
-
-  _setWindow(w) {
-    this._window = w
-    if (this._els.windowText) {
-      const opt = [...this._els.window.options].find(o => +o.value === w)
-      this._els.windowText.textContent = opt ? opt.textContent : `${w}s`
-    }
-    this._dirty = true
   }
 
   _updatePlayBtn() {
@@ -280,13 +277,7 @@ export default class Scrubber {
   }
 
   _render(dur) {
-    // Fixed width W → sliding window [cursor-W, cursor] (ends at the playhead).
-    // "All" (W=0) → the whole session [0, dur] on every graph; the playhead still
-    // marks a position (used for the scalar readouts).
-    const cursor = this._cursor
-    const t0 = this._window ? Math.max(0, cursor - this._window) : 0
-    const t1 = this._window ? cursor : dur
-    this._onFrame(this._store, t0, t1, cursor)
+    this._onFrame(this._store, this._cursor)
 
     // Track UI.
     const frac = dur > 0 ? this._cursor / dur : 0

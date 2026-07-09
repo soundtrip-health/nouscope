@@ -216,35 +216,43 @@ class GriddedStream {
    * AnalysisDisplay's `_envelope` expects. Uses the mip pyramid when the window
    * is wide enough that a coarse level still covers it with at least 2 buckets
    * per output column, so cost stays roughly O(outN) instead of O(window·fs)
-   * even for an "All" window spanning a long session. Falls back to scanning
-   * raw samples directly for anything too narrow for the coarsest levels to
-   * usefully resolve (ordinary fixed-window scrubbing).
+   * even for a window spanning a long session. Falls back to scanning raw samples
+   * directly for anything too narrow for the coarsest levels to usefully resolve
+   * (ordinary fixed-window scrubbing).
+   *
+   * The requested window is mapped onto the output columns *as asked for*, even
+   * where it runs off either end of the data. Clamping the span to the samples
+   * that exist would silently stretch the little data there is across the whole
+   * canvas — which is exactly what a fixed-width window sitting at the start of a
+   * session does. Out-of-data columns come back as zeros instead.
    */
   envelope(channel, t0, t1, outN) {
-    const s0 = Math.max(0, Math.floor(t0 * this.fs))
-    const s1 = Math.min(this.length, Math.ceil(t1 * this.fs))
-    if (s1 <= s0) return new Float32Array(outN * 2)
+    const sA = Math.floor(t0 * this.fs)
+    const sB = Math.ceil(t1 * this.fs)
+    if (sB <= sA || this.length === 0) return new Float32Array(outN * 2)
 
     this._syncMips()
     for (let l = this._mipFactors.length - 1; l >= 0; l--) {
       const factor = this._mipFactors[l]
-      const bStart = Math.floor(s0 / factor)
-      const bEnd = Math.min(this._mipBuilt[l], Math.floor(s1 / factor))
-      const M = bEnd - bStart
-      if (M >= outN * 2) return this._envelopeFromMip(l, channel, bStart, M, outN)
+      // Buckets this level would need to cover the window, whether or not they exist.
+      const span = Math.floor(sB / factor) - Math.floor(sA / factor)
+      if (span >= outN * 2) {
+        return this._envelopeFromMip(l, channel, Math.floor(sA / factor), span, outN)
+      }
     }
-    return this._envelopeFromRaw(channel, s0, s1, outN)
+    return this._envelopeFromRaw(channel, sA, sB, outN)
   }
 
   _envelopeFromMip(level, channel, bStart, M, outN) {
     const mip = this._mip[level]
+    const built = this._mipBuilt[level]
     const nc = this.nChannels
     const out = new Float32Array(outN * 2)
     for (let i = 0; i < outN; i++) {
       const a = bStart + Math.floor((i * M) / outN)
-      const b = bStart + Math.max(1, Math.floor(((i + 1) * M) / outN))
+      const b = bStart + Math.max(Math.floor((i * M) / outN) + 1, Math.floor(((i + 1) * M) / outN))
       let mn = Infinity, mx = -Infinity
-      for (let bucket = a; bucket < b; bucket++) {
+      for (let bucket = Math.max(0, a); bucket < Math.min(built, b); bucket++) {
         const idx = (bucket * nc + channel) * 2
         const bmn = mip[idx]
         if (Number.isNaN(bmn)) continue
@@ -259,16 +267,16 @@ class GriddedStream {
     return out
   }
 
-  _envelopeFromRaw(channel, s0, s1, outN) {
+  _envelopeFromRaw(channel, sA, sB, outN) {
     const nc = this.nChannels
     const data = this._data
-    const M = s1 - s0
+    const M = sB - sA
     const out = new Float32Array(outN * 2)
     for (let i = 0; i < outN; i++) {
-      const a = s0 + Math.floor((i * M) / outN)
-      const b = s0 + Math.max(1, Math.floor(((i + 1) * M) / outN))
+      const a = sA + Math.floor((i * M) / outN)
+      const b = sA + Math.max(Math.floor((i * M) / outN) + 1, Math.floor(((i + 1) * M) / outN))
       let mn = Infinity, mx = -Infinity
-      for (let s = a; s < b; s++) {
+      for (let s = Math.max(0, a); s < Math.min(this.length, b); s++) {
         const v = data[s * nc + channel]
         if (Number.isNaN(v)) continue
         if (v < mn) mn = v

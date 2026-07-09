@@ -36,11 +36,25 @@
  *               Stop. The file is finalized on stop().
  *   • memory  — fallback when the API is unavailable. Lines are batched in RAM
  *               and downloaded as a Blob on stop() (legacy behaviour).
+ *
+ * Pressing ⏺ does not start collecting data — capture is already running, and
+ * has been since the headset connected. It starts *saving* it, and the file it
+ * writes begins at the start of the captured session, not at the button press.
+ * That is what `_backlog` is for: every record produced while capture is active
+ * is retained as a serialized line, and `start()` writes the whole backlog to
+ * the new file before streaming continues into it. So `t = 0` in the file is
+ * always the moment capture began.
  */
 
 // Flush cadence for the streaming path. Short enough that a crash loses at most
 // a few seconds of data; long enough that disk writes stay batched and cheap.
 const FLUSH_INTERVAL_MS = 4000
+
+// Ceiling on the retained pre-record backlog. Raw packets serialize to roughly
+// 30 KB/s, so this holds a bit over half an hour; past that the oldest lines are
+// dropped and the saved file simply begins later than the session did. Without a
+// cap, an all-day session would grow the backlog until the tab died.
+const BACKLOG_MAX_BYTES = 64 * 1024 * 1024
 
 export default class RecordingManager {
   isRecording  = false
@@ -55,14 +69,45 @@ export default class RecordingManager {
   onRecord      = null
   captureActive = false
 
-  /** Start/stop forwarding records to `onRecord` independent of disk recording. */
-  enableCapture()  { this.captureActive = true }
-  disableCapture() { this.captureActive = false }
+  /**
+   * Begin forwarding records to `onRecord` and retaining them in the backlog,
+   * independent of disk recording. The epoch stamped here is the session's true
+   * t=0 — the origin every derived record's `t` is measured from, and the point
+   * a later `start()` makes the file begin at.
+   *
+   * `resume` re-arms capture after a brief headset dropout without disturbing
+   * either the epoch or the backlog, so the session either side of the outage
+   * stays one continuous timeline.
+   */
+  enableCapture({ resume = false } = {}) {
+    this.captureActive = true
+    if (resume && this._epochPerf) return
+    this._epochPerf    = performance.now()
+    this._epochMs      = Date.now()
+    this.resetCapture()
+  }
+
+  /** Stop forwarding records. The backlog is kept — the session is still on screen. */
+  disableCapture() {
+    this.captureActive = false
+  }
+
+  /** Drop the retained backlog (e.g. a saved file replaced the live session). */
+  resetCapture() {
+    this._backlog        = []
+    this._backlogBytes   = 0
+    this._backlogTrimmed = false
+  }
 
   _mode        = 'memory' // 'stream' | 'memory'
   _pending     = []       // pre-stringified lines awaiting flush
   _lines       = []       // memory-mode: flushed chunks (joined on stop)
-  _startedPerf = 0        // performance.now() at start
+  _epochPerf   = 0        // performance.now() at the start of the captured session
+  _epochMs     = 0        // Date.now() at the start of the captured session
+
+  _backlog       = []     // serialized lines produced since capture began
+  _backlogBytes  = 0
+  _backlogTrimmed = false // true once the cap forced us to drop the oldest lines
 
   _fileHandle  = null     // FileSystemFileHandle (stream mode)
   _writable    = null     // FileSystemWritableFileStream (stream mode)
@@ -71,7 +116,8 @@ export default class RecordingManager {
 
   /**
    * Begin recording. In stream mode this prompts for a save location (requires
-   * a user gesture — call from a click handler). Writes a meta header.
+   * a user gesture — call from a click handler). Writes a meta header followed
+   * by everything captured since `enableCapture()`, then keeps streaming.
    *
    * @param {object} [meta] — { device, deviceInfo, channels, audioBpm }
    * @returns {Promise<boolean>} true if recording started, false if the user
@@ -102,15 +148,20 @@ export default class RecordingManager {
       this._mode = 'memory'
     }
 
-    this._pending     = []
-    this._lines       = []
-    this._writeChain  = Promise.resolve()
-    this._startedPerf = performance.now()
-    this.startedAtMs  = Date.now()
-    this.sampleCount  = 0
-    this.isRecording  = true
+    this._lines      = []
+    this._writeChain = Promise.resolve()
+    this.sampleCount = 0
 
-    this._push({
+    // With capture running, the file spans the whole captured session; its epoch
+    // is when capture began, not when the button was pressed. Without capture
+    // (a saved file is loaded for review), the recording starts here.
+    if (!this.captureActive) {
+      this._epochPerf = performance.now()
+      this._epochMs   = Date.now()
+    }
+    this.startedAtMs = this._epochMs
+
+    const header = JSON.stringify({
       type: 'meta',
       startedAt: new Date(this.startedAtMs).toISOString(),
       app: 'nouscope',
@@ -121,8 +172,18 @@ export default class RecordingManager {
       audioBpm: meta.audioBpm ?? null,
     })
 
-    // Write the header immediately so the file is valid even if nothing else
-    // arrives, then start the periodic flush loop.
+    // Header first, then everything captured before the button was pressed. The
+    // backlog is kept (not spliced out) so a later second recording still starts
+    // from the top of the session.
+    this._pending = [header, ...this._backlog]
+    this.sampleCount = this._pending.length
+    this.isRecording = true
+    if (this._backlogTrimmed) {
+      console.warn(`Recording: pre-record backlog exceeded ${BACKLOG_MAX_BYTES >> 20} MB; the file starts partway into the session.`)
+    }
+
+    // Write the header + backlog immediately so the file is valid even if
+    // nothing else arrives, then start the periodic flush loop.
     await this._flush()
     if (this._mode === 'stream') {
       this._flushTimer = setInterval(() => { this._flush() }, FLUSH_INTERVAL_MS)
@@ -155,9 +216,13 @@ export default class RecordingManager {
     return new Blob([content], { type: 'application/x-ndjson' })
   }
 
-  /** Elapsed wall-clock ms since start(); meaningful only while recording. */
+  /**
+   * Length of the data written to the file so far, in ms — which is the elapsed
+   * time since capture began, not since the button was pressed, because the
+   * backlog put the earlier part of the session in the file too.
+   */
   elapsedMs() {
-    return this.isRecording ? performance.now() - this._startedPerf : 0
+    return this.isRecording ? performance.now() - this._epochPerf : 0
   }
 
   // ── Raw sensor hooks — store native muse-js readings verbatim ──────────────
@@ -236,7 +301,7 @@ export default class RecordingManager {
   // ── Internal ────────────────────────────────────────────────────────────────
 
   _t() {
-    return +(performance.now() - this._startedPerf).toFixed(1)
+    return +(performance.now() - this._epochPerf).toFixed(1)
   }
 
   _push(obj) {
@@ -246,11 +311,31 @@ export default class RecordingManager {
     // fresh file — those live records must NOT leak into the loaded session's
     // store, whose counter state would mis-place them and corrupt the timeline.
     if (this.captureActive) this.onRecord?.(obj)
-    // Only buffer to the JSONL file while actually recording; when the record is
-    // flowing purely to the live sink (captureActive), keep RAM at zero.
-    if (!this.isRecording) return
-    this._pending.push(JSON.stringify(obj))
-    this.sampleCount++
+    if (!this.isRecording && !this.captureActive) return
+
+    const line = JSON.stringify(obj)
+    if (this.isRecording) {
+      this._pending.push(line)
+      this.sampleCount++
+    }
+    // The same string goes in both places, so retaining the backlog during a
+    // recording costs one array slot per record, not a second copy of the data.
+    if (this.captureActive) this._backlogPush(line)
+  }
+
+  /** Append to the pre-record backlog, dropping the oldest lines past the cap. */
+  _backlogPush(line) {
+    this._backlog.push(line)
+    this._backlogBytes += line.length + 1
+    if (this._backlogBytes <= BACKLOG_MAX_BYTES) return
+
+    let dropped = 0
+    while (this._backlogBytes > BACKLOG_MAX_BYTES && dropped < this._backlog.length) {
+      this._backlogBytes -= this._backlog[dropped].length + 1
+      dropped++
+    }
+    this._backlog.splice(0, dropped)
+    this._backlogTrimmed = true
   }
 
   /**

@@ -1,6 +1,6 @@
 # Nouscope — Algorithm & Signal Processing Guide
 
-This document explains the key algorithms that drive Nouscope: how raw biometric signals (and an optional audio track) are processed into the numbers rendered in the live bio-data panel — which is itself the visualization. Intended for developers (human or AI) modifying the internals.
+This document explains the key algorithms that drive Nouscope: how raw biometric signals (and an optional audio track) are processed into the numbers rendered in the bio-data panel — which is itself the visualization. There is one data view: `AnalysisDisplay` renders a stored session timeline at the scrubber's playhead, so the same panels serve as a live monitor (playhead at the leading edge) and as a post-hoc review surface (playhead anywhere else). Intended for developers (human or AI) modifying the internals.
 
 ---
 
@@ -15,7 +15,8 @@ This document explains the key algorithms that drive Nouscope: how raw biometric
 7. [EEG–Music Entrainment Index](#6--eegmusic-entrainment-index)
 8. [EEG Complexity — Multiscale Entropy](#7--eeg-complexity--multiscale-entropy)
 9. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
-10. [Analysis Tab — Timeline Reconstruction & Scrubbing](#9--analysis-tab--timeline-reconstruction--scrubbing)
+10. [The Data View — Timeline Reconstruction & Scrubbing](#9--the-data-view--timeline-reconstruction--scrubbing)
+11. [Muse Data Simulator](#10--muse-data-simulator)
 
 ---
 
@@ -221,6 +222,26 @@ Only IBIs corresponding to 30–200 BPM are kept. The **median** IBI across all 
 heartRate = round(60 / median(ibis))
 ```
 
+The median must average the two middle values on an **even-length** list. A 6 s
+window usually yields an even number of IBIs, and an earlier version took
+`sorted[n/2]` — the upper middle — which biases IBI up and the reported BPM down
+by ~1 bpm at rest, more as beat-to-beat variability grows.
+
+> **Known limitation — motion artifact.** MSPTD locks onto the *dominant*
+> periodicity in the window, and the first-order 0.5–3.5 Hz bandpass barely
+> discriminates within its own passband (gain ratio 1.3 Hz : 0.8 Hz is only
+> **1.04**). So a body-sway or gait artifact around 0.8 Hz that exceeds roughly
+> 2× the pulse amplitude captures the estimate, and the reported rate collapses
+> toward the artifact rate (~48 bpm) regardless of the true HR. Verified against
+> synthetic PPG at known rates: clean signal is exact from 42–140 bpm; with a
+> 0.8 Hz artifact at 2× pulse amplitude, every rate from 55–110 bpm reports
+> 45–53 bpm. An independent `scipy.find_peaks` detector fails identically, so
+> this is the **filter**, not the peak detector. Sharpening to a 2nd-order
+> Butterworth 0.7–3.5 Hz roughly doubles the tolerable artifact amplitude but
+> does not fix the strong-motion case; a real fix needs accelerometer-referenced
+> adaptive filtering (the IMU is already subscribed) or an explicit
+> motion-gated reject.
+
 ### Stage 4 — Heartbeat oscillator
 
 `EEGManager.update(now)` is called every animation frame. It advances a phase variable at the current heart rate frequency:
@@ -285,17 +306,17 @@ Power values are stored as `log₁₀(power + 1e-10)` in a rolling buffer of `Fl
 
 The hi-res low-frequency spectrogram uses a separate 2560-sample (10 s) per-channel rolling buffer and its own set of 76 Hann-weighted DFT twiddle factors (0.5–8.0 Hz at 0.1 Hz steps). It stores `Float32Array(76)` columns in `_specLoDisplay` with its own `spectrumLoSampleCount` counter. Quality-weighted averaging applies. ~1.2 MB of precomputed kernels (76 bins × 2560 samples × 2 components × 4 bytes).
 
-### Stage 4 — Heatmap rendering (BioDataDisplay)
+### Stage 4 — Heatmap rendering (AnalysisDisplay)
 
-The two panels use separate data buffers and plain 2D `<canvas>` (not WebGL) with a column-shift approach since the update rate is low (~2 Hz):
+The columns produced above are not drawn as they arrive. Each frame `App._tapLiveColumns()` copies newly-available columns out of `_specDisplay`/`_specLoDisplay` into `SessionStore` (timestamped, and spread across the interval since the previous tap so a burst of catch-up columns doesn't collapse onto one pixel), and `AnalysisDisplay` blits the columns falling inside the panel's window. Rendering is therefore identical whether the columns came from the live pipeline or were recomputed from a loaded file's EEG (see §9). Both panels are plain 2D `<canvas>` (not WebGL):
 
-1. **Auto-scale:** Robust ceiling via a 30-column sliding window of per-column max values; the 90th percentile of the window becomes the scale ceiling. This means a single artifact spike influences at most ~10% of the window and is naturally ejected after ~15 s. The ceiling is additionally capped at `SPEC_LOG_CAP = 8.2` (≈ 200 µV amplitude, derived from Hann-DFT power ≈ A² × N²/16) to prevent headset-removal or other implausible transients from anchoring the scale. The floor tracks the running minimum with a slow upward decay (0.005 per column) so it follows the noise floor and contracts again when signal levels drop. Minimum dynamic range of 2 decades.
-2. **Shift left:** `ctx.drawImage(canvas, -2, 0)` scrolls the existing content two pixels left (column width = 2 px).
-3. **Draw column:** A 2×H `ImageData` is filled using the viridis colormap LUT (256 entries, piecewise-linear from 9 key stops). Frequency axis labels are HTML elements alongside each canvas.
+1. **Auto-scale:** the shared `specColumnsScale` policy — floor = 5th percentile, ceiling = 90th percentile of the values visible in the window, so a single artifact column can't blow the range out the way a raw min/max would. EEG values are additionally clamped to `SPEC_LOG_CAP = 8.2` (≈ 200 µV amplitude, derived from Hann-DFT power ≈ A² × N²/16) to prevent headset-removal or other implausible transients from anchoring the scale. Minimum dynamic range of 2 decades.
+2. **Blit:** the whole window is painted into a single `ImageData` — one stored column per output pixel, nearest in time — and blitted once, using the viridis colormap LUT (256 entries, piecewise-linear from 9 key stops). Frequency axis labels are HTML elements alongside each canvas.
+3. **Empty stretches stay black:** a column is only painted at a pixel within `SPEC_NEAREST_TOLERANCE` (1.5) column-spacings of that pixel's time, so a window reaching back before the session began doesn't smear its oldest column across the gap.
 
-**Full spectrogram** (`#spec-canvas`, 280×86 native px): bins 8–50 Hz (43 bins), 2 px/bin vertically, 2 px/column horizontally. Uses `_specDisplay` (256-sample DFT, 1 Hz resolution). Axis labels: 50, 8 Hz.
+**Full spectrogram** (`#an-spec-canvas`, 280×86 native px): bins 8–50 Hz (43 bins), 2 px/bin vertically. Sourced from `_specDisplay` (256-sample DFT, 1 Hz resolution). Axis labels: 50, 8 Hz.
 
-**Delta/theta zoom** (`#spec-lo-canvas`, 280×76 native px): 0.5–8.0 Hz at 0.1 Hz resolution (76 bins), 1 px/bin vertically, 2 px/column horizontally. Uses a dedicated `_specLoDisplay` buffer computed from a 2560-sample (10 s) Hann-windowed DFT with precomputed twiddle factors for 76 fractional-Hz bins. First column appears after 10 s of data accumulation. Separate auto-scaling to maximise contrast for sub-Hz beat entrainment dynamics. Axis labels: 8, 4, 0.5 Hz.
+**Delta/theta zoom** (`#an-spec-lo-canvas`, 280×76 native px): 0.5–8.0 Hz at 0.1 Hz resolution (76 bins), 1 px/bin vertically. Sourced from a dedicated `_specLoDisplay` buffer computed from a 2560-sample (10 s) Hann-windowed DFT with precomputed twiddle factors for 76 fractional-Hz bins. First column appears after 10 s of data accumulation. Separate auto-scaling to maximise contrast for sub-Hz beat entrainment dynamics. Axis labels: 8, 4, 0.5 Hz.
 
 The `image-rendering: pixelated` CSS property ensures bins render with sharp edges when CSS-scaled.
 
@@ -517,11 +538,34 @@ SampEn(m, r, N) = -ln( A / B )
 **File:** `src/js/managers/RecordingManager.js`
 
 Captures **raw Muse sensor packets** plus nouscope's derived metrics into JSON
-Lines (JSONL) format while toggled on. Raw sensor records preserve the native
-muse-js reading shape (packet `index` / `sequenceId` + per-packet `samples`
-array), so files are byte-compatible with the tested `eeg-recorder` analysis
-pipeline (`eeg-recorder/analysis/utils.py`, `refs/eeg.py`), which reconstructs
-the timeline from packet indices.
+Lines (JSONL) format. Raw sensor records preserve the native muse-js reading
+shape (packet `index` / `sequenceId` + per-packet `samples` array), so files are
+byte-compatible with the tested `eeg-recorder` analysis pipeline
+(`eeg-recorder/analysis/utils.py`, `refs/eeg.py`), which reconstructs the
+timeline from packet indices.
+
+### Capture vs. recording — and the pre-record backlog
+
+Data collection does not begin when ⏺ is pressed. It begins when the headset
+connects: `enableCapture()` stamps the session epoch, starts fanning every record
+out to the `onRecord` sink (which feeds `SessionStore`, §9), and retains each
+serialized line in `_backlog`.
+
+Pressing ⏺ therefore starts *saving*, not *collecting*. `start()` writes the
+`meta` header and then the entire backlog before streaming continues into the
+same file, so **`t = 0` in a saved file is the moment capture began, not the
+moment the button was pressed** — everything on screen when the user decided to
+record is in the file. `meta.startedAt` and the filename timestamp are likewise
+the capture epoch. The backlog is *kept* across a recording (the same string
+object sits in both `_pending` and `_backlog`, so retaining it costs one array
+slot per record, not a second copy), which means a second recording started later
+in the session again spans the whole session.
+
+`BACKLOG_MAX_BYTES` (64 MB, ≈ 35 min of raw packets) bounds it; past that the
+oldest lines are dropped, `start()` logs a warning, and the file simply begins
+later than the session did. `enableCapture({resume: true})` re-arms capture after
+a brief headset dropout without disturbing the epoch or the backlog, so the
+session either side of the outage stays one continuous timeline.
 
 ### Record types
 
@@ -542,8 +586,8 @@ the timeline from packet indices.
   `index`/`sequenceId`/`timestamp` fields the analysis tools already use to
   rebuild the timeline. Recording whole readings (rather than the decimated
   per-sample rows used previously) is what makes the files analysis-compatible.
-- **Derived records carry `t`** = `performance.now() - startedPerf` in
-  milliseconds (one decimal place).
+- **Derived records carry `t`** = milliseconds since the capture epoch (one
+  decimal place) — see the backlog note above.
 - Each path rides on its own data stream — no synchronous "tick" — so cadences
   reflect true per-packet arrival times.
 - EEG raw packets come from a **dedicated `eegReadings` subscription** added
@@ -571,8 +615,8 @@ Two modes, selected at `start()`:
 ### Design choices
 
 - **Hook pattern**: each data path calls `App.recordingManager?.recordX(...)`
-  directly; when not recording the call is a no-op (early `isRecording` check) —
-  one optional chain + one branch per packet.
+  directly; with neither capture nor recording active the call is a no-op (early
+  `isRecording`/`captureActive` check) — one optional chain + one branch per packet.
 - **Pre-serialization**: `JSON.stringify(obj)` runs at record time, so a flush
   is just `pending.join('\n')` — no deep walk over an accumulated object graph.
 - **Crash resilience**: in stream mode at most `FLUSH_INTERVAL_MS` of data is
@@ -582,16 +626,21 @@ Two modes, selected at `start()`:
 
 ### Memory profile
 
-- Stream mode: bounded — only the last ≤4 s of records plus a one-batch write
-  buffer are resident, so multi-hour sessions are safe.
-- Memory fallback: ~the same per-packet byte cost as before; a full-stream hour
-  is on the order of tens of MB. Prefer stream mode for long sessions.
+- Stream mode: the file-write path is bounded — only the last ≤4 s of records
+  plus a one-batch write buffer are resident.
+- The **pre-record backlog** is the dominant resident cost while capture runs
+  (raw packets serialize to ~30 KB/s), capped at `BACKLOG_MAX_BYTES` = 64 MB.
+- Memory fallback: flushed chunks accumulate in `_lines` for the whole recording;
+  a full hour is on the order of tens of MB. Prefer stream mode for long sessions.
 
 ### UI
 
 - `⏺ ` button in `#eeg-controls` (visible only when EEG is connected).
 - Active state: red border + pulsing outline animation.
-- Elapsed time (`MM:SS`) shown next to the button while recording.
+- Elapsed time (`MM:SS`) next to the button is `elapsedMs()` — the **length of the
+  data in the file**, i.e. time since the capture epoch, not since the click. It
+  jumps to the buffered duration the moment recording starts, which is the visible
+  confirmation that the backlog was saved.
 - Click to start (prompts for file in stream mode); click again to stop.
 
 ---
@@ -691,16 +740,19 @@ Constants live at the top of `entrainment.py`. Output figure:
 
 ---
 
-## §9 — Analysis Tab — Timeline Reconstruction & Scrubbing
+## §9 — The Data View — Timeline Reconstruction & Scrubbing
 
-The **Analysis tab** shows the same panels as the live view but over a long,
-seekable window: record (or load) a session, then scrub it like a movie. It is a
-separate in-app view (the Muse Bluetooth connection and all managers stay alive —
-a separate page would drop them), driven by two new pieces:
+There is **one data view**, and it is always the scrubbable one. Connecting a
+headset starts an always-on capture into a `SessionStore`; `AnalysisDisplay` draws
+that store at whatever time the `Scrubber`'s playhead sits at. Parked at the
+leading edge (● LIVE) it behaves exactly as a live monitor; dragged backwards it
+replays the session so far. Loading a saved `.jsonl` fills the same store and
+drives the same panels. There is no separate live renderer and no live/analysis
+tab switch — an earlier design had both, and the two renderers drifted.
 
 - `src/js/managers/SessionStore.js` — the stored, queryable session timeline.
-- `src/js/ui/AnalysisDisplay.js` — a random-access, windowed renderer.
-- `src/js/ui/Scrubber.js` — the movie-style transport (playhead, play, speed, LIVE).
+- `src/js/ui/AnalysisDisplay.js` — the random-access, windowed renderer.
+- `src/js/ui/Scrubber.js` — the transport (playhead, play, speed, LIVE).
 
 ### One schema, two producers
 
@@ -709,11 +761,10 @@ consumes them from either source:
 
 - **Live / DVR** — while EEG is connected, `RecordingManager.captureActive` is
   on, so every record it produces flows to its `onRecord` sink (pointed at
-  `SessionStore.ingest`) **independent of disk recording** — the Analysis tab
-  reflects the live session with no explicit ⏺. Pressing ⏺ additionally writes
-  the JSONL file; with `captureActive` on but `isRecording` off, records reach
-  the sink with zero file buffering. `SessionStore.startLive()` stamps a capture
-  epoch used for derived-record and column times.
+  `SessionStore.ingest`) **independent of disk recording** — the panel reflects
+  the live session with no explicit ⏺. Pressing ⏺ additionally writes the JSONL
+  file, beginning with the retained backlog (§8). `SessionStore.startLive()`
+  stamps a capture epoch used for derived-record and column times.
 - **File** — `SessionStore.loadFromText(text)` parses a saved `nouscope-*.jsonl`
   into the same records.
 
@@ -768,23 +819,50 @@ an equal-weight mean. Bin counts (50 main / 76 low) are imported from `bioRender
 the recompute and the render can't drift. The audio tempogram cannot be reconstructed
 offline (no audio is stored), so it is empty for loaded files.
 
-### Windowed rendering
+### Per-panel time windows
 
-`AnalysisDisplay.renderWindow(store, t0, t1, cursor)` clears and redraws every panel
-from the store on each seek/frame (no scroll/append):
+`AnalysisDisplay.renderAt(store, cursor)` clears and redraws every panel from the
+store on each seek/frame (no scroll/append). Each panel draws **its own fixed-width
+window ending at the playhead**, `[cursor − PANEL_WINDOWS[panel], cursor]`:
+
+| Panel | Window | Why |
+|---|---|---|
+| EEG | 2 s | individual deflections legible |
+| PPG | 6 s | matches the MSPTD analysis window |
+| IMU | 4 s | |
+| EEG bands | 5 s | ~10 records at the 2 Hz update rate |
+| Complexity (MSE) | 30 s | ~6 update cycles at 0.2 Hz |
+| Spectrogram / Delta-theta / Audio tempo | 70 s | 140 columns at ~2 columns/s |
+
+A single window shared across every panel — which an earlier design forced via a
+scrubber-level width selector — is wrong in both directions: the 2 s span that
+makes EEG readable shows a single MSE step and half a breath of PPG, while the
+70 s span the spectrograms need turns the EEG trace into a solid block. The values
+above reproduce the spans the old live scrolling panel had, which were tuned
+against user feedback. (The audio tempogram scrolled far faster live — a column
+per animation frame — which was an artifact of its polling rate rather than a
+choice; it is pinned to the other two heatmaps so all three share one time axis.)
+They live in `PANEL_WINDOWS` in `bioRender.js`.
+
+Because a window may reach back before `t = 0`, `GriddedStream.envelope` maps the
+window onto the output columns **as requested**, guarding each sample/bucket index
+against the data bounds, rather than clamping the span to the samples that exist —
+clamping would silently stretch the little data there is across the whole canvas.
+Out-of-data columns come back as zeros.
+
+### Windowed rendering
 
 - **Line plots** (EEG/PPG/IMU/bands/MSE) reuse `WebglLineRoll`, refreshed whole
   each frame by adding exactly the roll's capacity of points via the batched
   `addPoints`. The roll's `x = a_position.x − uShift` shader has `uShift` re-set to
-  `shift − 1` before each draw so a full-capacity batch centres in clip space.
+  `shift` before each draw so a full-capacity batch spans clip space.
   Raw signals are **min/max-decimated** into `OUT_N` buckets (2 points per bucket)
   so spikes survive long windows; derived series are step/hold-sampled. EEG and IMU
   decimate via `GriddedStream.envelope`, which sources from the mip pyramid above
   once the window is wide enough for a coarse level to still give ≥2 buckets per
   output column, falling back to scanning raw samples directly for anything
-  narrower — this is what keeps scrubbing/playing at a large window size (e.g.
-  **All** on a multi-minute session) from re-scanning the whole window every
-  frame. The band y-scale is a **stable session-wide running max**
+  narrower — this is what keeps scrubbing/playing from re-scanning the whole
+  window every frame. The band y-scale is a **stable session-wide running max**
   (`SessionStore.bandsScale`), not per-window, so it doesn't jump while scrubbing.
   PPG is stored **raw** (big DC + drift), so `_renderPPG` detrends it (subtract a
   ~1 s centred moving average) and scales by a robust (~95th-pct) AC peak so
@@ -792,48 +870,51 @@ from the store on each seek/frame (no scroll/append):
   detrends a bounded-size mip-decimated proxy instead of every raw sample, since
   the moving average only needs the same slow DC drift, which the proxy still
   carries.
-- **Resolution** — `AnalysisDisplay.resize()` (and `BioDataDisplay.resize()` for the
-  live line plots) sizes each canvas's drawing buffer to its on-screen size ×
-  devicePixelRatio (capped 2×) and updates the GL viewport, so the fullscreen grid
-  isn't upscaling 280-px buffers. Called on view-enter and window resize.
+- **Band smoothing** — band powers arrive at ~2 Hz, so resampling them onto ~280
+  pixels of a 5 s window gives a coarse staircase. `_renderBands` applies a one-pole
+  low-pass **across pixels**, with `alpha = 1 − exp(−dt / BAND_SMOOTH_TAU)` derived
+  from the per-pixel time step, seeded at the first sample so the curve doesn't ramp
+  in from zero at the left edge. `BAND_SMOOTH_TAU = 0.21 s` is the time constant of
+  the per-frame lerp the old live panel used, so the curve reads the same.
+- **Resolution** — `AnalysisDisplay.resize()` sizes each canvas's drawing buffer to
+  its on-screen size × devicePixelRatio (capped 2×) and updates the GL viewport, so
+  the fullscreen grid isn't upscaling 280-px buffers. Called on panel-show and
+  window resize.
 - **Spectrograms** build the whole window into one `ImageData` and blit it once,
-  one stored column per output pixel (nearest column in time) — resolution- and
-  zoom-independent. Auto-scaling uses the shared `specColumnsScale` policy (floor =
-  5th percentile, ceiling = 90th percentile, EEG values clamped to `SPEC_LOG_CAP`),
-  the random-access equivalent of the live panel's sliding-window + decaying-floor
-  scale, so the two views agree on identical data and a single artifact column can't
-  wash the window out. The percentile is computed from a **bounded, strided sample**
-  of the window's columns (capped at `SPEC_SCALE_SAMPLE_CAP` values) rather than
-  every bin of every column, so a wide window with thousands of columns doesn't
-  sort a six-figure array every frame. Shared draw primitives (viridis LUT, EEG
-  scales, `paintSpecColumn`, `specColumnsScale`) live in `src/js/ui/bioRender.js`,
-  used by both renderers.
+  one stored column per output pixel (nearest column in time, within
+  `SPEC_NEAREST_TOLERANCE` column-spacings) — resolution- and zoom-independent.
+  Auto-scaling uses the shared `specColumnsScale` policy (floor = 5th percentile,
+  ceiling = 90th percentile, EEG values clamped to `SPEC_LOG_CAP`), so a single
+  artifact column can't wash the window out. The percentile is computed from a
+  **bounded, strided sample** of the window's columns (capped at
+  `SPEC_SCALE_SAMPLE_CAP` values) rather than every bin of every column, so a
+  window with thousands of columns doesn't sort a six-figure array every frame.
+  Shared draw primitives (viridis LUT, EEG scales, per-panel windows,
+  `paintSpecColumn`, `specColumnsScale`) live in `src/js/ui/bioRender.js`.
 - **Scalar readouts** (HR, band/MSE legends, entrainment meter, quality dots) are
   sampled at the playhead `cursor` via `store.sampleAt` / `store.qualityAt`. Each
-  also gets its **window average** over `[t0, t1]` via `SessionStore.windowMean`
-  — binary-searches to the window start (same as `specColumns()`, so cost scales
-  with the window's record count, not the whole session), and takes a list of
-  per-record accessors so multiple fields off one series (5 bands, or MSE's
-  aggregate + 5 τ-scales) cost a single pass. Headline scalars (HR, MSE
-  complexity, entrainment) show `avg X` next to the instant value; the per-item
-  legend rows (5 bands, 5 τ-scales) show just the average number. These derived
-  series are low-rate (≤2 Hz, unlike raw EEG), so this needs no throttling the
-  way the quality ribbon does.
-- **Playhead cursor** — every panel is wrapped in a `position: relative` `.an-plot-wrap`
-  containing a `.an-playhead-line` hairline, positioned each frame by `_renderPlayhead`
-  as a CSS `left` percentage (`(cursor − t0) / (t1 − t0)`), not drawn into the canvas
-  itself. In fixed-window mode `cursor === t1`, so it sits at the right edge; in
-  **All** mode it marks the actual playhead within the whole-session window.
+  also gets its **window average over the same window its own panel draws** (HR over
+  the PPG window, bands over the bands window, and so on) via
+  `SessionStore.windowMean` — binary-searches to the window start (same as
+  `specColumns()`, so cost scales with the window's record count, not the whole
+  session), and takes a list of per-record accessors so multiple fields off one
+  series (5 bands, or MSE's aggregate + 5 τ-scales) cost a single pass. Headline
+  scalars (HR, MSE complexity, entrainment) show `avg X` next to the instant value;
+  the per-item legend rows show just the average number. Band legend rows are hidden
+  for bands absent from `EEGManager.normalizeBands` (delta, by default), whose values
+  are zeroed at the source. These derived series are low-rate (≤2 Hz, unlike raw EEG),
+  so this needs no throttling the way the quality ribbon does.
 
 ### Scrubber
 
-`Scrubber` owns a cursor (s) and window width W. A fixed width renders the sliding
-window `[cursor − W, cursor]` (ends at the playhead); **All** (W = 0) renders the
-whole session `[0, duration]` on every graph, with the playhead marking the
-position used for the scalar readouts. A `requestAnimationFrame` loop advances the
-cursor at `speed × realtime` while playing, snaps it to the growing leading edge
-while **following** (● LIVE — shown only for a live session, hidden for loaded
-files), and otherwise renders only when dirty (seek, window change, new data).
+`Scrubber` owns exactly one piece of view state: the playhead cursor, in seconds
+from the session start. How much history each panel shows around it is the
+renderer's business (`PANEL_WINDOWS`, above), not the scrubber's. A
+`requestAnimationFrame` loop advances the cursor at `speed × realtime` while
+playing, snaps it to the growing leading edge while **following** (● LIVE — shown
+only for a live session, hidden for loaded files), and otherwise renders only when
+dirty (seek, new data). On headset disconnect the panel stays up and
+`stopFollowing()` parks the playhead so the captured session remains scrubbable.
 
 **Timeline ribbon + ticks** — `#scrub-timeline` wraps the plain progress track
 (`#scrub-track`) with two more layers so a seek target is visible before you seek:
@@ -848,8 +929,8 @@ files), and otherwise renders only when dirty (seek, window change, new data).
 - **Event ticks** (`#scrub-ticks`) — one absolutely-positioned hairline per `store.music`
   record (BPM changes) and per `SessionStore.gaps()` interval (a real dropout: every
   EEG channel simultaneously NaN for ≥1 s, as opposed to one noisy channel — scanned
-  incrementally in `_scanGaps`, same pattern as `bandsScale()`). Same `left: X%`
-  technique as the Analysis panel's `.an-playhead-line`.
+  incrementally in `_scanGaps`, same pattern as `bandsScale()`), positioned by a
+  `left: X%` style.
 
 Both are rebuilt in `_renderTimeline`, but **throttled**, not rebuilt every frame:
 a loaded file has a fixed duration and builds once; a live/DVR session re-samples
@@ -866,3 +947,51 @@ seek to before it's committed. Positioned/updated purely from pointer events
 (`_showHoverTime`, `Scrubber.js`) — no store queries, no render-loop involvement,
 so it can't reintroduce the per-frame-cost concerns above. Clamped by its own
 measured width so it can't overflow past the timeline's left/right edges.
+
+---
+
+## §10 — Muse Data Simulator
+
+**File:** `src/js/managers/SimulatedMuse.js`
+
+A drop-in stand-in for muse-js `MuseClient`, so the UI can be developed, debugged
+and screenshotted with no hardware present. It exposes the same observables
+`EEGManager` subscribes to (`eegReadings`, `ppgReadings`, `accelerometerData`,
+`gyroscopeData`, `telemetryData`, `connectionStatus`) and emits packets in the
+**native muse-js reading shape**, so everything downstream — `zipSamples`, band
+powers, spectrograms, MSPTD heart rate, MSE, entrainment, the JSONL recorder, the
+`SessionStore` — runs unchanged and unaware of the difference.
+
+Activated by `EEGManager.connect({ simulate: true })`. It is a **developer option
+with no UI**: `?sim` in the URL makes the existing `Connect EEG` button stream
+synthetic data instead of talking to Web Bluetooth, and `?sim=auto` connects on
+load (safe, because the simulator needs no user gesture, unlike Web Bluetooth).
+
+### Signals
+
+Each is chosen to exercise a specific panel:
+
+- **EEG** (µV, 4 ch) — 1/f background from a Paul Kellet pink-noise filter, plus a
+  10 Hz alpha rhythm whose envelope waxes and wanes on a ~20 s cycle (posterior
+  weighted: strongest at TP9/TP10), steady theta/beta/gamma, a slow baseline drift,
+  a **2 Hz (120 BPM) component** so the EEG tempogram and entrainment index have a
+  real periodicity to find, and periodic eye-blink artifacts (Gaussian, ~70 µV,
+  every ~4.7 s) coupled almost entirely to the frontal electrodes AF7/AF8. Total RMS
+  lands comfortably under the 50 µV `good` signal-quality threshold.
+- **PPG** — the raw infrared DC level a real Muse reports (~370 000) with a cardiac
+  ripple (systolic peak + dicrotic notch), respiratory baseline sway, and respiratory
+  sinus arrhythmia modulating the rate around 62 BPM. All three channels (ambient,
+  infrared, red) are emitted, as on the device.
+- **IMU** — gravity vector plus a slow two-frequency head sway; the gyro reads its
+  derivative.
+- **Telemetry** — battery draining slowly from 86%.
+
+### Packet timing
+
+Packets are generated from an **absolute sample index**, not from wall-clock deltas,
+so the signal is continuous across timer jitter. A `setInterval` pump emits however
+many whole packets of each stream are due by the elapsed time; a tab backgrounded
+for minutes produces a burst of catch-up packets, capped at `MAX_CATCHUP_PACKETS`
+(64) per tick per stream. The resulting jump in `index` is exactly the packet loss
+`SessionStore` already renders as a gap. All four electrodes of an EEG packet share
+one `index` and `timestamp`, which is what `zipSamples` groups on.

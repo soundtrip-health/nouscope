@@ -514,29 +514,16 @@ a:focus-visible {
   height: auto;
 }
 
-// ── Analysis-tab playhead cursor ────────────────────────────────────────────
-// Each analysis canvas is wrapped so a hairline can be absolutely positioned
-// over it at the playhead's x-fraction (set via JS `style.left`). The wrap
-// takes over the `flex: 1` sizing the bare canvas used to get from its flex
-// container (`.bio-section` column, or the `bio-*-body` rows), so swapping in
-// the wrapper doesn't change any panel's layout.
+// ── Plot sizing ─────────────────────────────────────────────────────────────
+// Each canvas is wrapped so the wrap takes over the `flex: 1` sizing the bare
+// canvas used to get from its flex container (`.bio-section` column, or the
+// `bio-*-body` rows) — keeping every panel's layout independent of the canvas's
+// intrinsic size.
 .an-plot-wrap {
   position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
-}
-
-.an-playhead-line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 100%;   // default to the right edge (fixed-window mode) until JS positions it
-  width: 1px;
-  background: var(--color-text);
-  opacity: 0.55;
-  pointer-events: none;
-  z-index: 1;
 }
 
 .eeg-quality-dots {
@@ -603,14 +590,10 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-// ── Fullscreen bio panel ──────────────────────────────────────────────────────
-// Full-viewport data view. Lays out all bio sections in a responsive grid.
-// CSS-scales canvases (image-rendering: pixelated on spectrograms keeps columns
-// crisp; webgl-plot line traces scale smoothly).
-// Shared by the live fullscreen view and the Analysis tab — only one .bio-panel
-// is un-`hidden` at a time (App manages the `hidden` attributes), so the grid
-// layout below applies to whichever panel is active.
-body.fullscreen-bio,
+// ── Full-viewport data panel ──────────────────────────────────────────────────
+// Lays out all bio sections in a responsive grid. CSS-scales canvases
+// (image-rendering: pixelated on spectrograms keeps columns crisp; webgl-plot
+// line traces scale smoothly). Applied whenever a session is on screen.
 body.analysis-mode {
   .bio-panel {
     position: fixed;
@@ -669,14 +652,7 @@ body.analysis-mode {
   .eeg-controls { z-index: 1005; }
 }
 
-// ── Analysis tab ────────────────────────────────────────────────────────────
-// The analysis panel reuses the fullscreen grid above, but leaves room at the
-// bottom for the scrubber and hides the live panel.
-// Only the active panel becomes the fullscreen grid; the inactive one's grid
-// rule (shared selector above) would otherwise beat its [hidden] on specificity.
-body.fullscreen-bio #analysis-panel { display: none !important; }
-body.analysis-mode  #bio-panel      { display: none !important; }
-
+// The panel leaves room at the bottom for the scrubber.
 body.analysis-mode {
   #analysis-panel {
     height: calc(100vh - 4.5rem);
@@ -690,59 +666,6 @@ body.analysis-mode {
     bottom: 4.75rem;
     z-index: 1007;
   }
-}
-
-// View tabs — top-center switch between Live and Analysis.
-// Sits in the padding strip above the fullscreen grid so it doesn't overlap the graphs.
-.view-tabs {
-  position: fixed;
-  top: 0.4rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1006;
-  display: flex;
-  gap: 0.25rem;
-  background: var(--surface-panel);
-  border: 1px solid var(--border-hairline);
-  padding: 0.2rem;
-
-  &[hidden] { display: none; }
-}
-
-.view-tab {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 0.75rem;
-  letter-spacing: 0.05em;
-  padding: 0.35rem 0.9rem;
-  cursor: pointer;
-  transition: color 0.2s, background 0.2s;
-
-  &:hover:not(:disabled) {
-    color: var(--color-text);
-    background: var(--wash-hover);
-  }
-
-  &.active {
-    color: var(--color-bg);
-    background: var(--color-text);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-}
-
-// Live doubles as a connection indicator, not just a tab: red once a Muse is
-// connected (so it's obvious the tab is now clickable), further dimmed by the
-// shared `:disabled` rule above while there's nothing live to show.
-#tab-live:not(:disabled):not(.active) {
-  color: var(--status-record);
-
-  &:hover { background: rgba(var(--status-record-rgb), 0.12); }
 }
 
 // Movie-style scrubber.
@@ -910,18 +833,6 @@ body.analysis-mode {
   &.active {
     color: var(--status-record);
     border-color: var(--status-record);
-  }
-}
-
-// The window <select> overlays its label so the current value shows as text.
-.scrub-window-label {
-  select {
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    width: 100%;
-    height: 100%;
-    cursor: pointer;
   }
 }
 

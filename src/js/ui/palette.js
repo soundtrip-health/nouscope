@@ -8,7 +8,7 @@ import { ColorRGBA } from 'webgl-plot'
  * them to `ColorRGBA` (0–255) so the plots, the HTML legends, and the
  * stylesheet can never drift apart. See docs/design-system.md.
  *
- * Read lazily (inside BioDataDisplay.init(), which runs on EEG connect), never
+ * Read lazily (inside AnalysisDisplay.init(), which runs on EEG connect), never
  * at module load — the stylesheet must be parsed before getComputedStyle can
  * resolve the custom properties.
  */

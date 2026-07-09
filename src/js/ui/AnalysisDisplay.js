@@ -1,10 +1,12 @@
 import { WebglLineRoll, createWebGL2Context, setBackgroundColor } from 'webgl-plot'
+import App from '../App'
 import { colorVar, colorVars } from './palette'
 import {
   TRANSPARENT,
   EEG_SCALE, EEG_AMPLITUDE, EEG_OFFSETS,
   ACCEL_SCALE, GYRO_SCALE,
   MSE_Y_MAX,
+  PANEL_WINDOWS, BAND_SMOOTH_TAU,
   EEG_TOKENS, BAND_TOKENS, IMU_TOKENS, MSE_TOKENS,
   SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN,
   SPEC_LOG_CAP,
@@ -14,23 +16,34 @@ import {
 } from './bioRender'
 
 /**
- * AnalysisDisplay — random-access counterpart to BioDataDisplay.
+ * AnalysisDisplay — the app's only data view.
  *
- * Where BioDataDisplay scrolls the newest live samples in from the right, this
- * renderer draws an arbitrary window `[t0, t1]` of a SessionStore on demand:
- * every call to `renderWindow()` clears each canvas and redraws the whole
- * window from stored data. That's what lets the scrubber seek and play.
+ * It renders every panel from a `SessionStore` at an arbitrary playhead time,
+ * rather than from a manager's live ring buffers. That single fact is what makes
+ * the view seekable: with the playhead pinned to the leading edge it *is* the
+ * live view, and dragging the playhead anywhere else replays the same panels
+ * over stored data, live session or loaded file alike.
+ *
+ * Each panel draws its own fixed-width window ending at the playhead — see
+ * `PANEL_WINDOWS` in bioRender for why the windows differ per panel. Every call
+ * to `renderAt()` clears each canvas and redraws it from scratch.
  *
  * Line plots reuse WebglLineRoll but are fully refreshed each frame: we add
  * exactly the roll's capacity worth of points (min/max-decimated to the display
  * width) so the ring is overwritten left→right across the window. Spectrograms
- * blit stored columns per output pixel, nearest-in-time, so any zoom level works.
+ * blit stored columns per output pixel, nearest-in-time.
  *
- * Canvas IDs are the live ones prefixed with `an-` (see #analysis-panel markup).
+ * Canvas IDs carry an `an-` prefix (see #analysis-panel markup).
  */
 
 const OUT_N = 280   // output columns across each plot (matches canvas width)
 const PPG_RAW_SAMPLE_CAP = 20000   // ~5 min at 64 Hz — see `_ppgSignal`
+
+// A stored spectrogram column is painted at an output pixel only if it lies
+// within this many column-spacings of that pixel's time. Without the guard,
+// `_nearestColumn` happily smears the single oldest column across the entire
+// empty stretch of a window that reaches back before the session began.
+const SPEC_NEAREST_TOLERANCE = 1.5
 
 export default class AnalysisDisplay {
   constructor() {
@@ -86,14 +99,8 @@ export default class AnalysisDisplay {
     this._entrainFillEl  = document.getElementById('an-entrain-fill')
     this._qualityDots    = document.querySelectorAll('#an-quality-dots .quality-dot')
 
-    // Playhead cursor — one hairline per panel, positioned by x-fraction (see _renderPlayhead)
-    this._playheadEls = ['eeg', 'spec', 'spec-lo', 'spec-audio', 'band', 'mse', 'ppg', 'imu']
-      .map(id => document.getElementById(`an-${id}-cursor`))
-      .filter(Boolean)
-
     // Audio-tempogram section — hidden for loaded files (no audio is stored in JSONL).
     this._audioSection = document.getElementById('an-audio-section')
-    this._audioCursorEl = document.getElementById('an-spec-audio-cursor')
 
     this._inited = true
   }
@@ -140,48 +147,34 @@ export default class AnalysisDisplay {
   }
 
   /**
-   * Render the display window [t0, t1] from the store. `cursor` (default t1) is
-   * the playhead time used for the scalar readouts — distinct from t1 only in
-   * "whole session" mode, where the window spans the entire recording but the
-   * readouts still track the playhead. Cheap enough to call every frame.
+   * Redraw every panel with its own window ending at the playhead `cursor`
+   * (seconds). Cheap enough to call every frame.
    */
-  renderWindow(store, t0, t1, cursor = t1) {
+  renderAt(store, cursor) {
     if (!this._inited || !store) return
-    if (t1 <= t0) t1 = t0 + 0.001
 
     // Audio tempogram is unavailable for loaded files (no audio stored in JSONL).
     // Hide the section entirely so it doesn't read as a broken panel.
     if (this._audioSection) {
       const noAudio = store.specAudio.length === 0
       this._audioSection.hidden = store.source === 'file' && noAudio
-      if (this._audioCursorEl) this._audioCursorEl.hidden = noAudio
     }
 
-    this._renderEEG(store, t0, t1)
-    this._renderPPG(store, t0, t1)
-    this._renderIMU(store, t0, t1)
-    this._renderBands(store, t0, t1)
-    this._renderMse(store, t0, t1)
-    this._renderSpec(this._specCtx, store.specColumns('main', t0, t1), t0, t1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
-    this._renderSpec(this._specLoCtx, store.specColumns('lo', t0, t1), t0, t1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
-    this._renderAudioSpec(store, t0, t1)
-    this._renderReadouts(store, t0, t1, cursor)
-    this._renderPlayhead(t0, t1, cursor)
-  }
+    const w = (panel) => [cursor - PANEL_WINDOWS[panel], cursor]
 
-  // ── Playhead cursor ──────────────────────────────────────────────────────
+    this._renderEEG(store, ...w('eeg'))
+    this._renderPPG(store, ...w('ppg'))
+    this._renderIMU(store, ...w('imu'))
+    this._renderBands(store, ...w('bands'))
+    this._renderMse(store, ...w('mse'))
 
-  /**
-   * Position the vertical cursor hairline on every panel at the playhead's
-   * x-fraction across [t0, t1]. In fixed-window mode `cursor === t1`, so this
-   * pins the hairline to the right edge; in "All" mode it marks the actual
-   * playhead position within the whole-session window.
-   */
-  _renderPlayhead(t0, t1, cursor) {
-    const span = t1 - t0
-    const frac = span > 0 ? Math.max(0, Math.min(1, (cursor - t0) / span)) : 1
-    const pct = `${(frac * 100).toFixed(2)}%`
-    for (const el of this._playheadEls) el.style.left = pct
+    const [st0, st1] = w('spec')
+    this._renderSpec(this._specCtx, store.specColumns('main', st0, st1), st0, st1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
+    const [lt0, lt1] = w('specLo')
+    this._renderSpec(this._specLoCtx, store.specColumns('lo', lt0, lt1), lt0, lt1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
+    this._renderAudioSpec(store, ...w('specAudio'))
+
+    this._renderReadouts(store, cursor)
   }
 
   // ── Line plots ────────────────────────────────────────────────────────────
@@ -317,17 +310,31 @@ export default class AnalysisDisplay {
     this._drawRoll(this._imuPlot)
   }
 
+  /**
+   * Band powers are produced at ~2 Hz, so resampling them onto ~280 pixels of a
+   * 5 s window gives a coarse staircase. The live panel hid that behind a
+   * per-frame lerp; reproduce it here as a one-pole low-pass across pixels with
+   * the same time constant, seeded at the first sample so the curve doesn't ramp
+   * in from zero at the left edge.
+   */
   _renderBands(store, t0, t1) {
     const BAND_KEYS = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     const lines = [0, 1, 2, 3, 4].map(() => new Float32Array(OUT_N))
     const ymax = store.bandsScale()   // stable session-wide scale (no per-frame jump)
+
+    const dt = (t1 - t0) / (OUT_N - 1)
+    const alpha = 1 - Math.exp(-dt / BAND_SMOOTH_TAU)
+    const smoothed = new Float64Array(5)
+    let seeded = false
+
     for (let x = 0; x < OUT_N; x++) {
-      const t = t0 + (x / (OUT_N - 1)) * (t1 - t0)
-      const rec = store.sampleAt('bands', t)
+      const rec = store.sampleAt('bands', t0 + x * dt)
       for (let b = 0; b < 5; b++) {
         const v = rec ? rec[BAND_KEYS[b]] : 0
-        lines[b][x] = (v / ymax) * 2 - 1
+        smoothed[b] = seeded ? smoothed[b] + alpha * (v - smoothed[b]) : v
+        lines[b][x] = (smoothed[b] / ymax) * 2 - 1
       }
+      seeded = true
     }
     this._bandGL.clear(this._bandGL.COLOR_BUFFER_BIT)
     this._bandPlot.addPoints(lines)
@@ -375,9 +382,18 @@ export default class AnalysisDisplay {
     const span = t1 - t0
     const img = ctx.createImageData(W, H)
     if (W < 2) return   // need at least 2 columns for a meaningful mapping
+
+    // How far a stored column may sit from an output pixel's time and still be
+    // painted there: a multiple of the columns' own spacing, so pixels that fall
+    // outside the recorded stretch of this window stay black.
+    const spacing = columns.length > 1
+      ? (columns[columns.length - 1].t - columns[0].t) / (columns.length - 1)
+      : span
+    const tol = Math.max(spacing, span / W) * SPEC_NEAREST_TOLERANCE
+
     for (let x = 0; x < W; x++) {
       const t = t0 + (x / (W - 1)) * span
-      const col = this._nearestColumn(columns, t)
+      const col = this._nearestColumn(columns, t, tol)
       if (!col || Number.isNaN(col[startIdx])) continue
       paintSpecColumn(img, col, { lo, range, H, colWidth: 1, stride: W, x0: x, pxPerBin, startIdx, endIdx })
     }
@@ -394,8 +410,8 @@ export default class AnalysisDisplay {
     this._renderSpec(this._specAudioCtx, cols, t0, t1, 0, bins, 1)
   }
 
-  /** Column whose time is nearest `t` (columns sorted by t). */
-  _nearestColumn(columns, t) {
+  /** Column whose time is nearest `t` (columns sorted by t), or null if none within `tol`. */
+  _nearestColumn(columns, t, tol) {
     let lo = 0, hi = columns.length - 1
     while (lo < hi) {
       const mid = (lo + hi) >> 1
@@ -404,30 +420,38 @@ export default class AnalysisDisplay {
     }
     // Compare neighbour for true nearest.
     if (lo > 0 && Math.abs(columns[lo - 1].t - t) < Math.abs(columns[lo].t - t)) lo--
-    return columns[lo].col
+    return Math.abs(columns[lo].t - t) <= tol ? columns[lo].col : null
   }
 
   // ── Scalar readouts at the playhead ──────────────────────────────────────────
 
   /**
-   * Instant values at the playhead `t`, plus the average over the visible
-   * window `[t0, t1]` via `store.windowMean` — the window average is what
-   * turns these from a live readout into an actual analysis surface: scrubbing
-   * a window tells you "what's typical here", not just "what is it right now".
+   * Instant values at the playhead `t`, plus each series' average over the same
+   * window its own panel draws. The window average is what turns these from a
+   * live readout into an analysis surface: it says "what's typical over the
+   * stretch you're looking at", not just "what is it right now" — so it has to
+   * cover exactly the stretch that panel shows.
    */
-  _renderReadouts(store, t0, t1, t) {
+  _renderReadouts(store, t) {
+    const win = (panel) => [t - PANEL_WINDOWS[panel], t]
+
     const hr = store.sampleAt('hr', t)
     if (this._hrEl) this._hrEl.textContent = hr && hr.bpm > 0 ? `${Math.round(hr.bpm)} bpm` : ''
-    const [hrAvg] = store.windowMean(store.hr, t0, t1, [r => (r.bpm > 0 ? r.bpm : NaN)])
+    const [hrAvg] = store.windowMean(store.hr, ...win('ppg'), [r => (r.bpm > 0 ? r.bpm : NaN)])
     if (this._hrAvgEl) this._hrAvgEl.textContent = hrAvg != null ? `avg ${Math.round(hrAvg)}` : ''
 
+    // Only bands that participate in the relative-power normalisation carry a
+    // meaningful value; the rest are zeroed at the source (delta, by default).
+    // Show a legend row only for the ones that mean something.
     const bands = store.sampleAt('bands', t)
     const normNames = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+    const active = App.eegManager?.normalizeBands
+    const bandAvgs = store.windowMean(store.bands, ...win('bands'), normNames.map(k => r => r[k]))
     for (let i = 0; i < 5; i++) {
+      const shown = !active || active.has(normNames[i])
+      if (this._bandItemEls[i]) this._bandItemEls[i].style.display = shown ? '' : 'none'
+      if (!shown) continue
       if (this._bandValEls[i]) this._bandValEls[i].textContent = bands ? bands[normNames[i]].toFixed(2) : '—'
-    }
-    const bandAvgs = store.windowMean(store.bands, t0, t1, normNames.map(k => r => r[k]))
-    for (let i = 0; i < 5; i++) {
       if (this._bandAvgEls[i]) this._bandAvgEls[i].textContent = bandAvgs[i] != null ? bandAvgs[i].toFixed(2) : '—'
     }
 
@@ -436,7 +460,7 @@ export default class AnalysisDisplay {
     for (let i = 0; i < 5; i++) {
       if (this._mseValEls[i]) this._mseValEls[i].textContent = mse && mse.curve[i] != null ? mse.curve[i].toFixed(2) : '—'
     }
-    const mseAvgs = store.windowMean(store.mse, t0, t1, [r => r.complexity, ...[0, 1, 2, 3, 4].map(i => r => r.curve[i])])
+    const mseAvgs = store.windowMean(store.mse, ...win('mse'), [r => r.complexity, ...[0, 1, 2, 3, 4].map(i => r => r.curve[i])])
     if (this._mseAvgEl) this._mseAvgEl.textContent = mseAvgs[0] != null ? `avg ${mseAvgs[0].toFixed(2)}` : ''
     for (let i = 0; i < 5; i++) {
       if (this._mseScaleAvgEls[i]) {
@@ -449,7 +473,7 @@ export default class AnalysisDisplay {
     const val = entrain ? entrain.idx : 0
     if (this._entrainFillEl) this._entrainFillEl.style.width = `${(val * 100).toFixed(1)}%`
     if (this._entrainValueEl) this._entrainValueEl.textContent = val > 0.01 ? `${(val * 100).toFixed(0)}%` : ''
-    const [entrainAvg] = store.windowMean(store.entrain, t0, t1, [r => r.idx])
+    const [entrainAvg] = store.windowMean(store.entrain, ...win('specAudio'), [r => r.idx])
     if (this._entrainAvgEl) this._entrainAvgEl.textContent = entrainAvg != null ? `avg ${Math.round(entrainAvg * 100)}%` : ''
 
     const q = store.qualityAt(t)
