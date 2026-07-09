@@ -27,18 +27,25 @@
   </head>
   <body class="demo-1">
     <main>
-      <div class="bio-panel" id="bio-panel" hidden>
+      <span class="session-label" id="scrub-session-label"></span>
+
+      <!-- The one data panel: every graph is rendered from the stored session
+           timeline (SessionStore) at the scrubber's playhead. Parked at the
+           leading edge it reads as a live monitor; dragged back, it replays. -->
+      <div class="bio-panel analysis-panel" id="analysis-panel" hidden>
         <div class="bio-section">
           <div class="bio-section-header">
             <span class="bio-label">EEG</span>
-            <div class="eeg-quality-dots" id="eeg-quality-dots">
+            <div class="eeg-quality-dots" id="an-quality-dots">
               <span class="quality-dot" data-ch="0" title="TP9"></span>
               <span class="quality-dot" data-ch="1" title="AF7"></span>
               <span class="quality-dot" data-ch="2" title="AF8"></span>
               <span class="quality-dot" data-ch="3" title="TP10"></span>
             </div>
           </div>
-          <canvas id="eeg-canvas" width="280" height="90"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-eeg-canvas" width="280" height="90"></canvas>
+          </div>
         </div>
         <div class="bio-section bio-spec-section">
           <div class="bio-section-header">
@@ -49,7 +56,9 @@
               <span>50</span>
               <span>8</span>
             </div>
-            <canvas id="spec-canvas" width="280" height="86"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-canvas" width="280" height="86"></canvas>
+            </div>
           </div>
         </div>
         <div class="bio-section bio-spec-lo-section">
@@ -62,13 +71,16 @@
               <span>4</span>
               <span>0.5</span>
             </div>
-            <canvas id="spec-lo-canvas" width="280" height="76"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-lo-canvas" width="280" height="76"></canvas>
+            </div>
           </div>
         </div>
-        <div class="bio-section bio-spec-audio-section">
+        <div class="bio-section bio-spec-audio-section" id="an-audio-section">
           <div class="bio-section-header">
             <span class="bio-label">AUDIO TEMPO</span>
-            <span class="bio-entrain-value" id="bio-entrain-value"></span>
+            <span class="bio-entrain-value" id="an-entrain-value"></span>
+            <span class="bio-window-stat" id="an-entrain-avg"></span>
           </div>
           <div class="bio-spec-body">
             <div class="bio-spec-axis">
@@ -76,10 +88,12 @@
               <span>2.5</span>
               <span>0.5</span>
             </div>
-            <canvas id="spec-audio-canvas" width="280" height="46"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-spec-audio-canvas" width="280" height="46"></canvas>
+            </div>
           </div>
-          <div class="bio-entrain-bar" id="bio-entrain-bar">
-            <div class="bio-entrain-fill" id="bio-entrain-fill"></div>
+          <div class="bio-entrain-bar" id="an-entrain-bar">
+            <div class="bio-entrain-fill" id="an-entrain-fill"></div>
           </div>
         </div>
         <div class="bio-section">
@@ -87,38 +101,46 @@
             <span class="bio-label">EEG BANDS</span>
           </div>
           <div class="bio-bands-body">
-            <canvas id="band-canvas" width="200" height="75"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-band-canvas" width="200" height="75"></canvas>
+            </div>
             <div class="bio-band-legend">
-              <div class="bio-band-item" id="band-item-delta"><span class="glyph-delta">δ</span><span class="bio-band-val" id="band-val-delta">—</span></div>
-              <div class="bio-band-item" id="band-item-theta"><span class="glyph-theta">θ</span><span class="bio-band-val" id="band-val-theta">—</span></div>
-              <div class="bio-band-item" id="band-item-alpha"><span class="glyph-alpha">α</span><span class="bio-band-val" id="band-val-alpha">—</span></div>
-              <div class="bio-band-item" id="band-item-beta"><span class="glyph-beta">β</span><span class="bio-band-val" id="band-val-beta">—</span></div>
-              <div class="bio-band-item" id="band-item-gamma"><span class="glyph-gamma">γ</span><span class="bio-band-val" id="band-val-gamma">—</span></div>
+              <div class="bio-band-item" id="an-band-item-delta"><span class="glyph-delta">δ</span><span class="bio-band-val" id="an-band-val-delta">—</span><span class="bio-band-avg" id="an-band-avg-delta">—</span></div>
+              <div class="bio-band-item" id="an-band-item-theta"><span class="glyph-theta">θ</span><span class="bio-band-val" id="an-band-val-theta">—</span><span class="bio-band-avg" id="an-band-avg-theta">—</span></div>
+              <div class="bio-band-item" id="an-band-item-alpha"><span class="glyph-alpha">α</span><span class="bio-band-val" id="an-band-val-alpha">—</span><span class="bio-band-avg" id="an-band-avg-alpha">—</span></div>
+              <div class="bio-band-item" id="an-band-item-beta"><span class="glyph-beta">β</span><span class="bio-band-val" id="an-band-val-beta">—</span><span class="bio-band-avg" id="an-band-avg-beta">—</span></div>
+              <div class="bio-band-item" id="an-band-item-gamma"><span class="glyph-gamma">γ</span><span class="bio-band-val" id="an-band-val-gamma">—</span><span class="bio-band-avg" id="an-band-avg-gamma">—</span></div>
             </div>
           </div>
         </div>
         <div class="bio-section">
           <div class="bio-section-header">
             <span class="bio-label">COMPLEXITY (MSE)</span>
-            <span class="bio-mse-value" id="bio-mse-value"></span>
+            <span class="bio-mse-value" id="an-mse-value"></span>
+            <span class="bio-window-stat" id="an-mse-avg"></span>
           </div>
           <div class="bio-mse-body">
-            <canvas id="mse-canvas" width="200" height="75"></canvas>
+            <div class="an-plot-wrap">
+              <canvas id="an-mse-canvas" width="200" height="75"></canvas>
+            </div>
             <div class="bio-mse-legend">
-              <div class="bio-mse-item"><span class="glyph-mse-1">τ=1</span><span class="bio-mse-val" id="mse-val-0">—</span></div>
-              <div class="bio-mse-item"><span class="glyph-mse-2">τ=3</span><span class="bio-mse-val" id="mse-val-1">—</span></div>
-              <div class="bio-mse-item"><span class="glyph-mse-3">τ=5</span><span class="bio-mse-val" id="mse-val-2">—</span></div>
-              <div class="bio-mse-item"><span class="glyph-mse-4">τ=7</span><span class="bio-mse-val" id="mse-val-3">—</span></div>
-              <div class="bio-mse-item"><span class="glyph-mse-5">τ=9</span><span class="bio-mse-val" id="mse-val-4">—</span></div>
+              <div class="bio-mse-item"><span class="glyph-mse-1">τ=1</span><span class="bio-mse-val" id="an-mse-val-0">—</span><span class="bio-mse-avg" id="an-mse-avg-0">—</span></div>
+              <div class="bio-mse-item"><span class="glyph-mse-2">τ=3</span><span class="bio-mse-val" id="an-mse-val-1">—</span><span class="bio-mse-avg" id="an-mse-avg-1">—</span></div>
+              <div class="bio-mse-item"><span class="glyph-mse-3">τ=5</span><span class="bio-mse-val" id="an-mse-val-2">—</span><span class="bio-mse-avg" id="an-mse-avg-2">—</span></div>
+              <div class="bio-mse-item"><span class="glyph-mse-4">τ=7</span><span class="bio-mse-val" id="an-mse-val-3">—</span><span class="bio-mse-avg" id="an-mse-avg-3">—</span></div>
+              <div class="bio-mse-item"><span class="glyph-mse-5">τ=9</span><span class="bio-mse-val" id="an-mse-val-4">—</span><span class="bio-mse-avg" id="an-mse-avg-4">—</span></div>
             </div>
           </div>
         </div>
         <div class="bio-section">
           <div class="bio-section-header">
             <span class="bio-label">PPG</span>
-            <span class="bio-hr" id="bio-hr"></span>
+            <span class="bio-hr" id="an-hr"></span>
+            <span class="bio-window-stat" id="an-hr-avg"></span>
           </div>
-          <canvas id="ppg-canvas" width="280" height="60"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-ppg-canvas" width="280" height="60"></canvas>
+          </div>
         </div>
         <div class="bio-section">
           <div class="bio-section-header">
@@ -128,9 +150,30 @@
               <span class="glyph-imu-gyro">G</span>
             </span>
           </div>
-          <canvas id="imu-canvas" width="280" height="60"></canvas>
+          <div class="an-plot-wrap">
+            <canvas id="an-imu-canvas" width="280" height="60"></canvas>
+          </div>
         </div>
       </div>
+
+      <!-- Movie-style transport: moves the playhead every panel renders at. -->
+      <div class="scrubber" id="scrubber" hidden>
+        <button class="scrub-play" id="scrub-play" title="Play / pause (Space)">▶</button>
+        <span class="scrub-time" id="scrub-time">00:00</span>
+        <div class="scrub-timeline" id="scrub-timeline" title="Shortcuts: ← / → to skip 5s, Home / End for start / end">
+          <div class="scrub-track" id="scrub-track">
+            <div class="scrub-fill" id="scrub-fill"></div>
+            <div class="scrub-head" id="scrub-head"></div>
+          </div>
+          <canvas class="scrub-ribbon" id="scrub-ribbon"></canvas>
+          <div class="scrub-ticks" id="scrub-ticks"></div>
+          <div class="scrub-hover-time" id="scrub-hover-time" hidden></div>
+        </div>
+        <span class="scrub-time scrub-duration" id="scrub-duration">00:00</span>
+        <button class="scrub-btn" id="scrub-live" title="Jump to the latest data (End)">● LIVE</button>
+        <button class="scrub-btn" id="scrub-speed" title="Playback speed">1×</button>
+      </div>
+
       <div class="eeg-controls" id="eeg-controls">
         <span class="eeg-battery" id="eeg-status" title="Battery">
           <svg class="battery-icon" viewBox="0 0 10 22" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -144,10 +187,14 @@
         <button class="bio-record" id="bio-record" hidden title="Record raw data to JSONL">⏺</button>
         <span class="bio-record-time" id="bio-record-time" hidden></span>
         <button id="pause-btn" hidden title="Pause/resume playback">⏸</button>
-        <button id="mic-btn" title="Use microphone as audio source">🎤</button>
+        <button id="mic-btn" title="Use microphone as audio source">Microphone</button>
         <label class="controls-upload-btn" title="Upload audio file">
           ↑ Track
           <input type="file" id="audio-upload" accept="audio/*" />
+        </label>
+        <label class="controls-upload-btn" title="Load a saved .jsonl recording to analyze">
+          ↑ Recording
+          <input type="file" id="recording-upload" accept=".jsonl,application/x-ndjson" />
         </label>
       </div>
 

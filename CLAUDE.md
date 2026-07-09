@@ -14,21 +14,23 @@ No test suite is configured.
 
 ## Architecture
 
-**Nouscope** — a Muse EEG/PPG/IMU biometric visualizer. The live bio-data panel (webgl-plot line traces + 2D canvas heatmaps) IS the visualization; there is no 3D scene. Audio playback is optional and its only purpose is to drive the EEG–music entrainment analysis.
+**Nouscope** — a Muse EEG/PPG/IMU biometric visualizer. The bio-data panel (webgl-plot line traces + 2D canvas heatmaps) IS the visualization; there is no 3D scene. Audio playback is optional and its only purpose is to drive the EEG–music entrainment analysis.
+
+**One data view.** There is no live-vs-analysis split. Connecting a headset starts an always-on capture into `SessionStore`; `AnalysisDisplay` renders that store at the `Scrubber`'s playhead. Parked at the leading edge (● LIVE) the panels behave as a live monitor; dragged back, they replay the session. A loaded `.jsonl` fills the same store and drives the same panels.
 
 ### Entry Point & Boot Sequence
 
 `src/js/index.js` instantiates `App`. The `App` constructor immediately:
 1. Wires the `↑ Track` file-upload input (first upload starts audio; later uploads swap the track)
-2. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires the connect/disconnect UI and the `◉` bio-panel toggle
+2. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires connect/disconnect (and reads the `?sim` developer flag)
 3. `_setupRecording()` — instantiates `RecordingManager`, wires the `⏺` record button
-4. `_setupFullscreen()` — wires the `⛶` full-screen bio-panel toggle + Escape key
+4. `_setupAnalysis()` — instantiates `SessionStore`, `AnalysisDisplay`, `Scrubber`; wires the `↑ Recording` file input
 5. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
 
 Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
 
 - **`↑ Track` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
-- **`🎤` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
+- **`Microphone` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
 There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.
 
@@ -41,26 +43,30 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/managers/BPMManager.js` | Tempo detection via `web-audio-beat-detector`; exposes `bpmValue` (recording metadata). No beat events. |
 | `src/js/managers/EntrainmentManager.js` | Real-time EEG–music entrainment: parallel audio/EEG tempograms (0.5–5 Hz), z-score selective enhancement comparison, entrainment index (0–1) |
 | `src/js/managers/ComplexityManager.js` | Multiscale entropy (MSE) on quality-weighted 4-channel EEG average; SampEn at 6 scales, updated ~0.2 Hz; exposes `mseCurve` + `complexity` scalar |
-| `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file |
+| `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file. `onRecord` sink fans every record to `SessionStore` too. |
 | `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
-| `src/js/ui/BioDataDisplay.js` | Live webgl-plot panel: scrolling EEG (4ch), PPG, and IMU (accel+gyro) traces; spectrograms; audio tempogram; entrainment meter; signal quality dots |
+| `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. |
+| `src/js/managers/SimulatedMuse.js` | Drop-in `MuseClient` replacement emitting synthetic EEG/PPG/IMU/telemetry packets in native muse-js shape, so the whole pipeline runs with no hardware. Developer-only, no UI: `?sim` makes `Connect EEG` use it; `?sim=auto` connects on load |
+| `src/js/ui/AnalysisDisplay.js` | The only renderer: `renderAt(store, cursor)` redraws every panel from a `SessionStore`, each over its own fixed window ending at `cursor` (min/max-decimated line plots, time-mapped spectrogram blits); readouts show the instant value at `cursor` plus the average over that panel's window |
+| `src/js/ui/Scrubber.js` | Transport: playhead cursor, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track; hover-time preview pill |
+| `src/js/ui/bioRender.js` | Shared render constants + primitives (viridis LUT, EEG/IMU scales, `PANEL_WINDOWS`, color tokens, `paintSpecColumn`) |
 
 ### Update Loop
 
 Each frame in `App.update()`:
 1. `EEGManager.update(performance.now())` — advances the heart-rate phase oscillator, processes buffered samples
-2. `_updateBioPanel()` — signal-quality dots, HR readout, and (when visible) `BioDataDisplay.update()`
-3. `AudioManager.update()` — refreshes FFT analyser data + samples spectral-flux novelty (no-op when not playing)
-4. `EntrainmentManager.update(now)` — rate-limited to ~2 Hz; computes audio/EEG tempograms and entrainment index
-5. `ComplexityManager.update(now)` — rate-limited to ~0.2 Hz; computes 6-scale MSE on the EEG long buffer
+2. `AudioManager.update()` — refreshes FFT analyser data + samples spectral-flux novelty (no-op when not playing)
+3. `EntrainmentManager.update(now)` — rate-limited to ~2 Hz; computes audio/EEG tempograms and entrainment index
+4. `ComplexityManager.update(now)` — rate-limited to ~0.2 Hz; computes 6-scale MSE on the EEG long buffer
+5. `_tapLiveColumns()` — copies new spectrogram/tempogram columns from the managers into `SessionStore` (the JSONL stream carries no columns)
 
-There is no 3D render step — the bio-panel canvases are updated directly by `BioDataDisplay`.
+Panel drawing is **not** in this loop: `Scrubber` runs its own rAF loop and calls `AnalysisDisplay.renderAt(store, cursor)`. There is no 3D render step.
 
 ### EEGManager — Signal Processing
 
-- **EEG bands** (see `docs/algorithms.md` §3): rolling 256-sample buffers per channel; delta (1–4 Hz) via sparse Hann-weighted DFT bins 1–3; theta–gamma via Morlet wavelet mean power; quality-weighted channel aggregation with optional drops; aperiodic (1/f) background normalization; relative `bandPower { delta, theta, alpha, beta, gamma }`. `normalizeBands` (a fixed `Set`, default `theta/alpha/beta/gamma`) selects which bands participate in the normalization sum; delta is excluded by default so its movement-prone power cannot swamp the higher bands. Temporal smoothing: source EMA (`BAND_SMOOTH=0.35`) and display lerp (`BAND_LERP=0.08`) in BioDataDisplay.
-- **Spectrogram** (display only): separate Hann-DFT pipelines — main panel: bins 1–50 Hz at 1 Hz from the 256-sample window; low-frequency panel: 0.5–8.0 Hz at 0.1 Hz from a 2560-sample (10 s) buffer. Quality-weighted channel average; log₁₀(power) columns in rolling buffers (`spectrumSampleCount`, `spectrumLoSampleCount`). Robust auto-scaling (percentile window + cap) lives in `BioDataDisplay`.
-- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape).
+- **EEG bands** (see `docs/algorithms.md` §3): rolling 256-sample buffers per channel; delta (1–4 Hz) via sparse Hann-weighted DFT bins 1–3; theta–gamma via Morlet wavelet mean power; quality-weighted channel aggregation with optional drops; aperiodic (1/f) background normalization; relative `bandPower { delta, theta, alpha, beta, gamma }`. `normalizeBands` (a fixed `Set`, default `theta/alpha/beta/gamma`) selects which bands participate in the normalization sum; delta is excluded by default so its movement-prone power cannot swamp the higher bands. Temporal smoothing: source EMA (`BAND_SMOOTH=0.35`), plus a display-side one-pole filter across pixels in `AnalysisDisplay._renderBands` (`BAND_SMOOTH_TAU=0.21 s`).
+- **Spectrogram** (display only): separate Hann-DFT pipelines — main panel: bins 1–50 Hz at 1 Hz from the 256-sample window; low-frequency panel: 0.5–8.0 Hz at 0.1 Hz from a 2560-sample (10 s) buffer. Quality-weighted channel average; log₁₀(power) columns in rolling buffers (`spectrumSampleCount`, `spectrumLoSampleCount`). Columns are tapped into `SessionStore` each frame by `App._tapLiveColumns`; robust auto-scaling (percentile + cap) lives in `bioRender.specColumnsScale`.
+- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape). **Known limitation**: the first-order bandpass barely discriminates inside its passband, so an ~0.8 Hz motion artifact above ~2× pulse amplitude captures the estimate and HR collapses toward the artifact rate — see `docs/algorithms.md` §4.
 - **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians. Gyroscope also subscribed.
 - `enablePpg = true` must be set on `MuseClient` before `connect()` — already handled in `EEGManager.connect()`.
 - **Display buffers**: `eegChannels[4]` (1024-sample rolling), `ppgDisplay` getter (384-sample rolling), `accelDisplay`/`gyroDisplay` ({x,y,z} rolling). Monotonic counters `eegSampleCount`, `ppgSampleCount`, `imuSampleCount` allow consumers to detect new samples even after buffers reach capacity.
@@ -89,7 +95,7 @@ There is no 3D render step — the bio-panel canvases are updated directly by `B
 
 ### RecordingManager — JSONL Data Export
 
-- **Pattern**: push-based. EEGManager/EntrainmentManager/ComplexityManager/BPMManager call `App.recordingManager?.recordX(...)` at data-production sites; when `isRecording=false`, the calls are cheap no-ops
+- **Pattern**: push-based. EEGManager/EntrainmentManager/ComplexityManager/BPMManager call `App.recordingManager?.recordX(...)` at data-production sites; with neither `isRecording` nor `captureActive`, the calls are cheap no-ops
 - **Record types** (`t` is ms since start):
   - `eeg` — `ch:[tp9,af7,af8,tp10]` at 256 Hz (raw µV from Muse)
   - `ppg` — `raw` at 64 Hz (unfiltered infrared)
@@ -100,26 +106,23 @@ There is no 3D render step — the bio-panel canvases are updated directly by `B
   - `entrain` — `idx` at ~2 Hz (smoothed entrainment)
   - `mse` — `curve[]`, `complexity` at ~0.2 Hz
   - `meta` header line at start with ISO timestamp, sample rates, channel labels, `audioBpm`
-- **UI**: `⏺` button in `#eeg-controls` (visible only when EEG connected); active state is red with pulse animation; elapsed time `MM:SS` shown next to button
+- **Capture vs. record**: capture starts on EEG connect (`enableCapture()` stamps the session epoch and retains every serialized record in `_backlog`). `⏺` starts *saving*: `start()` writes the `meta` header, then the whole backlog, then keeps streaming — so **`t=0` in a saved file is when capture began, not when the button was pressed**. Bounded by `BACKLOG_MAX_BYTES` (64 MB ≈ 35 min); past that the oldest lines are dropped and a warning is logged.
+- **UI**: `⏺` button in `#eeg-controls` (visible only when EEG connected); active state is red with pulse animation; `MM:SS` next to it is the length of the data in the file (since the capture epoch), so it jumps to the buffered duration on press
 - **Download**: on stop, lines joined with `\n`, wrapped in `Blob` (`application/x-ndjson`), downloaded as `nouscope-{iso-ts}.jsonl` via anchor tag (streaming File System Access path returns null and writes to disk directly)
 
-### Full-screen Bio Panel
+### The Data Panel — Scrubbable, Always
 
-- `⛶` button in `#eeg-controls` (visible only when EEG connected) toggles `body.fullscreen-bio` class
-- CSS grids `#bio-panel` into a 2-column full-viewport layout
-- Canvases CSS-scale to fill their grid cells (`image-rendering: pixelated` keeps spectrograms crisp; webgl-plot line traces scale smoothly)
-- Escape key exits fullscreen; EEG disconnect also clears the mode
+One panel (`#analysis-panel`, `an-`-prefixed IDs), rendered by `AnalysisDisplay.renderAt(store, cursor)` from a `SessionStore`. See `docs/algorithms.md §9`.
 
-### BioDataDisplay — Live Data Panel
+- **Shown** whenever there's a session: EEG connect brings it up following the live edge; `↑ Recording` loads a `.jsonl` and opens at its start. `body.analysis-mode` grids it into a 2-column full-viewport layout above the scrubber. Disconnect leaves it up (still scrubbable) and stops following.
+- **Two data sources, one store**: while EEG is connected an always-on capture (`RecordingManager.captureActive` → `onRecord` → `SessionStore.ingest`) feeds the timeline — no explicit recording needed. Live spectrogram/tempogram columns are tapped from the managers each frame (`App._tapLiveColumns`); for loaded files spectrograms are recomputed from EEG (audio tempogram can't be — no audio stored).
+- **Per-panel time windows** (`PANEL_WINDOWS` in `bioRender.js`), each ending at the playhead: EEG 2 s, PPG 6 s, IMU 4 s, bands 5 s, MSE 30 s, all three spectrograms 70 s. These reproduce the spans the old live scrolling panel had. A single shared window across all panels is wrong in both directions — do not reintroduce one.
+- **Plots**: `WebglLineRoll` for EEG (4ch stacked), PPG (detrended + robust-peak scaled), IMU (accel+gyro, 6 lines), bands (5 lines), MSE (5 lines). Three 2D `<canvas>` viridis heatmaps: `#an-spec-canvas` (8–50 Hz), `#an-spec-lo-canvas` (0.5–8 Hz @ 0.1 Hz), `#an-spec-audio-canvas` (0.5–5 Hz tempogram). Entrainment meter bar; per-channel quality dots. Readouts show the value at the playhead plus the average over that panel's own window.
+- **Scrubber** (`#scrubber`, fixed bottom bar): play/pause, click/drag timeline, ● LIVE (follow the growing edge), speed (1×/2×/4×). Keyboard: Space, ←/→, Home/End. It owns only the playhead — window widths belong to the renderer. The timeline (`#scrub-timeline`) also carries a per-channel signal-quality ribbon and event ticks (music BPM changes, recording gaps).
 
-- Toggle button `◉` appears in `#eeg-controls` once EEG connects; opens `#bio-panel` above controls.
-- Three `WebglLineRoll` plots (webgl-plot library): EEG 4-channel stacked, PPG single trace (auto-scaled), IMU accel+gyro 6 lines.
-- **Spectrogram**: Two 2D `<canvas>` heatmaps with viridis colormap on log₁₀ power, auto-scaled. Full spectrogram (`#spec-canvas`, 280×86 px): bins 8–50 Hz. Low-frequency panel (`#spec-lo-canvas`, 280×76 px): 0.5–8.0 Hz at 0.1 Hz. Scrolling via `drawImage(canvas, -2, 0)`. Frequency axis labels alongside each canvas.
-- **Audio tempogram**: `#spec-audio-canvas` (280×46 px): 0.5–5.0 Hz at 0.1 Hz, viridis colormap. Scrolling heatmap of spectral-flux novelty DFT power. Visible when audio is playing.
-- **Entrainment meter**: horizontal bar (`#bio-entrain-bar`) with gradient fill showing entrainment percentage. Label in `#bio-entrain-value`.
-- **EEG Bands** relative-power chart + **Complexity (MSE)** bar chart.
-- Signal quality shown as colored dots (green/yellow/red) per EEG channel.
-- Panel and toggle hidden when EEG is disconnected.
+### Data Simulator
+
+`SimulatedMuse` (`src/js/managers/SimulatedMuse.js`) stands in for `MuseClient`, emitting synthetic packets on the same rxjs observables in the same native shape, so the whole pipeline runs with no hardware. It is a **developer option with no UI**: `?sim` in the URL makes `Connect EEG` stream synthetic data instead of talking to Web Bluetooth; `?sim=auto` connects on page load (handy for screenshots and automated checks). Signals include a 10 Hz alpha rhythm with a slow envelope, a 2 Hz beat-locked component for the entrainment meter, blink artifacts on AF7/AF8, and a realistic raw-infrared PPG waveform. See `docs/algorithms.md §10`.
 
 ### Standing Rules
 

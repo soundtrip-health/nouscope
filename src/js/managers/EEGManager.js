@@ -1,4 +1,5 @@
 import { MuseClient, zipSamples } from 'muse-js'
+import SimulatedMuse from './SimulatedMuse'
 import App from '../App'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -173,6 +174,7 @@ function _msptdDetect(sig, fs, minHrHz = HR_MIN / 60) {
 export default class EEGManager {
   // Public state
   isConnected = false
+  isSimulated = false           // true when streaming from SimulatedMuse, not hardware
   bandPower   = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 }
   heartRate   = 70               // BPM (initialised to resting nominal)
   heartPulse  = 0                // 0–1 oscillator synced to heartRate
@@ -284,11 +286,19 @@ export default class EEGManager {
    * Connect to a Muse headset via Web Bluetooth and start streaming.
    * Subscribes to EEG, PPG (infrared), and accelerometer data.
    * Requires a user gesture and HTTPS (Web Bluetooth requirement).
+   *
+   * With `{ simulate: true }` a `SimulatedMuse` stands in for the real client:
+   * it emits synthetic packets on the same observables, in the same shape, so
+   * everything below this line — and everything downstream of this manager —
+   * is unaware of the difference. No hardware, no Web Bluetooth, no gesture.
+   *
+   * @param {{simulate?: boolean}} [opts]
    * @returns {Promise<void>}
    */
-  async connect() {
-    this._client = new MuseClient()
+  async connect({ simulate = false } = {}) {
+    this._client = simulate ? new SimulatedMuse() : new MuseClient()
     this._client.enablePpg = true   // must set BEFORE connect()
+    this.isSimulated = simulate
 
     await this._client.connect()
     await this._client.start()
@@ -414,6 +424,7 @@ export default class EEGManager {
 
   _handleDisconnect() {
     this.isConnected = false
+    this.isSimulated = false
     this.batteryLevel = null
     this.deviceName = null
     this.deviceInfo = null
@@ -754,8 +765,8 @@ export default class EEGManager {
 
   /**
    * Compute a quality-weighted Hann-DFT spectrogram column (bins 1–50 Hz).
-   * Stores log₁₀(power) in a rolling buffer for BioDataDisplay rendering.
-   * Artifact-robust auto-scaling is handled in BioDataDisplay (percentile window + cap).
+   * Stores log₁₀(power) in a rolling buffer, tapped each frame into the SessionStore.
+   * Artifact-robust auto-scaling is handled at render time (percentile window + cap).
    *
    * @param {number[]} weights — normalised channel weights
    * @param {number}   totalW  — sum of weights
@@ -788,7 +799,7 @@ export default class EEGManager {
   /**
    * Hi-res low-frequency spectrogram (0.5–8.0 Hz at 0.1 Hz resolution).
    * Uses the 2560-sample (10 s) long buffer for true sub-Hz frequency resolution.
-   * Artifact-robust auto-scaling is handled in BioDataDisplay (percentile window + cap).
+   * Artifact-robust auto-scaling is handled at render time (percentile window + cap).
    */
   _computeSpectrumLo(weights, totalW) {
     if (totalW === 0) return
@@ -996,9 +1007,16 @@ export default class EEGManager {
     }
     if (ibis.length === 0) return
 
-    // Median IBI → stable heart rate estimate
+    // Median IBI → stable heart rate estimate. For an even count the median is
+    // the mean of the two middle values; taking `sorted[n/2]` alone picks the
+    // upper one, which biases the IBI up and so the reported BPM *down* by
+    // ~1 bpm at rest and more as beat-to-beat variability grows. A 6 s window
+    // usually holds an even number of IBIs, so this was the common case.
     const sorted = [...ibis].sort((a, b) => a - b)
-    const medIBI = sorted[Math.floor(sorted.length / 2)]
+    const mid = sorted.length >> 1
+    const medIBI = sorted.length % 2
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2
     this.heartRate = Math.round(60 / medIBI)
 
     App.recordingManager?.recordHr(this.heartRate)

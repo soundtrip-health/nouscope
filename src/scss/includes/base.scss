@@ -145,6 +145,21 @@ a:focus-visible {
   align-items: center;
   gap: 0.6rem;
 
+  // Uniform box height across every control (buttons + upload labels) so the
+  // bar reads as one row; each keeps its own horizontal padding / font.
+  // `:not([hidden])` so this display rule doesn't override the hidden attribute
+  // on the pause / record buttons.
+  button:not([hidden]),
+  .controls-upload-btn:not([hidden]) {
+    height: 2rem;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
   #eeg-connect {
     background: none;
     border: 1px solid var(--border-control);
@@ -188,8 +203,9 @@ a:focus-visible {
     border: 1px solid var(--border-control);
     color: var(--color-text);
     font-family: inherit;
-    font-size: 0.85rem;
-    padding: 0.3rem 0.6rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    padding: 0.3rem 0.8rem;
     cursor: pointer;
     transition: border-color 0.2s, background 0.2s, color 0.2s;
 
@@ -330,6 +346,15 @@ a:focus-visible {
   letter-spacing: 0.04em;
 }
 
+// Window average next to a headline instant value (HR, MSE complexity,
+// entrainment) — see `AnalysisDisplay._renderReadouts`.
+.bio-window-stat {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 0.3rem;
+}
+
 .bio-bands-body {
   display: flex;
   align-items: stretch;
@@ -377,6 +402,14 @@ a:focus-visible {
   min-width: 2.4rem;
 }
 
+// Window average for this band (the item rows are already `display: flex;
+// gap: 0.3rem`, so this just falls into place after the instant value).
+.bio-band-avg {
+  font-size: 0.55rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-axis);
+}
+
 .bio-mse-body {
   display: flex;
   align-items: stretch;
@@ -407,6 +440,13 @@ a:focus-visible {
   min-width: 2.4rem;
 }
 
+// Window average for this τ-scale — see `.bio-band-avg` above.
+.bio-mse-avg {
+  font-size: 0.55rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-axis);
+}
+
 .bio-spec-body {
   display: flex;
   align-items: stretch;
@@ -433,7 +473,8 @@ a:focus-visible {
   text-align: right;
 }
 
-#spec-canvas, #spec-lo-canvas, #spec-audio-canvas {
+#spec-canvas, #spec-lo-canvas, #spec-audio-canvas,
+#an-spec-canvas, #an-spec-lo-canvas, #an-spec-audio-canvas {
   image-rendering: pixelated;
 }
 
@@ -471,6 +512,18 @@ a:focus-visible {
   display: block;
   width: 280px;
   height: auto;
+}
+
+// ── Plot sizing ─────────────────────────────────────────────────────────────
+// Each canvas is wrapped so the wrap takes over the `flex: 1` sizing the bare
+// canvas used to get from its flex container (`.bio-section` column, or the
+// `bio-*-body` rows) — keeping every panel's layout independent of the canvas's
+// intrinsic size.
+.an-plot-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
 .eeg-quality-dots {
@@ -537,11 +590,11 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-// ── Fullscreen bio panel ──────────────────────────────────────────────────────
-// Full-viewport data view. Lays out all bio sections in a responsive grid.
-// CSS-scales canvases (image-rendering: pixelated on spectrograms keeps columns
-// crisp; webgl-plot line traces scale smoothly).
-body.fullscreen-bio {
+// ── Full-viewport data panel ──────────────────────────────────────────────────
+// Lays out all bio sections in a responsive grid. CSS-scales canvases
+// (image-rendering: pixelated on spectrograms keeps columns crisp; webgl-plot
+// line traces scale smoothly). Applied whenever a session is on screen.
+body.analysis-mode {
   .bio-panel {
     position: fixed;
     inset: 0;
@@ -590,10 +643,197 @@ body.fullscreen-bio {
   .bio-mse-legend       { font-size: 0.9rem; }
   .bio-band-val,
   .bio-mse-val          { font-size: 0.8rem; min-width: 3rem; }
+  .bio-window-stat      { font-size: 0.75rem; }
+  .bio-band-avg,
+  .bio-mse-avg          { font-size: 0.7rem; }
   .bio-spec-axis        { font-size: 0.7rem; min-width: 1.6rem; }
 
   // Keep controls on top and clickable
   .eeg-controls { z-index: 1005; }
+}
+
+// The panel leaves room at the bottom for the scrubber.
+body.analysis-mode {
+  #analysis-panel {
+    height: calc(100vh - 4.5rem);
+    max-height: calc(100vh - 4.5rem);
+    bottom: 4.5rem;
+  }
+
+  // Lift the live controls above the full-width scrubber so Connect/Record stay
+  // reachable while reviewing.
+  .eeg-controls {
+    bottom: 4.75rem;
+    z-index: 1007;
+  }
+}
+
+// Movie-style scrubber.
+.scrubber {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1006;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1.5rem;
+  background: var(--surface-panel);
+  border-top: 1px solid var(--border-hairline);
+
+  &[hidden] { display: none; }
+}
+
+.scrub-play {
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  line-height: 1;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.2s, background 0.2s;
+
+  &:hover { border-color: var(--color-text); background: var(--wash-hover); }
+}
+
+.scrub-time {
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-value);
+  letter-spacing: 0.05em;
+  min-width: 3rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.session-label {
+  position: fixed;
+  top: 1.5rem;
+  right: 1.5rem;
+  z-index: 1006;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+
+  &:empty { display: none; }
+}
+
+.scrub-timeline {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.scrub-track {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.scrub-ribbon {
+  display: block;
+  width: 100%;
+  height: 20px;   // 4 stacked per-channel rows (TP9/AF7/AF8/TP10), each with a gap below it
+  border-radius: 2px;
+}
+
+// Event ticks (music BPM changes, recording gaps) — one absolutely-positioned
+// hairline per event, spanning the track + ribbon like chapter markers.
+.scrub-ticks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.scrub-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+
+  &.scrub-tick--music { background: var(--color-text); opacity: 0.6; }
+  &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
+}
+
+// Floating time preview that tracks the pointer on hover/drag, before a seek
+// is committed — standard scrubber affordance so a click's target is visible
+// in advance. Positioned in JS (see `Scrubber._showHoverTime`).
+.scrub-hover-time {
+  position: absolute;
+  bottom: 100%;
+  margin-bottom: 6px;
+  transform: translateX(-50%);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-value);
+  white-space: nowrap;
+  pointer-events: none;
+
+  &[hidden] { display: none; }
+}
+
+.scrub-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--entrain-from), var(--entrain-to));
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.scrub-head {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+}
+
+.scrub-btn {
+  position: relative;
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+
+  &:hover { border-color: var(--color-text); background: var(--wash-hover); }
+
+  &.active {
+    color: var(--status-record);
+    border-color: var(--status-record);
+  }
 }
 
 .browser-warning {
