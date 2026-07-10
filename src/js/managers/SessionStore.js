@@ -9,11 +9,15 @@
  *     (the JSONL carries no spectrogram columns).
  *
  * Raw sensor streams (eeg/ppg/accel/gyro) are placed on a regular per-stream
- * grid using their native 16-bit muse-js `index`/`sequenceId` counters — a
- * direct JS port of `analysis/utils.py` (`_unwrap_counter`, `packets_to_grid`).
- * Each raw stream's t=0 is its own first sample; derived streams (bands/hr/
- * mse/entrain/music) carry `t` (ms since record start → seconds). As in the
- * Python pipeline, raw and derived series may sit a small offset apart.
+ * grid using their native 16-bit muse-js `index`/`sequenceId` counters for
+ * relative spacing — a direct JS port of `analysis/utils.py`
+ * (`_unwrap_counter`, `packets_to_grid`) — anchored to an absolute origin via
+ * each record's own `t` (ms since capture epoch, the same clock derived
+ * streams use; see `_anchorStream`). Derived streams (bands/hr/mse/entrain/
+ * music) carry that same `t` directly. Recordings made before raw records
+ * carried `t` fall back to anchoring at each stream's own first sample, which
+ * can sit a small offset apart from the derived series (as in the Python
+ * pipeline, which never gained the `t` fix).
  *
  * All public time values are in **seconds** from session start.
  */
@@ -445,7 +449,7 @@ export default class SessionStore {
         // its row and corrupt channel 0 of the next sample. Ignore them.
         if (r.electrode < 0 || r.electrode >= this.eeg.nChannels) break
         const idx = this._unwrap(this._eegState, r.electrode, r.index)
-        this._anchorStream(this.eeg, idx, EEG_FS)
+        this._anchorStream(this.eeg, idx, EEG_FS, r.t)
         const start = (idx - this.eeg.seqStart) * EEG_SPP + this.eeg.startOffset
         if (start >= 0) this.eeg.writeChannelBlock(start, r.electrode, r.samples)
         break
@@ -453,7 +457,7 @@ export default class SessionStore {
       case 'ppg': {
         if (r.ppgChannel !== PPG_INFRARED) break
         const idx = this._unwrap(this._ppgState, r.ppgChannel, r.index)
-        this._anchorStream(this.ppg, idx, PPG_FS)
+        this._anchorStream(this.ppg, idx, PPG_FS, r.t)
         const start = (idx - this.ppg.seqStart) * PPG_SPP + this.ppg.startOffset
         if (start >= 0) this.ppg.writeChannelBlock(start, 0, r.samples)
         break
@@ -484,7 +488,7 @@ export default class SessionStore {
 
   _ingestImu(stream, state, r) {
     const idx = this._unwrap(state, 0, r.sequenceId)
-    this._anchorStream(stream, idx, IMU_FS)
+    this._anchorStream(stream, idx, IMU_FS, r.t)
     const start = (idx - stream.seqStart) * IMU_SPP + stream.startOffset
     if (start < 0) return
     const rows = r.samples.map(s => [s.x, s.y, s.z])
@@ -492,15 +496,24 @@ export default class SessionStore {
   }
 
   /**
-   * Fix a raw stream's grid origin on its first packet: t=0 at the first sample
-   * for a fresh session, or the current elapsed time when re-anchoring after a
-   * reconnect (`continueLive`) so new data appends after the kept session with a
-   * NaN gap spanning the outage. Idempotent once `seqStart` is set.
+   * Fix a raw stream's grid origin on its first packet. The packet's own
+   * `tMs` (ms since capture epoch — the same clock derived records use) gives
+   * the real origin directly, so it also survives a backlog-trimmed file: if
+   * the retained recording only starts partway into the session, the stream
+   * still lands on the correct absolute offset instead of being mistaken for
+   * a fresh session starting at t=0 (which desyncs it from bands/hr/mse,
+   * whose `t` is never re-anchored). Older recordings without `t` on raw
+   * records fall back to the previous behaviour: t=0 at the first sample, or
+   * the current elapsed time when re-anchoring after a reconnect
+   * (`continueLive`) so new data appends after the kept session with a NaN
+   * gap spanning the outage. Idempotent once `seqStart` is set.
    */
-  _anchorStream(stream, idx, fs) {
+  _anchorStream(stream, idx, fs, tMs) {
     if (stream.seqStart !== null) return
     stream.seqStart = idx
-    stream.startOffset = this._continuing ? Math.round(this.liveElapsed() * fs) : 0
+    stream.startOffset = Number.isFinite(tMs)
+      ? Math.round((tMs / 1000) * fs)
+      : (this._continuing ? Math.round(this.liveElapsed() * fs) : 0)
   }
 
   /**
