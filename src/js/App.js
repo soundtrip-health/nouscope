@@ -156,7 +156,10 @@ export default class App {
       btn.textContent = 'Connect EEG'
       btn.disabled = false
       updateBattery(null)
-      if (this._recordBtn) this._recordBtn.hidden = true
+      // Keep it visible/clickable while a recording is in flight — otherwise a
+      // disconnect (BT dropout, or just clicking "Disconnect EEG" mid-recording)
+      // hides the only way to stop and download it until the user reconnects.
+      if (this._recordBtn && !App.recordingManager?.isRecording) this._recordBtn.hidden = true
       // Stop feeding the store, but keep the captured session on screen: the
       // panel stays up so the user can scrub back through what was recorded.
       App.recordingManager?.disableCapture()
@@ -255,6 +258,9 @@ export default class App {
         btn.classList.remove('active')
         btn.title = 'Record raw data to JSONL'
         timeEl.hidden = true
+        // Catch up on a hide the disconnect handler deferred while this recording
+        // was in flight (see onDisconnected in _setupEEG).
+        if (!App.eegManager?.isConnected) btn.hidden = true
       } else {
         const eeg = App.eegManager
         const started = await rm.start({
