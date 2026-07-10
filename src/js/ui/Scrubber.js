@@ -232,7 +232,10 @@ export default class Scrubber {
   seek(tSeconds) {
     const dur = this._durationOr0()
     this._cursor = Math.max(0, Math.min(dur, tSeconds))
-    this._following = false
+    // Landing exactly on the live edge (drag-to-the-far-right, or a keyboard
+    // nudge that happens to reach it) re-engages live mode, same as clicking
+    // ● LIVE — otherwise it'd take a second explicit click to resume following.
+    this._following = dur > 0 && this._cursor >= dur - 0.01
     this._dirty = true
   }
 
@@ -266,7 +269,9 @@ export default class Scrubber {
       needRender = true
     } else if (this._playing) {
       this._cursor += dt * SPEEDS[this._speedIdx]
-      if (this._cursor >= dur) { this._cursor = dur; this._playing = false; this._updatePlayBtn() }
+      // Playback catching up to the live edge is the same as dragging there:
+      // you're now looking at the most recent data, so re-engage live mode.
+      if (this._cursor >= dur) { this._cursor = dur; this._playing = false; this._following = true }
       needRender = true
     }
 
@@ -278,6 +283,15 @@ export default class Scrubber {
 
   _render(dur) {
     this._onFrame(this._store, this._cursor)
+
+    // Re-sync the play/pause icon and ● LIVE's red/grey state on every actual
+    // render — not just from the handful of call sites that flip `_playing`/
+    // `_following` directly (togglePlay/stopFollowing/goLive/etc). A drag-seek
+    // or the panel's first frame both change `_following` without going
+    // through any of those, so without this the button could show stale state
+    // (e.g. not starting red, or staying red after dragging away) until some
+    // unrelated call happened to refresh it.
+    this._updatePlayBtn()
 
     // Track UI.
     const frac = dur > 0 ? this._cursor / dur : 0
