@@ -1,4 +1,4 @@
-import AnalysisDisplay from './AnalysisDisplay'
+import MultiTrackDisplay from './MultiTrackDisplay'
 import { renderQualityRibbon, renderEventTicks } from './timelineDecor'
 import { cssVar } from './palette'
 
@@ -11,24 +11,25 @@ const PANEL_LABELS = {
 }
 
 // Hard cap enforced by the graph-select menu — each enabled line-plot panel
-// (all but the 3 spectrograms) holds its own WebGL context, and a handful of
+// (all but the 3 spectrograms) holds its own WebGL context, and several
 // tracks each showing every panel would blow past the browser's live-context
 // limit (~8–16). Capping per track keeps the total bounded regardless of how
 // many tracks are on screen.
-const MAX_PANELS = 4
-const LIVE_DEFAULT_PANELS = ['eeg', 'bands', 'spec', 'ppg']
-const FILE_DEFAULT_PANELS = ['eeg', 'bands', 'spec']
+export const MAX_PANELS = 4
+export const DEFAULT_PANELS = ['eeg', 'bands', 'spec']
 
-// Throttle: re-sample the quality ribbon/ticks at most this often while a live
-// session grows — see the identical guard the single-session Scrubber used to
-// have (now per-track, since each track's store grows independently).
+// Throttle: re-sample the quality ribbon/ticks at most this often while a
+// session grows — see the identical guard the original single-session
+// Scrubber has (now per-track, since each track's store grows independently).
 const RIBBON_REBUILD_MS = 1000
 
 /**
- * Track — one session lane in the multi-track review view: a `SessionStore`
- * plus the `AnalysisDisplay` that draws it, plus its own header (label, live
- * connect/record controls or a file-replace button, link/offset, graph menu)
- * and timeline strip (quality ribbon + event ticks), all wrapped in one root.
+ * Track — one loaded recording in the Multi-Track tab: a `SessionStore` plus
+ * the `MultiTrackDisplay` that draws it, plus its own header (label, a
+ * replace-recording button, link/offset, graph-select menu) and timeline
+ * strip (quality ribbon + event ticks), all wrapped in one root. This tab is
+ * file-review only — see App.js/MultiTrackApp.js — so every track is a
+ * loaded `.jsonl`; there is no live EEG connection here.
  *
  * By default a track follows the master scrubber's cursor, shifted by its own
  * `offsetSeconds` (so sessions started at different times can be lined up):
@@ -42,11 +43,10 @@ export default class Track {
   /**
    * @param {object} opts
    * @param {string} opts.id
-   * @param {'live'|'file'} opts.kind
    * @param {import('../managers/SessionStore').default} opts.store
-   * @param {HTMLElement} opts.laneEl — the cloned track-lane-template root, passed to AnalysisDisplay
+   * @param {HTMLElement} opts.laneEl — the cloned track-lane-template root, passed to MultiTrackDisplay
    * @param {string} [opts.label]
-   * @param {Set<string>|null} [opts.normalizeBands]
+   * @param {string[]|Set<string>} [opts.enabledPanels] — starting panel set; defaults to `DEFAULT_PANELS`.
    * @param {() => number} opts.getMasterDuration
    * @param {(t: number) => void} opts.seekMaster
    * @param {() => void} opts.markDirty — force the master scrubber to redraw
@@ -54,18 +54,17 @@ export default class Track {
    *   whenever this track's own `ownCursor`/`offsetSeconds`/`linked` changes,
    *   since `renderTimeline`/`renderAt` only run as part of its render loop).
    */
-  constructor({ id, kind, store, laneEl, label = '', normalizeBands = null, getMasterDuration, seekMaster, markDirty }) {
+  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty }) {
     this.id = id
-    this.kind = kind
     this.store = store
     this.label = label
     this.laneEl = laneEl
-    this.root = null   // the `.track` wrapper — set by TrackManager once mounted
+    this.root = null   // the `.mt-track` wrapper — set by TrackManager once mounted
 
     this.linked = true
     this.offsetSeconds = 0
     this.ownCursor = 0
-    this.enabledPanels = new Set(kind === 'live' ? LIVE_DEFAULT_PANELS : FILE_DEFAULT_PANELS)
+    this.enabledPanels = new Set(enabledPanels ?? DEFAULT_PANELS)
 
     this._getMasterDuration = getMasterDuration
     this._seekMaster = seekMaster
@@ -81,29 +80,31 @@ export default class Track {
     this._ribbonBuiltFor = -1
     this._ribbonLastBuiltAt = 0
 
-    this.display = new AnalysisDisplay(laneEl, { normalizeBands, enabledPanels: this.enabledPanels })
+    // Loaded files have no live EEGManager to consult for which bands
+    // participate in normalization, so show every band-legend row.
+    this.display = new MultiTrackDisplay(laneEl, { normalizeBands: null, enabledPanels: this.enabledPanels })
     this.headerEl = this._buildHeader()
     this.timelineStripEl = this._buildTimelineStrip()
     this._applyPanelVisibility()
   }
 
-  /** Left header column: controls (kind-specific) + label + link/offset/menu. */
+  /** Left header column: replace-recording button + label + link/offset/menu. */
   _buildHeader() {
     const header = document.createElement('div')
-    header.className = 'track-header'
+    header.className = 'mt-track-header'
     header.innerHTML = `
-      <div class="track-controls"></div>
-      <div class="track-strip">
-        <span class="track-label"></span>
-        <button type="button" class="track-link-btn scrub-btn" title="Unlink from master"></button>
-        <input type="number" class="track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
-        <details class="track-menu">
-          <summary class="track-menu-btn scrub-btn" title="Choose which graphs to show">☰ graphs</summary>
-          <div class="track-menu-popover">
-            <div class="track-menu-count"></div>
+      <div class="mt-track-controls"></div>
+      <div class="mt-track-strip">
+        <span class="mt-track-label"></span>
+        <button type="button" class="mt-track-link-btn scrub-btn" title="Unlink from master"></button>
+        <input type="number" class="mt-track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
+        <details class="mt-track-menu">
+          <summary class="mt-track-menu-btn scrub-btn" title="Choose which graphs to show">☰ graphs</summary>
+          <div class="mt-track-menu-popover">
+            <div class="mt-track-menu-count"></div>
             ${ALL_PANELS.map(key => `
-              <label class="track-menu-item">
-                <input type="checkbox" class="track-menu-check" value="${key}" />
+              <label class="mt-track-menu-item">
+                <input type="checkbox" class="mt-track-menu-check" value="${key}" />
                 ${PANEL_LABELS[key]}
               </label>
             `).join('')}
@@ -111,15 +112,15 @@ export default class Track {
         </details>
       </div>
     `
-    this._controlsEl  = header.querySelector('.track-controls')
-    this._labelEl      = header.querySelector('.track-label')
-    this._linkBtn      = header.querySelector('.track-link-btn')
-    this._offsetInput  = header.querySelector('.track-offset-input')
-    this._menuCountEl  = header.querySelector('.track-menu-count')
-    this._menuChecks   = [...header.querySelectorAll('.track-menu-check')]
+    this._controlsEl  = header.querySelector('.mt-track-controls')
+    this._labelEl      = header.querySelector('.mt-track-label')
+    this._linkBtn      = header.querySelector('.mt-track-link-btn')
+    this._offsetInput  = header.querySelector('.mt-track-offset-input')
+    this._menuCountEl  = header.querySelector('.mt-track-menu-count')
+    this._menuChecks   = [...header.querySelectorAll('.mt-track-menu-check')]
 
     this._labelEl.textContent = this.label
-    this._buildControls()
+    this._buildReplaceControl()
 
     this._menuChecks.forEach(cb => {
       cb.addEventListener('change', () => {
@@ -155,25 +156,11 @@ export default class Track {
     return header
   }
 
-  /**
-   * Kind-specific controls, appended into `.track-controls`:
-   * - live: clones `#track-live-controls-template` (connect/battery/record/
-   *   pause/mic/audio-upload) — `this.controlsEl` exposes that clone so App
-   *   can wire the EEG/audio pipeline into it (see App._wireLiveControls).
-   * - file: a small "↑ Replace" button that reloads this track's own store
-   *   from a different .jsonl, without touching any other track.
-   */
-  _buildControls() {
-    if (this.kind === 'live') {
-      const template = document.getElementById('track-live-controls-template')
-      const clone = template.content.firstElementChild.cloneNode(true)
-      this._controlsEl.appendChild(clone)
-      this.controlsEl = clone
-      return
-    }
-
+  /** A small "↑ Replace" button that reloads this track's own store from a
+   *  different .jsonl, without touching any other track. */
+  _buildReplaceControl() {
     const label = document.createElement('label')
-    label.className = 'track-replace-btn controls-upload-btn'
+    label.className = 'mt-track-replace-btn controls-upload-btn'
     label.title = 'Replace this track with another recording'
     label.append('↑ Replace')
     const input = document.createElement('input')
@@ -200,7 +187,7 @@ export default class Track {
   /** Right-lane timeline strip: the ribbon/ticks/head row above this track's graphs. */
   _buildTimelineStrip() {
     const strip = document.createElement('div')
-    strip.className = 'scrub-timeline track-timeline'
+    strip.className = 'scrub-timeline mt-track-timeline'
     strip.innerHTML = `
       <div class="scrub-track">
         <div class="scrub-fill"></div>
@@ -305,7 +292,7 @@ export default class Track {
   }
 
   renderAt(masterCursor) {
-    this.display.setEnabledPanels?.(this.enabledPanels)
+    this.display.setEnabledPanels(this.enabledPanels)
     this.display.renderAt(this.store, this.effectiveCursor(masterCursor))
   }
 

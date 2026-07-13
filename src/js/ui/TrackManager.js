@@ -1,17 +1,16 @@
 import SessionStore from '../managers/SessionStore'
-import Track from './Track'
+import Track, { DEFAULT_PANELS } from './Track'
 
-const FILE_NORMALIZE_BANDS = new Set(['theta', 'alpha', 'beta', 'gamma'])
 let _nextTrackId = 1
 
 /**
- * TrackManager — owns the stack of `Track`s in the multi-track review view.
- * At most one track is `'live'` (the always-on EEG/DVR session); every other
- * track is a loaded `.jsonl` file, added independently of the live pipeline.
+ * TrackManager — owns the stack of `Track`s in the Multi-Track tab. Every
+ * track is a loaded `.jsonl` file (this tab is file-review only — there is no
+ * live EEG connection here; see App.js/MultiTrackApp.js for that).
  */
 export default class TrackManager {
   /**
-   * @param {HTMLElement} containerEl — `#analysis-panel`, the track stack
+   * @param {HTMLElement} containerEl — the track stack container
    * @param {object} sourceFns
    * @param {() => number} sourceFns.getMasterDuration — read the master scrubber's current duration
    * @param {(t: number) => void} sourceFns.seekMaster — seek the master scrubber
@@ -19,7 +18,7 @@ export default class TrackManager {
    */
   constructor(containerEl, { getMasterDuration, seekMaster, markDirty } = {}) {
     this._container = containerEl
-    this._template = document.getElementById('track-lane-template')
+    this._template = document.getElementById('mt-track-lane-template')
     this._getMasterDuration = getMasterDuration ?? (() => 0)
     this._seekMaster = seekMaster ?? (() => {})
     this._markDirty = markDirty ?? (() => {})
@@ -33,12 +32,12 @@ export default class TrackManager {
 
   _mountTrack(track) {
     const wrapper = document.createElement('div')
-    wrapper.className = 'track'
+    wrapper.className = 'mt-track'
     wrapper.dataset.trackId = track.id
     wrapper.appendChild(track.headerEl)
 
     const laneCol = document.createElement('div')
-    laneCol.className = 'track-lane-col'
+    laneCol.className = 'mt-track-lane-col'
     laneCol.appendChild(track.timelineStripEl)
     laneCol.appendChild(track.laneEl)
     wrapper.appendChild(laneCol)
@@ -51,25 +50,9 @@ export default class TrackManager {
     return track
   }
 
-  /** Wrap the already-live `SessionStore` (App's DVR capture) as the live track. */
-  addLiveTrack(store) {
-    const track = new Track({
-      id: `track-${_nextTrackId++}`,
-      kind: 'live',
-      store,
-      laneEl: this._cloneLane(),
-      label: 'Live',
-      normalizeBands: null,   // shown by the connected EEGManager's own set
-      getMasterDuration: this._getMasterDuration,
-      seekMaster: this._seekMaster,
-      markDirty: this._markDirty,
-    })
-    return this._mountTrack(track)
-  }
-
   /**
    * Parse a saved `.jsonl` recording into a brand-new store and add it as a
-   * track. Additive: never touches the live track or its store.
+   * track. Additive: never touches any other track.
    * @returns {Track}
    */
   addFileTrack(text, label) {
@@ -77,11 +60,10 @@ export default class TrackManager {
     store.loadFromText(text)
     const track = new Track({
       id: `track-${_nextTrackId++}`,
-      kind: 'file',
       store,
       laneEl: this._cloneLane(),
       label,
-      normalizeBands: FILE_NORMALIZE_BANDS,
+      enabledPanels: DEFAULT_PANELS,
       getMasterDuration: this._getMasterDuration,
       seekMaster: this._seekMaster,
       markDirty: this._markDirty,
@@ -95,10 +77,6 @@ export default class TrackManager {
     this.tracks.splice(i, 1)
     if (this.focusedTrack === track) this.focusedTrack = null
     track.dispose()
-  }
-
-  get liveTrack() {
-    return this.tracks.find(t => t.kind === 'live') ?? null
   }
 
   forEach(fn) {

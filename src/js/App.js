@@ -5,7 +5,7 @@ import EntrainmentManager from './managers/EntrainmentManager'
 import ComplexityManager from './managers/ComplexityManager'
 import RecordingManager from './managers/RecordingManager'
 import SessionStore from './managers/SessionStore'
-import TrackManager from './ui/TrackManager'
+import AnalysisDisplay from './ui/AnalysisDisplay'
 import Scrubber from './ui/Scrubber'
 
 /**
@@ -30,19 +30,25 @@ export default class App {
   static complexityManager = null
   static recordingManager = null
   static sessionStore = null
-  static trackManager = null
 
   constructor() {
-    // Managers first (no DOM) — the live track's header, created in
-    // _setupAnalysis, is what the DOM wiring below (_wireLiveControls) needs,
-    // and it in turn needs App.recordingManager to already exist.
-    App.eegManager = new EEGManager()
-    App.complexityManager = new ComplexityManager()
-    App.recordingManager = new RecordingManager()
-    this._setupSimulator()
+    const input = document.getElementById('audio-upload')
 
-    this._setupAnalysis()      // sessionStore, track stack, master scrubber, live track (+ its header DOM)
-    this._wireLiveControls()   // connect/battery/record/pause/mic/audio-upload, within the live track's header
+    // File upload: loads (or replaces) the buffer audio source.
+    input.addEventListener('change', (e) => {
+      const file = e.target.files[0]
+      if (!file) return
+      e.target.value = '' // allow re-selecting the same file
+      this._loadAudioFile(file)
+    })
+
+    // Mic button: toggle live microphone input as the (muted) audio source.
+    this._micBtn = document.getElementById('mic-btn')
+    this._micBtn.addEventListener('click', () => this._toggleMic())
+
+    this._setupEEG()
+    this._setupRecording()
+    this._setupAnalysis()
 
     // Start the update loop immediately so EEG/bio plots work before (or without) audio.
     this.update()
@@ -114,24 +120,16 @@ export default class App {
     }
   }
 
-  /**
-   * Wire every control that lives in the live track's header: EEG connect/
-   * battery/heart-rate, record, pause, mic, and audio-upload. Runs once,
-   * after `_setupAnalysis` has created the live track (and cloned
-   * `#track-live-controls-template` into its header) — see the constructor.
-   */
-  _wireLiveControls() {
-    const root = App.trackManager.liveTrack.controlsEl
+  /** Wire up EEG connect/disconnect UI and create the EEGManager instance. */
+  _setupEEG() {
+    App.eegManager = new EEGManager()
+    App.complexityManager = new ComplexityManager()
 
-    const btn         = root.querySelector('.track-eeg-connect')
-    const batteryEl   = root.querySelector('.eeg-battery')
+    const controls    = document.getElementById('eeg-controls')
+    const btn         = document.getElementById('eeg-connect')
+    const batteryEl   = document.getElementById('eeg-status')
     const batteryFill = batteryEl.querySelector('.battery-fill')
-    this._hrDisplay    = root.querySelector('.track-heart-rate')
-    this._recordBtn    = root.querySelector('.track-record-btn')
-    this._recordTimeEl = root.querySelector('.track-record-time')
-    this._pauseBtn     = root.querySelector('.track-pause-btn')
-    this._micBtn       = root.querySelector('.track-mic-btn')
-    const audioInput  = root.querySelector('.track-audio-upload')
+    this._hrDisplay   = document.getElementById('heart-rate')
 
     const updateBattery = (level) => {
       // level: 0–100 or null (disconnected)
@@ -150,6 +148,8 @@ export default class App {
     }
     updateBattery(null)
 
+    controls.style.display = 'flex'
+
     App.eegManager.onBatteryLevel = (level) => updateBattery(level)
 
     App.eegManager.onDisconnected = () => {
@@ -164,66 +164,15 @@ export default class App {
       // panel stays up so the user can scrub back through what was recorded.
       App.recordingManager?.disableCapture()
       this._scrubber?.stopFollowing()
-      // Hide the whole multi-track panel only if there's genuinely nothing to
-      // review anywhere — a loaded file track should stay up even if the live
-      // track never captured anything.
-      if (App.trackManager.tracks.every(t => t.store.isEmpty())) this._hidePanel()
+      if (App.sessionStore.isEmpty()) this._hidePanel()
     }
+
+    this._setupSimulator()
 
     this._connectBtn = btn
     btn.addEventListener('click', () => {
       if (App.eegManager.isConnected) App.eegManager.disconnect()
       else this._connectEEG(this._simulate)
-    })
-
-    this._recordBtn.addEventListener('click', async () => {
-      const rm = App.recordingManager
-      if (rm.isRecording) {
-        this._recordBtn.disabled = true
-        const blob = await rm.stop()
-        // Stream mode writes straight to disk and returns null; memory-mode
-        // fallback returns a Blob the browser must download.
-        if (blob) this._downloadRecording(blob, rm.startedAtMs)
-        this._recordBtn.disabled = false
-        this._recordBtn.classList.remove('active')
-        this._recordBtn.title = 'Record raw data to JSONL'
-        this._recordTimeEl.hidden = true
-        // Catch up on a hide the disconnect handler deferred while this recording
-        // was in flight (see onDisconnected above).
-        if (!App.eegManager?.isConnected) this._recordBtn.hidden = true
-      } else {
-        const eeg = App.eegManager
-        const started = await rm.start({
-          device:     eeg?.deviceName,
-          deviceInfo: eeg?.deviceInfo,
-          channels:   ['TP9', 'AF7', 'AF8', 'TP10'],
-          audioBpm:   App.bpmManager?.bpmValue || null,
-        })
-        if (!started) return   // user cancelled the save-file picker
-        this._recordBtn.classList.add('active')
-        this._recordBtn.title = 'Stop recording'
-        this._recordTimeEl.hidden = false
-      }
-    })
-
-    this._pauseBtn.addEventListener('click', () => {
-      if (App.audioManager.isPlaying) {
-        App.audioManager.pause()
-        this._pauseBtn.textContent = '▶'
-      } else {
-        App.audioManager.play()
-        this._pauseBtn.textContent = '⏸'
-      }
-    })
-
-    this._micBtn.addEventListener('click', () => this._toggleMic())
-
-    // Audio file upload: loads (or replaces) the buffer audio source.
-    audioInput.addEventListener('change', (e) => {
-      const file = e.target.files[0]
-      if (!file) return
-      e.target.value = '' // allow re-selecting the same file
-      this._loadAudioFile(file)
     })
   }
 
@@ -239,7 +188,7 @@ export default class App {
     const param = new URLSearchParams(location.search).get('sim')
     this._simulate = param !== null
     // Deferred to the end of the constructor: _connectEEG needs the recording
-    // manager and analysis wiring that _setupAnalysis/_wireLiveControls install.
+    // manager and analysis wiring that _setupRecording/_setupAnalysis install.
     this._autoSim = param === 'auto'
   }
 
@@ -275,7 +224,9 @@ export default class App {
   _showPanel({ follow = false } = {}) {
     document.body.classList.add('analysis-mode')
     this._analysisPanel.hidden = false
-    App.trackManager.resizeAll()
+    if (!this._analysisDisplay._inited) this._analysisDisplay.init()
+    this._analysisDisplay.resize()
+    this._scrubber.setStore(App.sessionStore)
     this._scrubber.setActive(true, follow ? { follow: true } : { atStart: true })
     this._scrubber.resize()   // #scrubber just became visible; size the ribbon canvas now
   }
@@ -286,39 +237,58 @@ export default class App {
     this._scrubber.setActive(false)
   }
 
-  /** Wire the data panel: session store, track stack, scrubber, recording file load. */
+  /** Wire up the record button + download-on-stop flow. */
+  _setupRecording() {
+    App.recordingManager = new RecordingManager()
+
+    const btn     = document.getElementById('bio-record')
+    const timeEl  = document.getElementById('bio-record-time')
+    this._recordBtn    = btn
+    this._recordTimeEl = timeEl
+
+    btn.addEventListener('click', async () => {
+      const rm = App.recordingManager
+      if (rm.isRecording) {
+        btn.disabled = true
+        const blob = await rm.stop()
+        // Stream mode writes straight to disk and returns null; memory-mode
+        // fallback returns a Blob the browser must download.
+        if (blob) this._downloadRecording(blob, rm.startedAtMs)
+        btn.disabled = false
+        btn.classList.remove('active')
+        btn.title = 'Record raw data to JSONL'
+        timeEl.hidden = true
+        // Catch up on a hide the disconnect handler deferred while this recording
+        // was in flight (see onDisconnected in _setupEEG).
+        if (!App.eegManager?.isConnected) btn.hidden = true
+      } else {
+        const eeg = App.eegManager
+        const started = await rm.start({
+          device:     eeg?.deviceName,
+          deviceInfo: eeg?.deviceInfo,
+          channels:   ['TP9', 'AF7', 'AF8', 'TP10'],
+          audioBpm:   App.bpmManager?.bpmValue || null,
+        })
+        if (!started) return   // user cancelled the save-file picker
+        btn.classList.add('active')
+        btn.title = 'Stop recording'
+        timeEl.hidden = false
+      }
+    })
+  }
+
+  /** Wire the data panel: session store, renderer, scrubber, recording file load. */
   _setupAnalysis() {
     App.sessionStore = new SessionStore()
     // Every produced record flows into the scrubbable timeline as it is recorded.
     App.recordingManager.onRecord = (obj) => App.sessionStore.ingest(obj)
 
-    this._analysisPanel = document.getElementById('analysis-panel')
-
-    // Master scrubber: renders every track (live + any loaded files) each frame,
-    // each at its own effective cursor (masterCursor + offset, or its own free-
-    // running cursor when unlinked — see Track).
-    this._scrubber = new Scrubber((cursor) => {
-      App.trackManager.renderAll(cursor)
-      App.trackManager.renderAllTimelines(cursor)
-    })
+    this._analysisDisplay = new AnalysisDisplay()
+    this._scrubber = new Scrubber((store, cursor) => this._analysisDisplay.renderAt(store, cursor))
     this._scrubber.attach()
+    this._scrubber.setStore(App.sessionStore)
 
-    App.trackManager = new TrackManager(this._analysisPanel, {
-      getMasterDuration: () => this._scrubber.getDuration(),
-      seekMaster: (t) => this._scrubber.seek(t),
-      markDirty: () => this._scrubber.refresh(),
-    })
-    this._scrubber.setDurationSource(() => App.trackManager.maxDuration())
-    // "● LIVE" follows the live track's own leading edge specifically — not
-    // just whichever track happens to be longest.
-    this._scrubber.setLiveDurationSource(() => {
-      const lt = App.trackManager.liveTrack
-      return lt && lt.store.source === 'live' ? lt.duration() : null
-    })
-    this._scrubber.setFocusedTrackSource(() => App.trackManager.focusedTrack)
-
-    const liveTrack = App.trackManager.addLiveTrack(App.sessionStore)
-    this._analysisDisplay = liveTrack.display   // alias kept for the single-track code paths below
+    this._analysisPanel = document.getElementById('analysis-panel')
 
     const recInput = document.getElementById('recording-upload')
     recInput.addEventListener('change', (e) => {
@@ -333,7 +303,7 @@ export default class App {
     // Keep canvas drawing buffers matched to their on-screen size (crisp graphs).
     window.addEventListener('resize', () => {
       if (this._analysisPanel.hidden) return
-      App.trackManager.resizeAll()
+      this._analysisDisplay.resize()
       this._scrubber.resize()
       this._scrubber.refresh()
     })
@@ -349,6 +319,9 @@ export default class App {
     const resume = store.source === 'live' && !store.isEmpty()
     if (resume) store.continueLive()
     else store.startLive()
+    // Clear any loaded-file label — this is now a live/DVR session.
+    const label = document.getElementById('scrub-session-label')
+    if (label) label.textContent = ''
     App.recordingManager.enableCapture({ resume })
     const eeg = App.eegManager
     this._specTapIdx     = eeg?.spectrumSampleCount ?? 0
@@ -360,7 +333,7 @@ export default class App {
     this._specTapT       = store.liveElapsed()
     this._specLoTapT     = this._specTapT
     this._lastAudioTapMs = 0
-    if (App.trackManager?.liveTrack) App.trackManager.liveTrack._ribbonDirty = true
+    this._scrubber?.setStore(App.sessionStore)
     this._scrubber?.refresh()
   }
 
@@ -407,25 +380,36 @@ export default class App {
     this[tKey] = t
   }
 
-  /** Load a saved .jsonl recording as a new track, additive to any live/other tracks. */
+  /** Load a saved .jsonl recording into the store and show it in the panel. */
   async _loadRecordingFile(file) {
+    // Don't mix a live recording with a loaded file.
+    if (App.recordingManager?.isRecording) {
+      const blob = await App.recordingManager.stop()
+      if (blob) this._downloadRecording(blob, App.recordingManager.startedAtMs)
+      if (this._recordBtn) { this._recordBtn.classList.remove('active'); this._recordBtn.hidden = !App.eegManager?.isConnected }
+      if (this._recordTimeEl) this._recordTimeEl.hidden = true
+    }
+    // Pause live/DVR capture so it doesn't overwrite the loaded file, and drop
+    // the backlog: it belongs to the live session this file is replacing.
+    App.recordingManager?.disableCapture()
+    App.recordingManager?.resetCapture()
     let text
     try { text = await file.text() } catch (err) { console.error('Recording read failed:', err); return }
-
-    let track
     try {
-      track = App.trackManager.addFileTrack(text, file.name)
-      console.log(`Loaded recording: ${file.name}, ${track.duration().toFixed(1)} s`)
+      const { records, duration } = App.sessionStore.loadFromText(text)
+      console.log(`Loaded recording: ${records} records, ${duration.toFixed(1)} s`)
     } catch (err) {
       console.error('Recording parse failed:', err)
       return
     }
-
-    // Label the track with the filename + recording date so it isn't anonymous
-    // in the stack — the user can tell which file each lane is reviewing.
-    const ts = track.store.meta?.startedAt
-    const when = ts ? new Date(ts).toLocaleString() : 'unknown date'
-    track.setLabel(`${file.name} — ${when}`)
+    // Show the filename + recording date in the scrubber so the loaded session
+    // isn't anonymous — the user can tell which file they're reviewing.
+    const label = document.getElementById('scrub-session-label')
+    if (label) {
+      const ts = App.sessionStore.meta?.startedAt
+      const when = ts ? new Date(ts).toLocaleString() : 'unknown date'
+      label.textContent = `${file.name} — ${when}`
+    }
     this._showPanel({ follow: false })
   }
 
@@ -442,9 +426,22 @@ export default class App {
     URL.revokeObjectURL(url)
   }
 
-  /** Show the pause button, reset to its playing icon (click handler is wired once in _wireLiveControls). */
+  /** Show the pause button and wire its click handler (idempotent). */
   _setupPauseBtn() {
-    this._pauseBtn.textContent = '⏸'
+    if (this._pauseBtn) {
+      this._pauseBtn.textContent = '⏸'
+      return
+    }
+    this._pauseBtn = document.getElementById('pause-btn')
+    this._pauseBtn.addEventListener('click', () => {
+      if (App.audioManager.isPlaying) {
+        App.audioManager.pause()
+        this._pauseBtn.textContent = '▶'
+      } else {
+        App.audioManager.play()
+        this._pauseBtn.textContent = '⏸'
+      }
+    })
     this._pauseBtn.hidden = false
   }
 
