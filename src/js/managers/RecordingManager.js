@@ -13,19 +13,22 @@
  *
  * Record types (one JSON object per line):
  *   meta    — { type, startedAt, app, device, deviceInfo, electrodeNames, sampleRates, audioBpm }
- *   eeg     — { type, index, electrode, timestamp, samples:[12 µV] }        @ ~21 packets/s ×4 ch
- *   ppg     — { type, index, ppgChannel, timestamp, samples:[6] }            @ ~11 packets/s ×3 ch
- *   accel   — { type, sequenceId, samples:[{x,y,z}×3] }                      @ ~17 packets/s
- *   gyro    — { type, sequenceId, samples:[{x,y,z}×3] }                      @ ~17 packets/s
+ *   eeg     — { type, index, electrode, timestamp, t, samples:[12 µV] }     @ ~21 packets/s ×4 ch
+ *   ppg     — { type, index, ppgChannel, timestamp, t, samples:[6] }         @ ~11 packets/s ×3 ch
+ *   accel   — { type, sequenceId, t, samples:[{x,y,z}×3] }                   @ ~17 packets/s
+ *   gyro    — { type, sequenceId, t, samples:[{x,y,z}×3] }                   @ ~17 packets/s
  *   bands   — { type, t, delta, theta, alpha, beta, gamma }                  @ ~2  Hz
  *   hr      — { type, t, bpm }                                               @ ~1  Hz
  *   entrain — { type, t, idx }                                               @ ~2  Hz
  *   mse     — { type, t, curve:[…], complexity }                             @ ~0.2 Hz
  *   music   — { type, t, bpm }                                               on track load / BPM change
  *
- * `t` (derived records only) is milliseconds since recording started. Raw
- * sensor records carry the native muse-js `index`/`sequenceId`/`timestamp`
- * fields the analysis tools already understand, so they omit `t`.
+ * `t` is milliseconds since recording started, on every record type. Raw
+ * sensor records also carry the native muse-js `index`/`sequenceId`/
+ * `timestamp` fields the analysis tools key off for reconstruction — `t` is
+ * only there so SessionStore can anchor a raw stream to the same absolute
+ * clock the derived records use, since the native counter has no absolute
+ * reference of its own (see `SessionStore._anchorStream`).
  *
  * Persistence — two modes, chosen at start():
  *   • stream  — File System Access API (Chrome/Edge). Lines accumulate in a
@@ -227,6 +230,16 @@ export default class RecordingManager {
 
   // ── Raw sensor hooks — store native muse-js readings verbatim ──────────────
   // (cheap no-ops when !isRecording)
+  //
+  // Each also carries `t` (ms since capture epoch, same clock as the derived
+  // hooks below) alongside its native index/sequenceId counter. The counter
+  // alone can't anchor a stream on load: it has no absolute reference, so
+  // SessionStore used to fall back to "first sample in the file = t=0" — fine
+  // for an untrimmed file, but wrong whenever the pre-record backlog (see
+  // BACKLOG_MAX_BYTES) has dropped the front of the session, since the
+  // surviving first sample is no longer the session's real start. `t` gives
+  // SessionStore the same absolute clock the derived records already use, so
+  // raw and derived streams stay aligned regardless of what got trimmed.
 
   /** @param {{index, electrode, timestamp, samples:number[]}} reading */
   recordEeg(reading) {
@@ -236,6 +249,7 @@ export default class RecordingManager {
       index: reading.index,
       electrode: reading.electrode,
       timestamp: reading.timestamp,
+      t: this._t(),
       samples: reading.samples,
     })
   }
@@ -248,6 +262,7 @@ export default class RecordingManager {
       index: reading.index,
       ppgChannel: reading.ppgChannel,
       timestamp: reading.timestamp,
+      t: this._t(),
       samples: reading.samples,
     })
   }
@@ -255,13 +270,13 @@ export default class RecordingManager {
   /** @param {{sequenceId, samples:{x,y,z}[]}} reading */
   recordAccel(reading) {
     if (!this.isRecording && !this.captureActive) return
-    this._push({ type: 'accel', sequenceId: reading.sequenceId, samples: reading.samples })
+    this._push({ type: 'accel', sequenceId: reading.sequenceId, t: this._t(), samples: reading.samples })
   }
 
   /** @param {{sequenceId, samples:{x,y,z}[]}} reading */
   recordGyro(reading) {
     if (!this.isRecording && !this.captureActive) return
-    this._push({ type: 'gyro', sequenceId: reading.sequenceId, samples: reading.samples })
+    this._push({ type: 'gyro', sequenceId: reading.sequenceId, t: this._t(), samples: reading.samples })
   }
 
   // ── Derived-metric hooks ───────────────────────────────────────────────────

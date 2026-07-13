@@ -9,11 +9,15 @@
  *     (the JSONL carries no spectrogram columns).
  *
  * Raw sensor streams (eeg/ppg/accel/gyro) are placed on a regular per-stream
- * grid using their native 16-bit muse-js `index`/`sequenceId` counters — a
- * direct JS port of `analysis/utils.py` (`_unwrap_counter`, `packets_to_grid`).
- * Each raw stream's t=0 is its own first sample; derived streams (bands/hr/
- * mse/entrain/music) carry `t` (ms since record start → seconds). As in the
- * Python pipeline, raw and derived series may sit a small offset apart.
+ * grid using their native 16-bit muse-js `index`/`sequenceId` counters for
+ * relative spacing — a direct JS port of `analysis/utils.py`
+ * (`_unwrap_counter`, `packets_to_grid`) — anchored to an absolute origin via
+ * each record's own `t` (ms since capture epoch, the same clock derived
+ * streams use; see `_anchorStream`). Derived streams (bands/hr/mse/entrain/
+ * music) carry that same `t` directly. Recordings made before raw records
+ * carried `t` fall back to anchoring at each stream's own first sample, which
+ * can sit a small offset apart from the derived series (as in the Python
+ * pipeline, which never gained the `t` fix).
  *
  * All public time values are in **seconds** from session start.
  */
@@ -221,12 +225,25 @@ class GriddedStream {
    * (ordinary fixed-window scrubbing).
    *
    * The requested window is mapped onto the output columns *as asked for*, even
-   * where it runs off either end of the data. Clamping the span to the samples
+   * where it runs off the start of the data. Clamping the span to the samples
    * that exist would silently stretch the little data there is across the whole
    * canvas — which is exactly what a fixed-width window sitting at the start of a
    * session does. Out-of-data columns come back as zeros instead.
+   *
+   * The tail is different: the live cursor is `SessionStore.duration()`, which
+   * tracks whichever stream's wall-clock-tagged records (bands/mse/spectrogram
+   * columns, timestamped from `performance.now()`) are furthest along — not this
+   * grid's own counter-based position. If this stream's real sample arrival ever
+   * falls even slightly behind nominal `fs` (BLE overhead, occasional backpressure),
+   * that gap grows every second, and an end `t1` sitting past what's actually been
+   * written would otherwise show a permanently growing blank tail instead of a
+   * fixed-width window of real data. So `t1` (only) is clamped to this stream's own
+   * `durationS()`, sliding the whole window back to keep its width — always the
+   * freshest real data, never live-cursor drift.
    */
   envelope(channel, t0, t1, outN) {
+    const durS = this.durationS()
+    if (t1 > durS) { const span = t1 - t0; t1 = durS; t0 = t1 - span }
     const sA = Math.floor(t0 * this.fs)
     const sB = Math.ceil(t1 * this.fs)
     if (sB <= sA || this.length === 0) return new Float32Array(outN * 2)
@@ -432,7 +449,7 @@ export default class SessionStore {
         // its row and corrupt channel 0 of the next sample. Ignore them.
         if (r.electrode < 0 || r.electrode >= this.eeg.nChannels) break
         const idx = this._unwrap(this._eegState, r.electrode, r.index)
-        this._anchorStream(this.eeg, idx, EEG_FS)
+        this._anchorStream(this.eeg, idx, EEG_FS, r.t)
         const start = (idx - this.eeg.seqStart) * EEG_SPP + this.eeg.startOffset
         if (start >= 0) this.eeg.writeChannelBlock(start, r.electrode, r.samples)
         break
@@ -440,7 +457,7 @@ export default class SessionStore {
       case 'ppg': {
         if (r.ppgChannel !== PPG_INFRARED) break
         const idx = this._unwrap(this._ppgState, r.ppgChannel, r.index)
-        this._anchorStream(this.ppg, idx, PPG_FS)
+        this._anchorStream(this.ppg, idx, PPG_FS, r.t)
         const start = (idx - this.ppg.seqStart) * PPG_SPP + this.ppg.startOffset
         if (start >= 0) this.ppg.writeChannelBlock(start, 0, r.samples)
         break
@@ -471,7 +488,7 @@ export default class SessionStore {
 
   _ingestImu(stream, state, r) {
     const idx = this._unwrap(state, 0, r.sequenceId)
-    this._anchorStream(stream, idx, IMU_FS)
+    this._anchorStream(stream, idx, IMU_FS, r.t)
     const start = (idx - stream.seqStart) * IMU_SPP + stream.startOffset
     if (start < 0) return
     const rows = r.samples.map(s => [s.x, s.y, s.z])
@@ -479,15 +496,24 @@ export default class SessionStore {
   }
 
   /**
-   * Fix a raw stream's grid origin on its first packet: t=0 at the first sample
-   * for a fresh session, or the current elapsed time when re-anchoring after a
-   * reconnect (`continueLive`) so new data appends after the kept session with a
-   * NaN gap spanning the outage. Idempotent once `seqStart` is set.
+   * Fix a raw stream's grid origin on its first packet. The packet's own
+   * `tMs` (ms since capture epoch — the same clock derived records use) gives
+   * the real origin directly, so it also survives a backlog-trimmed file: if
+   * the retained recording only starts partway into the session, the stream
+   * still lands on the correct absolute offset instead of being mistaken for
+   * a fresh session starting at t=0 (which desyncs it from bands/hr/mse,
+   * whose `t` is never re-anchored). Older recordings without `t` on raw
+   * records fall back to the previous behaviour: t=0 at the first sample, or
+   * the current elapsed time when re-anchoring after a reconnect
+   * (`continueLive`) so new data appends after the kept session with a NaN
+   * gap spanning the outage. Idempotent once `seqStart` is set.
    */
-  _anchorStream(stream, idx, fs) {
+  _anchorStream(stream, idx, fs, tMs) {
     if (stream.seqStart !== null) return
     stream.seqStart = idx
-    stream.startOffset = this._continuing ? Math.round(this.liveElapsed() * fs) : 0
+    stream.startOffset = Number.isFinite(tMs)
+      ? Math.round((tMs / 1000) * fs)
+      : (this._continuing ? Math.round(this.liveElapsed() * fs) : 0)
   }
 
   /**
@@ -635,9 +661,12 @@ export default class SessionStore {
    * PPG channel slice over [t0, t1] seconds. EEG/IMU go through
    * `GriddedStream.envelope` instead (mip-backed decimation); PPG keeps a raw
    * slice because its detrend pass needs contiguous samples — see
-   * `AnalysisDisplay._ppgSignal`.
+   * `AnalysisDisplay._ppgSignal`. Clamps `t1` to the PPG grid's own real
+   * duration, same reasoning as the tail clamp in `GriddedStream.envelope`.
    */
   rangePPG(t0, t1) {
+    const durS = this.ppg.durationS()
+    if (t1 > durS) { const span = t1 - t0; t1 = durS; t0 = t1 - span }
     const s0 = Math.floor(t0 * PPG_FS)
     const s1 = Math.ceil(t1 * PPG_FS)
     return { fs: PPG_FS, s0, data: this.ppg.channelSlice(0, s0, s1) }
@@ -671,6 +700,21 @@ export default class SessionStore {
       if (arr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
     }
     return ans >= 0 ? arr[ans] : null
+  }
+
+  /**
+   * Time (s) of the most recent record in a derived series (bands/hr/entrain/
+   * mse/music); null if empty. A per-pixel `sampleAt` sweep (bands/mse line
+   * charts) holds this record for every query time past it, which reads as a
+   * flat trace once the live cursor — driven by whichever stream's wall-clock
+   * timestamps are furthest along — outruns this series' own real production
+   * (e.g. band-power/MSE computation is gated on real EEG sample arrival, same
+   * as the raw grids; see the tail clamp in `GriddedStream.envelope`). Callers
+   * doing a right-anchored live window should clamp their end time to this.
+   */
+  lastT(name) {
+    const arr = this[name]
+    return arr && arr.length ? arr[arr.length - 1].t : null
   }
 
   /**

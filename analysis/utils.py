@@ -92,72 +92,108 @@ def _unwrap_counter(state: dict, key, raw_value: int) -> int:
     return raw_value + wraps * _COUNTER_MODULUS
 
 
-def _reconstruct_eeg_packets(eeg_by_idx: dict[int, dict[int, np.ndarray]]) -> list[tuple[float, np.ndarray]]:
+def _stream_start_offset(t_ms) -> float:
+    """Seconds to add to a stream's counter-relative time so it lands on the
+    same absolute clock as the `t`-bearing derived streams (bands/hr/mse/
+    entrain/music), instead of at a local `t=0`. `t_ms` is the first packet's
+    own `t` field (ms since capture epoch) if the recording has one — added
+    to raw records so a stream still anchors correctly even when the
+    recorder's pre-record backlog (`BACKLOG_MAX_BYTES` in RecordingManager.js)
+    has trimmed away the front of the session, and this packet isn't really
+    the start of the capture. Recordings made before raw records carried `t`
+    fall back to 0 (first sample = local zero, same as before) — fine for an
+    untrimmed file, where that coincides with the true session start anyway.
+    """
+    return t_ms / 1000.0 if t_ms is not None else 0.0
+
+
+def _reconstruct_eeg_packets(
+    eeg_by_idx: dict[int, dict[int, np.ndarray]], eeg_t_by_idx: dict[int, float | None]
+) -> list[tuple[float, np.ndarray]]:
     """Merge per-electrode packets sharing an (unwrapped) muse-js `index`
     into one (12, 4) block per packet. `index` advances once per packet-group
-    (~21.33/s), so relative time is
-    `(index - first_index) * samples_per_packet / EEG_FS`. Groups missing an
-    electrode (a dropped BLE notification) are skipped — they surface as a
-    gap downstream, same as any other dropout."""
+    (~21.33/s), so time is
+    `start_offset + (index - first_index) * samples_per_packet / EEG_FS`,
+    where `start_offset` anchors the first packet to the real capture clock
+    (see `_stream_start_offset`). Groups missing an electrode (a dropped BLE
+    notification) are skipped — they surface as a gap downstream, same as any
+    other dropout."""
     idxs = sorted(eeg_by_idx)
     if not idxs:
         return []
     seq_start = idxs[0]
+    start_offset = _stream_start_offset(eeg_t_by_idx.get(seq_start))
     packets = []
     for idx in idxs:
         chans = eeg_by_idx[idx]
         if len(chans) < 4:
             continue
         block = np.stack([chans[e] for e in range(4)], axis=1)  # (12, 4)
-        t = (idx - seq_start) * (block.shape[0] / EEG_FS)
+        t = start_offset + (idx - seq_start) * (block.shape[0] / EEG_FS)
         packets.append((t, block))
     return packets
 
 
 def _reconstruct_indexed_packets(
-    by_idx: dict[int, np.ndarray], samples_per_packet: int, fs: float
+    by_idx: dict[int, np.ndarray],
+    samples_per_packet: int,
+    fs: float,
+    t_by_idx: dict[int, float | None] | None = None,
 ) -> list[tuple[float, np.ndarray]]:
-    """Relative-time packets from a single (unwrapped) index-keyed stream
-    (e.g. one PPG channel), same reconstruction as `_reconstruct_eeg_packets`."""
+    """Packets from a single (unwrapped) index-keyed stream (e.g. one PPG
+    channel), same reconstruction — and same absolute anchoring — as
+    `_reconstruct_eeg_packets`."""
     idxs = sorted(by_idx)
     if not idxs:
         return []
     seq_start = idxs[0]
-    return [((idx - seq_start) * (samples_per_packet / fs), by_idx[idx]) for idx in idxs]
+    start_offset = _stream_start_offset((t_by_idx or {}).get(seq_start))
+    return [(start_offset + (idx - seq_start) * (samples_per_packet / fs), by_idx[idx]) for idx in idxs]
 
 
 def _reconstruct_seq_packets(
-    raw: list[tuple[int, np.ndarray]], samples_per_packet: int, fs: float
+    raw: list[tuple[int, float | None, np.ndarray]], samples_per_packet: int, fs: float
 ) -> list[tuple[float, np.ndarray]]:
-    """Relative-time packets from an (unwrapped) `sequenceId`-keyed stream
-    (accel/gyro)."""
+    """Packets from an (unwrapped) `sequenceId`-keyed stream (accel/gyro),
+    same absolute anchoring as `_reconstruct_eeg_packets`. `raw` entries are
+    `(sequence_id, t_ms_or_None, block)`."""
     if not raw:
         return []
     raw = sorted(raw, key=lambda p: p[0])
-    seq_start = raw[0][0]
-    return [((seq_id - seq_start) * (samples_per_packet / fs), block) for seq_id, block in raw]
+    seq_start, t0_ms, _ = raw[0]
+    start_offset = _stream_start_offset(t0_ms)
+    return [(start_offset + (seq_id - seq_start) * (samples_per_packet / fs), block) for seq_id, _t, block in raw]
 
 
 def load_jsonl(path: str | Path) -> Recording:
     """Parse a Nouscope recording. Raw sensor records (`eeg`/`ppg`/`accel`/
-    `gyro`) mirror the native muse-js reading shape and carry no relative `t`
-    — only a 16-bit `index`/`sequenceId` counter (unwrapped via
-    `_unwrap_counter`, see its docstring for why we don't use the `timestamp`
-    field despite it looking like the more natural clock). Each raw stream's
-    own t=0 is its own first sample, NOT necessarily aligned to the
-    `t`-bearing derived streams (`bands`/`hr`/`mse`/`entrain`, which use the
-    recorder's performance.now()-based clock) — there can be a small offset
-    between "recorded" and "recomputed" series in the overview plot.
+    `gyro`) mirror the native muse-js reading shape — a 16-bit
+    `index`/`sequenceId` counter (unwrapped via `_unwrap_counter`, see its
+    docstring for why we don't use the `timestamp` field despite it looking
+    like the more natural clock) gives each stream's *relative* spacing. They
+    also carry `t` (ms since capture epoch, the same clock the `t`-bearing
+    derived streams — `bands`/`hr`/`mse`/`entrain` — use), which anchors each
+    stream's first packet to the real capture clock instead of a local `t=0`
+    (see `_stream_start_offset`). This matters whenever the recorder's
+    pre-record backlog (`BACKLOG_MAX_BYTES` in RecordingManager.js) trims the
+    front of a long session: the saved file's raw data can start well after
+    true `t=0`, and without this anchor it would silently look like a fresh
+    session starting at 0 — desynced from the correctly-timed derived series.
+    Recordings made before raw records carried `t` fall back to first-sample
+    = local zero, same as before; there can be a small offset between
+    "recorded" and "recomputed" series in the overview plot for those.
     """
     path = Path(path)
     meta: dict = {}
     eeg_by_idx: dict[int, dict[int, np.ndarray]] = {}
     eeg_idx_state: dict[int, tuple[int, int]] = {}
+    eeg_t_by_idx: dict[int, float | None] = {}
     ppg_ir_by_idx: dict[int, np.ndarray] = {}
     ppg_idx_state: dict[int, tuple[int, int]] = {}
-    accel_raw: list[tuple[int, np.ndarray]] = []
+    ppg_t_by_idx: dict[int, float | None] = {}
+    accel_raw: list[tuple[int, float | None, np.ndarray]] = []
     accel_idx_state: dict[int, tuple[int, int]] = {}
-    gyro_raw: list[tuple[int, np.ndarray]] = []
+    gyro_raw: list[tuple[int, float | None, np.ndarray]] = []
     gyro_idx_state: dict[int, tuple[int, int]] = {}
     bands_rows, hr_rows, mse_rows, entrain_rows = [], [], [], []
 
@@ -174,17 +210,19 @@ def load_jsonl(path: str | Path) -> Recording:
                 e = r["electrode"]
                 idx = _unwrap_counter(eeg_idx_state, e, r["index"])
                 eeg_by_idx.setdefault(idx, {})[e] = np.asarray(r["samples"], dtype=np.float64)
+                eeg_t_by_idx.setdefault(idx, r.get("t"))
             elif tp == "ppg":
                 ch = r["ppgChannel"]
                 idx = _unwrap_counter(ppg_idx_state, ch, r["index"])
                 if ch == PPG_INFRARED:
                     ppg_ir_by_idx[idx] = np.asarray(r["samples"], dtype=np.float64)
+                    ppg_t_by_idx.setdefault(idx, r.get("t"))
             elif tp == "accel":
                 idx = _unwrap_counter(accel_idx_state, 0, r["sequenceId"])
-                accel_raw.append((idx, np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
+                accel_raw.append((idx, r.get("t"), np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
             elif tp == "gyro":
                 idx = _unwrap_counter(gyro_idx_state, 0, r["sequenceId"])
-                gyro_raw.append((idx, np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
+                gyro_raw.append((idx, r.get("t"), np.array([[s["x"], s["y"], s["z"]] for s in r["samples"]])))
             elif tp == "bands":
                 t = r["t"] / 1000.0
                 bands_rows.append({"t": t, **{k: r[k] for k in ("delta", "theta", "alpha", "beta", "gamma")}})
@@ -195,8 +233,8 @@ def load_jsonl(path: str | Path) -> Recording:
             elif tp == "entrain":
                 entrain_rows.append({"t": r["t"] / 1000.0, "idx": r["idx"]})
 
-    eeg_packets = _reconstruct_eeg_packets(eeg_by_idx)
-    ppg_packets = _reconstruct_indexed_packets(ppg_ir_by_idx, samples_per_packet=6, fs=PPG_FS)
+    eeg_packets = _reconstruct_eeg_packets(eeg_by_idx, eeg_t_by_idx)
+    ppg_packets = _reconstruct_indexed_packets(ppg_ir_by_idx, samples_per_packet=6, fs=PPG_FS, t_by_idx=ppg_t_by_idx)
     imu_accel = _reconstruct_seq_packets(accel_raw, samples_per_packet=3, fs=IMU_FS)
     imu_gyro = _reconstruct_seq_packets(gyro_raw, samples_per_packet=3, fs=IMU_FS)
 

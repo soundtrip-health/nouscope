@@ -39,6 +39,17 @@ import {
 const OUT_N = 280   // output columns across each plot (matches canvas width)
 const PPG_RAW_SAMPLE_CAP = 20000   // ~5 min at 64 Hz — see `_ppgSignal`
 
+// WebglLineRoll's `shift`/`dataX` uniforms grow every frame for the life of the
+// instance and are never reset by the library — after several minutes of
+// continuous 60fps redraws they reach a magnitude where float32 (both the GPU
+// vertex math and the JS-side buffer) can no longer resolve the roll's own
+// per-point step, and the trace visibly quantizes into a blocky staircase.
+// Since every frame already fully repopulates each roll's visible window from
+// the store (see the class doc above), recreating the roll well before that
+// point is free of any state loss — the next frame just re-uploads the same
+// window into a clean instance.
+const ROLL_SHIFT_LIMIT = 20000
+
 // A stored spectrogram column is painted at an output pixel only if it lies
 // within this many column-spacings of that pixel's time. Without the guard,
 // `_nearestColumn` happily smears the single oldest column across the entire
@@ -70,16 +81,13 @@ export default class AnalysisDisplay {
     const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`an-band-item-${b}`))
     this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`an-band-val-${b}`))
-    this._bandAvgEls  = BAND_NAMES.map(b => document.getElementById(`an-band-avg-${b}`))
 
     // MSE — 5-line timeseries (one per τ scale)
     this._mseGL = this._ctx('an-mse-canvas')
     this._msePlot = new WebglLineRoll(this._mseGL, OUT_N, 5)
     colorVars(MSE_TOKENS).forEach((c, i) => this._msePlot.setLineColor(c, i))
     this._mseValueEl       = document.getElementById('an-mse-value')
-    this._mseAvgEl         = document.getElementById('an-mse-avg')
     this._mseValEls        = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-val-${i}`))
-    this._mseScaleAvgEls   = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-avg-${i}`))
 
     // PPG — single trace, min/max envelope
     this._ppgGL = this._ctx('an-ppg-canvas')
@@ -219,6 +227,23 @@ export default class AnalysisDisplay {
     plot.draw()
   }
 
+  /**
+   * Recreate a roll once its accumulated shift risks float32 precision loss —
+   * see `ROLL_SHIFT_LIMIT`. WebglLineRoll exposes no dispose(), so its vertex/
+   * color buffers and program are freed by hand first; otherwise every cycle
+   * would leak a full roll's worth of GPU buffers for as long as the tab stays
+   * open. (Its two shader objects stay unreachable-but-undeleted regardless —
+   * the library never stores their handles — but those are a few bytes of
+   * compiled bytecode each, not the growing buffers this guards against.)
+   */
+  _recycleRoll(plot, rebuild) {
+    if (plot.shift <= ROLL_SHIFT_LIMIT) return plot
+    plot.gl.deleteBuffer(plot.vertexBuffer)
+    plot.gl.deleteBuffer(plot.colorBuffer)
+    plot.gl.deleteProgram(plot.program)
+    return rebuild()
+  }
+
   _renderEEG(store, t0, t1) {
     // `GriddedStream.envelope` sources from a precomputed min/max mip pyramid once
     // the window is wide enough, so this stays cheap even in "All" mode on a long
@@ -229,6 +254,11 @@ export default class AnalysisDisplay {
       const off = EEG_OFFSETS[i]
       for (let j = 0; j < e.length; j++) e[j] = off + (e[j] / EEG_SCALE) * EEG_AMPLITUDE
       return e
+    })
+    this._eegPlot = this._recycleRoll(this._eegPlot, () => {
+      const p = new WebglLineRoll(this._eegGL, OUT_N * 2, 4)
+      colorVars(EEG_TOKENS).forEach((c, i) => p.setLineColor(c, i))
+      return p
     })
     this._eegGL.clear(this._eegGL.COLOR_BUFFER_BIT)
     this._eegPlot.addPoints(lines)
@@ -244,6 +274,11 @@ export default class AnalysisDisplay {
     const env = this._envelope(ac, OUT_N)
     const scale = this._robustPeak(ac) * 1.3 || 1
     for (let i = 0; i < env.length; i++) env[i] = Math.max(-1, Math.min(1, env[i] / scale))
+    this._ppgPlot = this._recycleRoll(this._ppgPlot, () => {
+      const p = new WebglLineRoll(this._ppgGL, OUT_N * 2, 1)
+      p.setLineColor(colorVar('--ppg'), 0)
+      return p
+    })
     this._ppgGL.clear(this._ppgGL.COLOR_BUFFER_BIT)
     this._ppgPlot.addPoints([env])
     this._drawRoll(this._ppgPlot)
@@ -305,6 +340,11 @@ export default class AnalysisDisplay {
       ea[0][i] /= ACCEL_SCALE; ea[1][i] /= ACCEL_SCALE; ea[2][i] /= ACCEL_SCALE
       eg[0][i] /= GYRO_SCALE;  eg[1][i] /= GYRO_SCALE;  eg[2][i] /= GYRO_SCALE
     }
+    this._imuPlot = this._recycleRoll(this._imuPlot, () => {
+      const p = new WebglLineRoll(this._imuGL, OUT_N * 2, 6)
+      colorVars(IMU_TOKENS).forEach((c, i) => p.setLineColor(c, i))
+      return p
+    })
     this._imuGL.clear(this._imuGL.COLOR_BUFFER_BIT)
     this._imuPlot.addPoints([ea[0], ea[1], ea[2], eg[0], eg[1], eg[2]])
     this._drawRoll(this._imuPlot)
@@ -319,6 +359,8 @@ export default class AnalysisDisplay {
    */
   _renderBands(store, t0, t1) {
     const BAND_KEYS = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+    const lastT = store.lastT('bands')
+    if (lastT != null && lastT < t1) { const span = t1 - t0; t1 = lastT; t0 = t1 - span }
     const lines = [0, 1, 2, 3, 4].map(() => new Float32Array(OUT_N))
     const ymax = store.bandsScale()   // stable session-wide scale (no per-frame jump)
 
@@ -336,12 +378,19 @@ export default class AnalysisDisplay {
       }
       seeded = true
     }
+    this._bandPlot = this._recycleRoll(this._bandPlot, () => {
+      const p = new WebglLineRoll(this._bandGL, OUT_N, 5)
+      colorVars(BAND_TOKENS).forEach((c, i) => p.setLineColor(c, i))
+      return p
+    })
     this._bandGL.clear(this._bandGL.COLOR_BUFFER_BIT)
     this._bandPlot.addPoints(lines)
     this._drawRoll(this._bandPlot)
   }
 
   _renderMse(store, t0, t1) {
+    const lastT = store.lastT('mse')
+    if (lastT != null && lastT < t1) { const span = t1 - t0; t1 = lastT; t0 = t1 - span }
     const lines = [0, 1, 2, 3, 4].map(() => new Float32Array(OUT_N))
     for (let x = 0; x < OUT_N; x++) {
       const t = t0 + (x / (OUT_N - 1)) * (t1 - t0)
@@ -352,6 +401,11 @@ export default class AnalysisDisplay {
         lines[i][x] = Math.max(-1, Math.min(1, (val / MSE_Y_MAX) * 2 - 1))
       }
     }
+    this._msePlot = this._recycleRoll(this._msePlot, () => {
+      const p = new WebglLineRoll(this._mseGL, OUT_N, 5)
+      colorVars(MSE_TOKENS).forEach((c, i) => p.setLineColor(c, i))
+      return p
+    })
     this._mseGL.clear(this._mseGL.COLOR_BUFFER_BIT)
     this._msePlot.addPoints(lines)
     this._drawRoll(this._msePlot)
@@ -426,11 +480,15 @@ export default class AnalysisDisplay {
   // ── Scalar readouts at the playhead ──────────────────────────────────────────
 
   /**
-   * Instant values at the playhead `t`, plus each series' average over the same
-   * window its own panel draws. The window average is what turns these from a
-   * live readout into an analysis surface: it says "what's typical over the
-   * stretch you're looking at", not just "what is it right now" — so it has to
-   * cover exactly the stretch that panel shows.
+   * Instant values at the playhead `t`. HR and entrainment also show a window
+   * average over the same span their panel draws ("what's typical over the
+   * stretch you're looking at", not just "what is it right now"). Bands and MSE
+   * don't: both series are produced from real EEG sample arrival rather than a
+   * wall-clock timer (see the tail clamp in `_renderBands`/`_renderMse`), so
+   * their average — computed from the raw unclamped window — increasingly
+   * averaged over fewer real samples than the window claimed the longer a live
+   * session ran, eventually going empty; not worth carrying the same clamp into
+   * a second query path for a number that's secondary to the trace itself.
    */
   _renderReadouts(store, t) {
     const win = (panel) => [t - PANEL_WINDOWS[panel], t]
@@ -446,27 +504,17 @@ export default class AnalysisDisplay {
     const bands = store.sampleAt('bands', t)
     const normNames = ['delta', 'theta', 'alpha', 'beta', 'gamma']
     const active = App.eegManager?.normalizeBands
-    const bandAvgs = store.windowMean(store.bands, ...win('bands'), normNames.map(k => r => r[k]))
     for (let i = 0; i < 5; i++) {
       const shown = !active || active.has(normNames[i])
       if (this._bandItemEls[i]) this._bandItemEls[i].style.display = shown ? '' : 'none'
       if (!shown) continue
       if (this._bandValEls[i]) this._bandValEls[i].textContent = bands ? bands[normNames[i]].toFixed(2) : '—'
-      if (this._bandAvgEls[i]) this._bandAvgEls[i].textContent = bandAvgs[i] != null ? bandAvgs[i].toFixed(2) : '—'
     }
 
     const mse = store.sampleAt('mse', t)
     if (this._mseValueEl) this._mseValueEl.textContent = mse && mse.complexity > 0 ? mse.complexity.toFixed(2) : ''
     for (let i = 0; i < 5; i++) {
       if (this._mseValEls[i]) this._mseValEls[i].textContent = mse && mse.curve[i] != null ? mse.curve[i].toFixed(2) : '—'
-    }
-    const mseAvgs = store.windowMean(store.mse, ...win('mse'), [r => r.complexity, ...[0, 1, 2, 3, 4].map(i => r => r.curve[i])])
-    if (this._mseAvgEl) this._mseAvgEl.textContent = mseAvgs[0] != null ? `avg ${mseAvgs[0].toFixed(2)}` : ''
-    for (let i = 0; i < 5; i++) {
-      if (this._mseScaleAvgEls[i]) {
-        const v = mseAvgs[i + 1]
-        this._mseScaleAvgEls[i].textContent = v != null ? v.toFixed(2) : '—'
-      }
     }
 
     const entrain = store.sampleAt('entrain', t)

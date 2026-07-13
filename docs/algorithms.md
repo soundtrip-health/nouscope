@@ -783,10 +783,23 @@ muse-js counters — a direct port of the offline Python pipeline:
   slots stay `NaN` so dropouts remain visible. EEG electrodes are written
   independently per channel (partial packet-groups still display).
 
-Each raw stream's `t=0` is its own first sample; derived streams (`bands/hr/mse/
-entrain/music`) carry `t` (ms → s). As in the Python pipeline, raw and derived
-series can sit a small offset apart. Cross-checked against `analysis/utils.py` on
-`session1.jsonl`: identical duration and per-stream record counts, 0 % NaN EEG.
+Each raw record also carries `t` (ms since the capture epoch — the same clock
+`bands/hr/mse/entrain/music` use), and `_anchorStream` uses it to place the
+stream's first sample at its real absolute offset rather than at a local
+`t=0`. This matters because `RecordingManager`'s pre-record backlog is
+byte-capped (`BACKLOG_MAX_BYTES`, §8): once a long-running capture exceeds it,
+the oldest lines — across every record type — are dropped before ⏺ ever
+snapshots the backlog into a file. A file whose surviving data starts partway
+into the session still needs its raw streams to land at that same real offset,
+not at a fresh `t=0`; otherwise raw and derived data end up on two different
+timelines (raw showing content shifted to the start of playback, derived
+correctly positioned later, with a dead gap and a frozen tail in between).
+Recordings made before raw records carried `t` fall back to anchoring at each
+stream's own first sample, same as `analysis/utils.py` still does (the Python
+pipeline never gained this fix) — fine for an untrimmed file, where "first
+sample" and "true session start" coincide anyway. Cross-checked the JS/Python
+reconstructions against each other on `session1.jsonl`: identical duration and
+per-stream record counts, 0% NaN EEG.
 
 Buffers are growable segmented `Float32Array`s (~21 MB/hour, EEG-dominated) — the
 whole session is held in RAM.
