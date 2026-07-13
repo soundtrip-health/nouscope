@@ -1,30 +1,33 @@
 /**
- * Scrubber — the movie-style transport under the data panel.
+ * Scrubber — the master movie-style transport under the multi-track panel.
  *
- * Owns a single piece of view state: the playhead cursor, in seconds from the
- * session start. Each animation frame — while playing, following live, or after
- * a seek — it calls `onFrame(store, cursor)` to redraw and updates its own track
- * UI. How much history each panel shows around that cursor is the renderer's
- * business, not the scrubber's (see `PANEL_WINDOWS` in bioRender).
+ * Owns a single piece of view state: the master playhead cursor, in seconds.
+ * Each animation frame — while playing, following live, or after a seek — it
+ * calls `onFrame(cursor)` so every track can redraw itself at its own
+ * effective cursor (`masterCursor + track.offsetSeconds`, or its independent
+ * `ownCursor` when unlinked — see `Track`). Per-track quality ribbons/ticks are
+ * drawn by each track itself (`timelineDecor`), not here.
  *
- * Kept deliberately dumb about *what* gets drawn: App wires `onFrame` to
- * AnalysisDisplay.renderAt, so the scrubber works for both a loaded file and a
- * live/DVR session (where the store keeps growing and "● LIVE" follows the
- * leading edge).
+ * Duration isn't a single store's anymore — it's supplied via
+ * `setDurationSource`/`setLiveDurationSource` callbacks so the master timeline
+ * can span every track (the longest one) while "● LIVE" follows specifically
+ * the live track's leading edge, not just whichever track is longest.
  */
-
-import { cssVar } from './palette'
 
 const SPEEDS = [1, 2, 4]
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
-const RIBBON_SAMPLES = 300      // ribbon resolution, independent of canvas pixel width
-const RIBBON_REBUILD_MS = 1000  // throttle: re-sample at most this often while a live session grows
 
 export default class Scrubber {
-  /** @param {(store, cursor:number)=>void} onFrame */
+  /** @param {(cursor:number)=>void} onFrame */
   constructor(onFrame) {
     this._onFrame = onFrame
-    this._store = null
+
+    // () => overall timeline length (seconds) — max across every track.
+    this._durationSource = () => 0
+    // () => the live track's own duration, or null if there is no live track.
+    this._liveDurationSource = () => null
+    // () => the Track a keyboard nudge should redirect to when it's unlinked.
+    this._focusedTrackSource = () => null
 
     this._cursor = 0        // playhead time (s)
     this._speedIdx = 0
@@ -35,13 +38,14 @@ export default class Scrubber {
     this._dirty = false
     this._lastPerf = 0
     this._raf = null
-
-    // Quality ribbon + event ticks (see `_renderTimeline`).
-    this._ribbonDirty = true
-    this._ribbonBuiltFor = -1
-    this._ribbonLastBuiltAt = 0
-    this._colors = null
   }
+
+  setDurationSource(fn) { this._durationSource = fn }
+  setLiveDurationSource(fn) { this._liveDurationSource = fn }
+  setFocusedTrackSource(fn) { this._focusedTrackSource = fn }
+
+  /** Current master timeline length (seconds) — for callers outside the render loop. */
+  getDuration() { return this._durationSource() }
 
   /** Wire DOM once (idempotent). */
   attach() {
@@ -56,19 +60,9 @@ export default class Scrubber {
       track:    $('scrub-track'),
       fill:     $('scrub-fill'),
       head:     $('scrub-head'),
-      ribbon:   $('scrub-ribbon'),
-      ticks:    $('scrub-ticks'),
       hoverTime: $('scrub-hover-time'),
       live:     $('scrub-live'),
       speed:    $('scrub-speed'),
-    }
-    this._ribbonCtx = this._els.ribbon.getContext('2d')
-    // Read lazily (matches AnalysisDisplay/palette.js convention) —
-    // the stylesheet must be parsed before getComputedStyle can resolve these.
-    this._colors = {
-      good: cssVar('--status-good'),
-      marginal: cssVar('--status-marginal'),
-      poor: cssVar('--status-poor'),
     }
 
     this._els.play.addEventListener('click', () => this.togglePlay())
@@ -81,7 +75,7 @@ export default class Scrubber {
       const rect = this._els.timeline.getBoundingClientRect()
       return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     }
-    const seekFromEvent = (e) => this.seek(fracFromEvent(e) * this._durationOr0())
+    const seekFromEvent = (e) => this.seek(fracFromEvent(e) * this._durationSource())
     this._els.timeline.addEventListener('pointerdown', (e) => {
       this._dragging = true
       this._following = false
@@ -108,47 +102,30 @@ export default class Scrubber {
     this._els.timeline.addEventListener('pointercancel', endDrag)
     this._fracFromEvent = fracFromEvent
 
-    // Keyboard (only acts while the scrubber is active).
+    // Keyboard (only acts while the scrubber is active). ←/→ normally nudge the
+    // master cursor, but redirect to the focused track's own cursor when that
+    // track is unlinked — otherwise there'd be no way to keyboard-nudge it.
     this._onKey = (e) => {
       if (!this._active) return
+      if (e.target && /^(input|textarea)$/i.test(e.target.tagName)) return
+      const focused = this._focusedTrackSource()
       if (e.key === ' ') { e.preventDefault(); this.togglePlay() }
-      else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - SEEK_STEP_S) }
-      else if (e.key === 'ArrowRight') { this.seek(this._cursor + SEEK_STEP_S) }
-      else if (e.key === 'Home')       { this.seek(0) }
-      else if (e.key === 'End')        { this.goLive() }
+      else if (e.key === 'ArrowLeft') {
+        if (focused && !focused.linked) { focused.ownCursor = focused.clampTime(focused.ownCursor - SEEK_STEP_S); this.refresh() }
+        else this.seek(this._cursor - SEEK_STEP_S)
+      } else if (e.key === 'ArrowRight') {
+        if (focused && !focused.linked) { focused.ownCursor = focused.clampTime(focused.ownCursor + SEEK_STEP_S); this.refresh() }
+        else this.seek(this._cursor + SEEK_STEP_S)
+      } else if (e.key === 'Home')       { this.seek(0) }
+      else if (e.key === 'End')          { this.goLive() }
     }
     document.addEventListener('keydown', this._onKey)
   }
 
-  setStore(store) {
-    this._store = store
-    this._dirty = true
-    this._ribbonDirty = true   // new/changed session — rebuild the ribbon+ticks immediately
-    this._updateLiveBtn()
-  }
-
-  /** Resize the ribbon canvas buffer to match its on-screen size (call on window resize). */
-  resize() {
-    if (!this._els) return
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-    const c = this._els.ribbon
-    const r = c.getBoundingClientRect()
-    if (!r.width || !r.height) return
-    const w = Math.max(1, Math.round(r.width * dpr))
-    const h = Math.max(1, Math.round(r.height * dpr))
-    if (c.width !== w || c.height !== h) {
-      // Assigning canvas.width/height clears its drawing buffer, so anything
-      // painted before this call (e.g. the first synchronous render triggered
-      // by `setActive()`, before `App._showPanel` gets to call `resize()`) is
-      // wiped out right here. `_ribbonDirty` alone isn't enough to recover —
-      // it's only checked inside `_render()`, which is gated behind `_dirty`;
-      // without also setting that, the ribbon stays blank until something
-      // else (e.g. a seek) happens to flip `_dirty` again. Set both.
-      c.width = w; c.height = h
-      this._ribbonDirty = true
-      this._dirty = true
-    }
-  }
+  /** Resize the head/track geometry (call on window resize). No-op today — kept
+   *  for symmetry with the per-track resize and in case the master bar grows
+   *  its own canvas again. */
+  resize() {}
 
   /**
    * Show/update the floating time pill at the pointer's position — the preview
@@ -156,7 +133,7 @@ export default class Scrubber {
    * overflow past the timeline's left/right edges.
    */
   _showHoverTime(e) {
-    const dur = this._durationOr0()
+    const dur = this._durationSource()
     if (dur <= 0) return
     const frac = this._fracFromEvent(e)
     this._els.hoverTime.textContent = fmt(frac * dur)
@@ -167,17 +144,17 @@ export default class Scrubber {
     this._els.hoverTime.style.left = `${Math.max(half, Math.min(rect.width - half, rawLeft))}px`
   }
 
-  /** ● LIVE only means something for a growing live session — hide it for files. */
+  /** ● LIVE only means something with a live track to follow — hide it otherwise. */
   _updateLiveBtn() {
-    if (this._els?.live) this._els.live.hidden = this._store?.source !== 'live'
+    if (this._els?.live) this._els.live.hidden = this._liveDurationSource() == null
   }
 
   /** Force a redraw on the next frame (e.g. after new data was ingested). */
   refresh() { this._dirty = true }
 
   /**
-   * Show/hide + start/stop the scrubber. On activation, jumps to the start of a
-   * file, or follows the live edge of a growing session.
+   * Show/hide + start/stop the scrubber. On activation, jumps to the start, or
+   * follows the live track's leading edge.
    * @param {boolean} on
    * @param {{atStart?:boolean, follow?:boolean}} [opts]
    */
@@ -186,8 +163,7 @@ export default class Scrubber {
     if (this._els?.root) this._els.root.hidden = !on
     this._updateLiveBtn()
     if (on) {
-      const dur = this._durationOr0()
-      if (opts.follow) { this._following = true; this._cursor = dur }
+      if (opts.follow) { this._following = true; this._cursor = this._liveDurationSource() ?? this._durationSource() }
       else if (opts.atStart) { this._following = false; this._cursor = 0 }
       this._dirty = true
       this._lastPerf = performance.now()
@@ -204,7 +180,7 @@ export default class Scrubber {
     if (this._playing) {
       this._following = false
       // If parked at the end, restart from the beginning.
-      if (this._cursor >= this._durationOr0() - 0.01) this._cursor = 0
+      if (this._cursor >= this._durationSource() - 0.01) this._cursor = 0
       this._lastPerf = performance.now()
     }
     this._updatePlayBtn()
@@ -212,8 +188,8 @@ export default class Scrubber {
 
   /**
    * Stop tracking the leading edge without moving the playhead — used when the
-   * headset drops, since the session stops growing and "following" would just
-   * pin the cursor to a frozen duration.
+   * headset drops, since the live track stops growing and "following" would
+   * just pin the cursor to a frozen duration.
    */
   stopFollowing() {
     this._following = false
@@ -225,23 +201,31 @@ export default class Scrubber {
     this._following = true
     this._playing = false
     this._updatePlayBtn()
-    this._cursor = this._durationOr0()
+    this._cursor = this._liveDurationSource() ?? this._durationSource()
     this._dirty = true
   }
 
   seek(tSeconds) {
-    const dur = this._durationOr0()
+    const dur = this._durationSource()
     this._cursor = Math.max(0, Math.min(dur, tSeconds))
-    // Landing exactly on the live edge (drag-to-the-far-right, or a keyboard
-    // nudge that happens to reach it) re-engages live mode, same as clicking
-    // ● LIVE — otherwise it'd take a second explicit click to resume following.
-    this._following = dur > 0 && this._cursor >= dur - 0.01
+    this._following = this._isLiveEdge(dur)
     this._dirty = true
   }
 
-  // ── Internals ────────────────────────────────────────────────────────────
+  /**
+   * True only when the cursor sits on the live track's own leading edge *and*
+   * that edge is also the master timeline's end. A loaded file can be far
+   * longer than the live track, so a seek anywhere past the live track's own
+   * (short) duration must not by itself re-engage live-follow — otherwise
+   * every seek into the longer file's later data would snap straight back to
+   * the live edge instead of landing where it was aimed.
+   */
+  _isLiveEdge(dur) {
+    const liveDur = this._liveDurationSource()
+    return liveDur != null && dur - liveDur <= 0.01 && this._cursor >= liveDur - 0.01
+  }
 
-  _durationOr0() { return this._store ? this._store.duration() : 0 }
+  // ── Internals ────────────────────────────────────────────────────────────
 
   _cycleSpeed() {
     this._speedIdx = (this._speedIdx + 1) % SPEEDS.length
@@ -255,23 +239,28 @@ export default class Scrubber {
 
   _loop() {
     this._raf = requestAnimationFrame(() => this._loop())
-    if (!this._active || !this._store) return
+    if (!this._active) return
 
     const now = performance.now()
     const dt = (now - this._lastPerf) / 1000
     this._lastPerf = now
-    const dur = this._durationOr0()
+    const dur = this._durationSource()
+    const liveDur = this._liveDurationSource()
 
     let needRender = this._dirty || this._dragging
 
     if (this._following) {
-      this._cursor = dur
+      this._cursor = liveDur ?? dur
       needRender = true
     } else if (this._playing) {
       this._cursor += dt * SPEEDS[this._speedIdx]
-      // Playback catching up to the live edge is the same as dragging there:
-      // you're now looking at the most recent data, so re-engage live mode.
-      if (this._cursor >= dur) { this._cursor = dur; this._playing = false; this._following = true }
+      // Playback reaching the overall (longest-track) end stops; it only
+      // re-engages live-follow if that end is actually the live track's edge.
+      if (this._cursor >= dur) {
+        this._cursor = dur
+        this._playing = false
+        if (this._isLiveEdge(dur)) this._following = true
+      }
       needRender = true
     }
 
@@ -282,7 +271,7 @@ export default class Scrubber {
   }
 
   _render(dur) {
-    this._onFrame(this._store, this._cursor)
+    this._onFrame(this._cursor)
 
     // Re-sync the play/pause icon and ● LIVE's red/grey state on every actual
     // render — not just from the handful of call sites that flip `_playing`/
@@ -293,80 +282,12 @@ export default class Scrubber {
     // unrelated call happened to refresh it.
     this._updatePlayBtn()
 
-    // Track UI.
+    // Master track UI. Per-track ribbons/ticks are drawn by each Track itself.
     const frac = dur > 0 ? this._cursor / dur : 0
     this._els.fill.style.width = `${(frac * 100).toFixed(2)}%`
     this._els.head.style.left = `${(frac * 100).toFixed(2)}%`
     this._els.time.textContent = fmt(this._cursor)
     this._els.duration.textContent = fmt(dur)
-
-    this._renderTimeline(dur)
-  }
-
-  // ── Quality ribbon + event ticks ─────────────────────────────────────────
-
-  /**
-   * Rebuild the quality ribbon and event ticks — but not every frame. A loaded
-   * file has a fixed duration, so this builds once and never again; a live/DVR
-   * session's duration keeps growing, so it re-samples at most once every
-   * `RIBBON_REBUILD_MS` as new data arrives. Without this throttle, redoing a
-   * 300-point quality scan (each touching ~1 s of raw EEG) every animation frame
-   * would reintroduce the same per-frame-cost problem the Analysis tab's line
-   * plots had before their mip-pyramid fix.
-   */
-  _renderTimeline(dur) {
-    if (!this._store || dur <= 0) return
-    const now = performance.now()
-    if (!this._ribbonDirty && dur === this._ribbonBuiltFor) return
-    if (!this._ribbonDirty && now - this._ribbonLastBuiltAt < RIBBON_REBUILD_MS) return
-
-    this._ribbonDirty = false
-    this._ribbonBuiltFor = dur
-    this._ribbonLastBuiltAt = now
-    this._renderQualityRibbon(dur)
-    this._renderTicks(dur)
-  }
-
-  /**
-   * One thin row per EEG channel (TP9/AF7/AF8/TP10, top→bottom — same order as
-   * everywhere else) rather than a single collapsed worst-of-4 row, so a lone
-   * bad electrode reads as exactly that instead of looking like the whole
-   * signal dropped out.
-   */
-  _renderQualityRibbon(dur) {
-    const c = this._els.ribbon
-    const ctx = this._ribbonCtx
-    const W = c.width, H = c.height
-    if (!W || !H) return
-    ctx.clearRect(0, 0, W, H)   // rows leave a gap between them, so old pixels must be cleared first
-    const perChannel = this._store.qualityRibbon(RIBBON_SAMPLES)
-    const nc = perChannel.length
-    const cellH = H / nc
-    const gap = Math.max(1, Math.round(cellH * 0.2))   // visual separation between rows
-    for (let ch = 0; ch < nc; ch++) {
-      const y0 = Math.round(ch * cellH)
-      const y1 = Math.round((ch + 1) * cellH) - gap
-      const row = perChannel[ch]
-      for (let i = 0; i < RIBBON_SAMPLES; i++) {
-        const x0 = Math.floor((i * W) / RIBBON_SAMPLES)
-        const x1 = Math.max(x0 + 1, Math.floor(((i + 1) * W) / RIBBON_SAMPLES))
-        ctx.fillStyle = this._colors[row[i]] || this._colors.poor
-        ctx.fillRect(x0, y0, x1 - x0, Math.max(1, y1 - y0))
-      }
-    }
-  }
-
-  _renderTicks(dur) {
-    const container = this._els.ticks
-    container.innerHTML = ''
-    const addTick = (t, cls) => {
-      const el = document.createElement('div')
-      el.className = `scrub-tick ${cls}`
-      el.style.left = `${Math.max(0, Math.min(100, (t / dur) * 100)).toFixed(2)}%`
-      container.appendChild(el)
-    }
-    for (const rec of this._store.music) addTick(rec.t, 'scrub-tick--music')
-    for (const gap of this._store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
   }
 }
 

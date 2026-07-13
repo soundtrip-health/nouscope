@@ -136,17 +136,17 @@ a:focus-visible {
   }
 }
 
-.eeg-controls {
+// Live-track controls (connect/battery/record/pause/mic/audio-upload) — now
+// cloned into the live track's header (see Track.js) instead of one global
+// fixed bar, so these rules target classes rather than a `#eeg-controls`
+// container. `.track-controls` is the shared row wrapper.
+.track-controls {
   display: flex;
-  position: fixed;
-  bottom: 1.5rem;
-  left: 1.5rem;
-  z-index: 1001;  // above the bio panel so controls stay clickable
   align-items: center;
   gap: 0.6rem;
 
   // Uniform box height across every control (buttons + upload labels) so the
-  // bar reads as one row; each keeps its own horizontal padding / font.
+  // row reads as one line; each keeps its own horizontal padding / font.
   // `:not([hidden])` so this display rule doesn't override the hidden attribute
   // on the pause / record buttons.
   button:not([hidden]),
@@ -160,7 +160,7 @@ a:focus-visible {
     padding-bottom: 0;
   }
 
-  #eeg-connect {
+  .track-eeg-connect {
     background: none;
     border: 1px solid var(--border-control);
     color: var(--color-text);
@@ -182,7 +182,7 @@ a:focus-visible {
     }
   }
 
-  #pause-btn {
+  .track-pause-btn {
     background: none;
     border: 1px solid var(--border-control);
     color: var(--color-text);
@@ -198,7 +198,7 @@ a:focus-visible {
     }
   }
 
-  #mic-btn {
+  .track-mic-btn {
     background: none;
     border: 1px solid var(--border-control);
     color: var(--color-text);
@@ -324,6 +324,8 @@ a:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+
+  &[hidden] { display: none; }
 }
 
 .bio-section-header {
@@ -459,7 +461,7 @@ a:focus-visible {
 }
 
 #spec-canvas, #spec-lo-canvas, #spec-audio-canvas,
-#an-spec-canvas, #an-spec-lo-canvas, #an-spec-audio-canvas {
+.an-spec-canvas, .an-spec-lo-canvas, .an-spec-audio-canvas {
   image-rendering: pixelated;
 }
 
@@ -575,32 +577,177 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-// ── Full-viewport data panel ──────────────────────────────────────────────────
-// Lays out all bio sections in a responsive grid. CSS-scales canvases
-// (image-rendering: pixelated on spectrograms keeps columns crisp; webgl-plot
-// line traces scale smoothly). Applied whenever a session is on screen.
+// ── Multi-track data panel ────────────────────────────────────────────────────
+// GarageBand-style: a vertical stack of tracks, each a left header column
+// (label, connect/record/mic controls for the live track, link/offset/graph
+// menu) beside a right lane (its own timeline strip, then its enabled graphs
+// laid out horizontally/compact — up to 4, see Track.js `MAX_PANELS`).
+// CSS-scales canvases (image-rendering: pixelated on spectrograms keeps
+// columns crisp; webgl-plot line traces scale smoothly).
 body.analysis-mode {
-  .bio-panel {
+  #analysis-panel {
     position: fixed;
     inset: 0;
-    width: 100vw;
-    height: 100vh;
-    max-height: 100vh;
-    left: 0;
-    bottom: 0;
-    z-index: 1004;
-    padding: 1.5rem;
+    bottom: 4.5rem;   // room for the master scrubber
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow-y: auto;
+    padding: 1rem;
+  }
+
+  .track {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-auto-rows: minmax(0, 1fr);
-    gap: 1rem;
-    overflow: auto;
+    grid-template-columns: 240px 1fr;
+    gap: 0.75rem;
+    flex: 0 0 auto;
+    padding: 0.6rem;
+    border: 1px solid var(--border-hairline);
+    border-radius: 4px;
+    background: var(--surface-panel);
+  }
+
+  .track-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .track-controls {
+    flex-wrap: wrap;
+    row-gap: 0.3rem;
+  }
+
+  // Label + link toggle + offset + graph menu (the timeline itself moved to
+  // `.track-timeline-strip` in the lane column, so its ribbon spans the full
+  // width of the graphs it corresponds to).
+  .track-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+  }
+
+  .track-label {
+    flex-shrink: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-value);
+  }
+
+  .track-link-btn {
+    flex-shrink: 0;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+
+    &.active { border-color: var(--entrain-to); }
+  }
+
+  .track-offset-input {
+    flex-shrink: 0;
+    width: 3.5rem;
+    background: none;
+    border: 1px solid var(--border-control);
+    color: var(--color-text);
+    border-radius: 3px;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.3rem;
+  }
+
+  .track-replace-btn {
+    align-self: flex-start;
+  }
+
+  .track-lane-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .track-timeline {
+    height: 20px;
+  }
+
+  // Pop-out graph-select menu — a native <details>/<summary> popover so open/
+  // close needs no hand-rolled outside-click JS.
+  .track-menu {
+    position: relative;
+    flex-shrink: 0;
+
+    > summary {
+      list-style: none;
+      &::-webkit-details-marker { display: none; }
+    }
+
+    &[open] .track-menu-btn { border-color: var(--entrain-to); }
+  }
+
+  .track-menu-btn {
+    padding: 0.2rem 0.4rem;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+
+  .track-menu-popover {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 1010;
+    margin-top: 0.25rem;
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    background: var(--surface-panel);
+    border: 1px solid var(--border-hairline);
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .track-menu-count {
+    font-size: 0.65rem;
+    color: var(--text-value);
+    margin-bottom: 0.15rem;
+  }
+
+  .track-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    cursor: pointer;
+
+    &:has(input:disabled) { opacity: 0.4; cursor: not-allowed; }
+  }
+
+  // The lane itself: enabled graphs laid out horizontally/compact rather than
+  // the old full-viewport 2-column grid — `.analysis-panel` here is one
+  // track's cloned `#track-lane-template` instance (see AnalysisDisplay).
+  .analysis-panel {
+    position: static;
+    width: 100%;
+    height: 180px;
+    max-height: none;
+    padding: 0;
+    border: none;
+    background: none;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 0.75rem;
   }
 
   .bio-section {
+    flex: 1 1 220px;
+    min-width: 160px;
     min-height: 0;
-    min-width: 0;
-    gap: 0.4rem;
+    gap: 0.3rem;
 
     canvas {
       width: 100% !important;
@@ -610,44 +757,12 @@ body.analysis-mode {
     }
   }
 
+  // EEG gets width priority — it's the panel every track opens with.
+  .bio-section[data-panel='eeg'] { flex: 2 1 320px; }
+
   .bio-spec-body, .bio-bands-body, .bio-mse-body {
     flex: 1;
     min-height: 0;
-  }
-
-  // First section (EEG) spans full width for clarity
-  .bio-section:first-child { grid-column: 1 / -1; }
-
-  // Larger, more legible text throughout the full-screen data view.
-  .bio-label            { font-size: 0.9rem; }
-  .bio-hr,
-  .bio-entrain-value,
-  .bio-mse-value,
-  .bio-imu-legend       { font-size: 0.85rem; }
-  .bio-band-legend,
-  .bio-mse-legend       { font-size: 0.9rem; }
-  .bio-band-val,
-  .bio-mse-val          { font-size: 0.8rem; min-width: 3rem; }
-  .bio-window-stat      { font-size: 0.75rem; }
-  .bio-spec-axis        { font-size: 0.7rem; min-width: 1.6rem; }
-
-  // Keep controls on top and clickable
-  .eeg-controls { z-index: 1005; }
-}
-
-// The panel leaves room at the bottom for the scrubber.
-body.analysis-mode {
-  #analysis-panel {
-    height: calc(100vh - 4.5rem);
-    max-height: calc(100vh - 4.5rem);
-    bottom: 4.5rem;
-  }
-
-  // Lift the live controls above the full-width scrubber so Connect/Record stay
-  // reachable while reviewing.
-  .eeg-controls {
-    bottom: 4.75rem;
-    z-index: 1007;
   }
 }
 
@@ -694,21 +809,13 @@ body.analysis-mode {
   flex-shrink: 0;
 }
 
-.session-label {
+// Standalone "+ Add track" control — loads a saved .jsonl as a new review
+// track, independent of the live session (see App._loadRecordingFile).
+.track-stack-toolbar {
   position: fixed;
   top: 1.5rem;
   right: 1.5rem;
   z-index: 1006;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  letter-spacing: 0.04em;
-  max-width: 20rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-
-  &:empty { display: none; }
 }
 
 .scrub-timeline {

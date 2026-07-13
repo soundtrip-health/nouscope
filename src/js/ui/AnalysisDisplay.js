@@ -1,5 +1,4 @@
 import { WebglLineRoll, createWebGL2Context, setBackgroundColor } from 'webgl-plot'
-import App from '../App'
 import { colorVar, colorVars } from './palette'
 import {
   TRANSPARENT,
@@ -33,7 +32,10 @@ import {
  * width) so the ring is overwritten left→right across the window. Spectrograms
  * blit stored columns per output pixel, nearest-in-time.
  *
- * Canvas IDs carry an `an-` prefix (see #analysis-panel markup).
+ * Scoped to a `rootEl` (a cloned `#track-lane-template` instance) so multiple
+ * tracks can each own an independent set of canvases/readouts — every lookup
+ * below is a class query within that root rather than a page-global id.
+ * Canvas classes carry an `an-` prefix (see `#track-lane-template` markup).
  */
 
 const OUT_N = 280   // output columns across each plot (matches canvas width)
@@ -57,70 +59,136 @@ const ROLL_SHIFT_LIMIT = 20000
 const SPEC_NEAREST_TOLERANCE = 1.5
 
 export default class AnalysisDisplay {
-  constructor() {
+  /**
+   * @param {HTMLElement} rootEl — the cloned `#track-lane-template` instance
+   *   this display draws into; every canvas/readout is looked up within it.
+   * @param {object} [opts]
+   * @param {Set<string>|null} [opts.normalizeBands] — which band-legend rows
+   *   to show (replaces a live EEGManager's `normalizeBands`); null shows all.
+   * @param {Set<string>} [opts.enabledPanels] — panels to allocate resources
+   *   for up front (see `setEnabledPanels`); defaults to all 8.
+   */
+  constructor(rootEl, opts = {}) {
+    this._root = rootEl
+    this._normalizeBands = opts.normalizeBands ?? null
     this._inited = false
+    this._enabled = new Set(opts.enabledPanels ?? Object.keys(PANEL_WINDOWS))
+    this._panelReady = {}
   }
 
   init() {
     if (this._inited) return
 
-    // EEG — 4 stacked channels, min/max envelope → 2 points per column
-    this._eegGL = this._ctx('an-eeg-canvas')
-    this._eegPlot = new WebglLineRoll(this._eegGL, OUT_N * 2, 4)
-    colorVars(EEG_TOKENS).forEach((c, i) => this._eegPlot.setLineColor(c, i))
-
-    // Spectrograms (2D canvases)
-    this._specCtx      = this._canvas2d('an-spec-canvas')
-    this._specLoCtx    = this._canvas2d('an-spec-lo-canvas')
-    this._specAudioCtx = this._canvas2d('an-spec-audio-canvas')
-
-    // EEG band powers — 5 lines, one value per column (step/hold from records)
-    this._bandGL = this._ctx('an-band-canvas')
-    this._bandPlot = new WebglLineRoll(this._bandGL, OUT_N, 5)
-    colorVars(BAND_TOKENS).forEach((c, i) => this._bandPlot.setLineColor(c, i))
+    // Readouts + legend DOM refs — cheap (no GL), always resolved regardless
+    // of which graphs are enabled, since the menu can enable them later.
     const BAND_NAMES = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-    this._bandItemEls = BAND_NAMES.map(b => document.getElementById(`an-band-item-${b}`))
-    this._bandValEls  = BAND_NAMES.map(b => document.getElementById(`an-band-val-${b}`))
-
-    // MSE — 5-line timeseries (one per τ scale)
-    this._mseGL = this._ctx('an-mse-canvas')
-    this._msePlot = new WebglLineRoll(this._mseGL, OUT_N, 5)
-    colorVars(MSE_TOKENS).forEach((c, i) => this._msePlot.setLineColor(c, i))
-    this._mseValueEl       = document.getElementById('an-mse-value')
-    this._mseValEls        = [0, 1, 2, 3, 4].map(i => document.getElementById(`an-mse-val-${i}`))
-
-    // PPG — single trace, min/max envelope
-    this._ppgGL = this._ctx('an-ppg-canvas')
-    this._ppgPlot = new WebglLineRoll(this._ppgGL, OUT_N * 2, 1)
-    this._ppgPlot.setLineColor(colorVar('--ppg'), 0)
-
-    // IMU — accel (3) + gyro (3)
-    this._imuGL = this._ctx('an-imu-canvas')
-    this._imuPlot = new WebglLineRoll(this._imuGL, OUT_N * 2, 6)
-    colorVars(IMU_TOKENS).forEach((c, i) => this._imuPlot.setLineColor(c, i))
-
-    // Readouts
-    this._hrEl           = document.getElementById('an-hr')
-    this._hrAvgEl        = document.getElementById('an-hr-avg')
-    this._entrainValueEl = document.getElementById('an-entrain-value')
-    this._entrainAvgEl   = document.getElementById('an-entrain-avg')
-    this._entrainFillEl  = document.getElementById('an-entrain-fill')
-    this._qualityDots    = document.querySelectorAll('#an-quality-dots .quality-dot')
+    this._bandItemEls = BAND_NAMES.map(b => this._root.querySelector(`.an-band-item-${b}`))
+    this._bandValEls  = BAND_NAMES.map(b => this._root.querySelector(`.an-band-val-${b}`))
+    this._mseValueEl  = this._root.querySelector('.an-mse-value')
+    this._mseValEls   = [0, 1, 2, 3, 4].map(i => this._root.querySelector(`.an-mse-val-${i}`))
+    this._hrEl           = this._root.querySelector('.an-hr')
+    this._hrAvgEl        = this._root.querySelector('.an-hr-avg')
+    this._entrainValueEl = this._root.querySelector('.an-entrain-value')
+    this._entrainAvgEl   = this._root.querySelector('.an-entrain-avg')
+    this._entrainFillEl  = this._root.querySelector('.an-entrain-fill')
+    this._qualityDots    = this._root.querySelectorAll('.an-quality-dots .quality-dot')
 
     // Audio-tempogram section — hidden for loaded files (no audio is stored in JSONL).
-    this._audioSection = document.getElementById('an-audio-section')
+    this._audioSection = this._root.querySelector('.an-audio-section')
 
     this._inited = true
+    for (const key of this._enabled) this._ensurePanel(key)
   }
 
-  _ctx(id) {
-    const gl = createWebGL2Context(document.getElementById(id), { transparent: true })
+  /**
+   * Change which panels are drawn. Each panel's WebGL/2D context is created
+   * only the first time it's enabled, and freed (GL buffers/program deleted,
+   * context explicitly lost) the moment it's disabled — with up to a handful
+   * of tracks on screen at once, leaving every panel's context alive
+   * regardless of visibility would risk exceeding the browser's live WebGL
+   * context limit (~8–16), so only the panels actually shown may hold one.
+   */
+  setEnabledPanels(set) {
+    const prev = this._enabled
+    if (prev.size === set.size && [...prev].every(k => set.has(k))) return
+    this._enabled = new Set(set)
+    if (!this._inited) return
+    for (const key of prev) if (!this._enabled.has(key)) this._disposePanel(key)
+    for (const key of this._enabled) if (!prev.has(key)) this._ensurePanel(key)
+  }
+
+  _ensurePanel(key) {
+    if (this._panelReady[key]) return
+    switch (key) {
+      case 'eeg':
+        this._eegGL = this._ctx('an-eeg-canvas')
+        this._eegPlot = new WebglLineRoll(this._eegGL, OUT_N * 2, 4)
+        colorVars(EEG_TOKENS).forEach((c, i) => this._eegPlot.setLineColor(c, i))
+        break
+      case 'bands':
+        this._bandGL = this._ctx('an-band-canvas')
+        this._bandPlot = new WebglLineRoll(this._bandGL, OUT_N, 5)
+        colorVars(BAND_TOKENS).forEach((c, i) => this._bandPlot.setLineColor(c, i))
+        break
+      case 'mse':
+        this._mseGL = this._ctx('an-mse-canvas')
+        this._msePlot = new WebglLineRoll(this._mseGL, OUT_N, 5)
+        colorVars(MSE_TOKENS).forEach((c, i) => this._msePlot.setLineColor(c, i))
+        break
+      case 'ppg':
+        this._ppgGL = this._ctx('an-ppg-canvas')
+        this._ppgPlot = new WebglLineRoll(this._ppgGL, OUT_N * 2, 1)
+        this._ppgPlot.setLineColor(colorVar('--ppg'), 0)
+        break
+      case 'imu':
+        this._imuGL = this._ctx('an-imu-canvas')
+        this._imuPlot = new WebglLineRoll(this._imuGL, OUT_N * 2, 6)
+        colorVars(IMU_TOKENS).forEach((c, i) => this._imuPlot.setLineColor(c, i))
+        break
+      case 'spec':      this._specCtx      = this._canvas2d('an-spec-canvas'); break
+      case 'specLo':    this._specLoCtx    = this._canvas2d('an-spec-lo-canvas'); break
+      case 'specAudio': this._specAudioCtx = this._canvas2d('an-spec-audio-canvas'); break
+    }
+    this._panelReady[key] = true
+  }
+
+  _disposePanel(key) {
+    if (!this._panelReady[key]) return
+    switch (key) {
+      case 'eeg':   this._disposeRoll(this._eegPlot);  this._eegGL  = null; this._eegPlot  = null; break
+      case 'bands': this._disposeRoll(this._bandPlot); this._bandGL = null; this._bandPlot = null; break
+      case 'mse':   this._disposeRoll(this._msePlot);  this._mseGL  = null; this._msePlot  = null; break
+      case 'ppg':   this._disposeRoll(this._ppgPlot);  this._ppgGL  = null; this._ppgPlot  = null; break
+      case 'imu':   this._disposeRoll(this._imuPlot);  this._imuGL  = null; this._imuPlot  = null; break
+      case 'spec':      this._specCtx      = null; break
+      case 'specLo':    this._specLoCtx    = null; break
+      case 'specAudio': this._specAudioCtx = null; break
+    }
+    this._panelReady[key] = false
+  }
+
+  /** Free a WebglLineRoll's GPU buffers/program and lose its GL context. */
+  _disposeRoll(plot) {
+    if (!plot) return
+    plot.gl.deleteBuffer(plot.vertexBuffer)
+    plot.gl.deleteBuffer(plot.colorBuffer)
+    plot.gl.deleteProgram(plot.program)
+    plot.gl.getExtension('WEBGL_lose_context')?.loseContext()
+  }
+
+  /** Release every currently-held panel resource — call when a track is removed. */
+  dispose() {
+    for (const key of Object.keys(this._panelReady)) this._disposePanel(key)
+  }
+
+  _ctx(cls) {
+    const gl = createWebGL2Context(this._root.querySelector(`.${cls}`), { transparent: true })
     setBackgroundColor(gl, TRANSPARENT)
     return gl
   }
 
-  _canvas2d(id) {
-    const c = document.getElementById(id)
+  _canvas2d(cls) {
+    const c = this._root.querySelector(`.${cls}`)
     const ctx = c.getContext('2d')
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, c.width, c.height)
@@ -138,6 +206,7 @@ export default class AnalysisDisplay {
     if (!this._inited) return
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
     for (const gl of [this._eegGL, this._bandGL, this._mseGL, this._ppgGL, this._imuGL]) {
+      if (!gl) continue   // panel disabled — no context to size
       const c = gl.canvas
       const r = c.getBoundingClientRect()
       if (!r.width || !r.height) continue
@@ -147,6 +216,7 @@ export default class AnalysisDisplay {
       gl.viewport(0, 0, c.width, c.height)
     }
     for (const ctx of [this._specCtx, this._specLoCtx, this._specAudioCtx]) {
+      if (!ctx) continue
       const c = ctx.canvas
       const r = c.getBoundingClientRect()
       const w = Math.max(1, Math.round(r.width * dpr))
@@ -161,26 +231,31 @@ export default class AnalysisDisplay {
   renderAt(store, cursor) {
     if (!this._inited || !store) return
 
-    // Audio tempogram is unavailable for loaded files (no audio stored in JSONL).
-    // Hide the section entirely so it doesn't read as a broken panel.
+    // Audio tempogram is unavailable for loaded files (no audio stored in JSONL);
+    // combine that with the panel-menu's own enabled/disabled state — either
+    // reason hides the section so it doesn't read as a broken/missing panel.
     if (this._audioSection) {
       const noAudio = store.specAudio.length === 0
-      this._audioSection.hidden = store.source === 'file' && noAudio
+      this._audioSection.hidden = !this._enabled.has('specAudio') || (store.source === 'file' && noAudio)
     }
 
     const w = (panel) => [cursor - PANEL_WINDOWS[panel], cursor]
 
-    this._renderEEG(store, ...w('eeg'))
-    this._renderPPG(store, ...w('ppg'))
-    this._renderIMU(store, ...w('imu'))
-    this._renderBands(store, ...w('bands'))
-    this._renderMse(store, ...w('mse'))
+    if (this._enabled.has('eeg'))   this._renderEEG(store, ...w('eeg'))
+    if (this._enabled.has('ppg'))   this._renderPPG(store, ...w('ppg'))
+    if (this._enabled.has('imu'))   this._renderIMU(store, ...w('imu'))
+    if (this._enabled.has('bands')) this._renderBands(store, ...w('bands'))
+    if (this._enabled.has('mse'))   this._renderMse(store, ...w('mse'))
 
-    const [st0, st1] = w('spec')
-    this._renderSpec(this._specCtx, store.specColumns('main', st0, st1), st0, st1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
-    const [lt0, lt1] = w('specLo')
-    this._renderSpec(this._specLoCtx, store.specColumns('lo', lt0, lt1), lt0, lt1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
-    this._renderAudioSpec(store, ...w('specAudio'))
+    if (this._enabled.has('spec')) {
+      const [st0, st1] = w('spec')
+      this._renderSpec(this._specCtx, store.specColumns('main', st0, st1), st0, st1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
+    }
+    if (this._enabled.has('specLo')) {
+      const [lt0, lt1] = w('specLo')
+      this._renderSpec(this._specLoCtx, store.specColumns('lo', lt0, lt1), lt0, lt1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
+    }
+    if (this._enabled.has('specAudio')) this._renderAudioSpec(store, ...w('specAudio'))
 
     this._renderReadouts(store, cursor)
   }
@@ -503,7 +578,7 @@ export default class AnalysisDisplay {
     // Show a legend row only for the ones that mean something.
     const bands = store.sampleAt('bands', t)
     const normNames = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-    const active = App.eegManager?.normalizeBands
+    const active = this._normalizeBands
     for (let i = 0; i < 5; i++) {
       const shown = !active || active.has(normNames[i])
       if (this._bandItemEls[i]) this._bandItemEls[i].style.display = shown ? '' : 'none'
