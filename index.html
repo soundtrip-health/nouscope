@@ -30,11 +30,14 @@
          single-session app (untouched); #multitrack-view is a separate
          opt-in feature for reviewing several loaded .jsonl recordings side
          by side. Nothing in #multitrack-view shares ids or wrapper classes
-         with #session-view, so nothing here can affect the original tab. -->
-    <div class="view-tabs">
-      <button type="button" class="view-tab-btn active" id="tab-session">Session</button>
-      <button type="button" class="view-tab-btn" id="tab-multitrack">Multi-Track</button>
-    </div>
+         with #session-view, so nothing here can affect the original tab.
+         A compact top-right dropdown rather than a full-width bar, so it
+         can't cover the EEG dots; the session-label (track name) sits
+         top-center in the single view to stay clear of it. -->
+    <select class="view-select" id="view-select" title="Switch view">
+      <option value="session" selected>Single Track</option>
+      <option value="multitrack">Multiple Tracks</option>
+    </select>
 
     <main id="session-view">
       <span class="session-label" id="scrub-session-label"></span>

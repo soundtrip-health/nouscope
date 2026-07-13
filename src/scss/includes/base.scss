@@ -697,7 +697,8 @@ body.analysis-mode {
 .session-label {
   position: fixed;
   top: 1.5rem;
-  right: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1006;
   font-size: 0.7rem;
   color: var(--text-muted);
@@ -706,7 +707,7 @@ body.analysis-mode {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
+  text-align: center;
 
   &:empty { display: none; }
 }

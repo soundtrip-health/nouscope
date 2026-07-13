@@ -15,46 +15,35 @@
 // underneath the visible tab.
 main[hidden] { display: none; }
 
-// ── Tab switcher ─────────────────────────────────────────────────────────
-.view-tabs {
+// ── View switcher ────────────────────────────────────────────────────────
+// A single compact dropdown, top-right — the same corner the session-label
+// (track name) used to occupy in the single view; the label has moved to
+// top-center so the two don't collide.
+.view-select {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
+  top: 1.5rem;
+  right: 1.5rem;
   z-index: 2000;
-  display: flex;
-  gap: 0.25rem;
-  padding: 0.5rem 0.75rem;
   background: var(--surface-panel);
-  border-bottom: 1px solid var(--border-hairline);
-}
-
-.view-tab-btn {
-  background: none;
   border: 1px solid var(--border-control);
-  color: var(--text-muted);
+  color: var(--color-text);
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   letter-spacing: 0.05em;
-  padding: 0.4rem 0.9rem;
+  padding: 0.35rem 0.5rem;
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s, color 0.2s;
 
-  &:hover { border-color: var(--color-text); color: var(--color-text); }
-
-  &.active {
-    border-color: var(--entrain-to);
-    color: var(--color-text);
-    background: var(--wash-hover);
-  }
+  &:hover { border-color: var(--color-text); }
 }
 
 // ── Track stack ──────────────────────────────────────────────────────────
 #multitrack-view {
   position: fixed;
   inset: 0;
-  top: 2.5rem;   // below the tab bar
-  padding: 1rem;
+  // Top inset starts at the same 1.5rem the single view uses for its
+  // top-right/top-center fixed controls, plus enough extra room to clear
+  // the +Add-track button stacked below the view-select dropdown.
+  padding: 5.5rem 1rem 1rem;
   overflow-y: auto;
 
   &[hidden] { display: none; }
@@ -62,8 +51,8 @@ main[hidden] { display: none; }
 
 .mt-add-track-btn {
   position: fixed;
-  top: 0.6rem;
-  right: 0.75rem;
+  top: 3.4rem;
+  right: 1.5rem;
   z-index: 2001;
 }
 

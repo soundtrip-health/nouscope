@@ -7,20 +7,17 @@ import MultiTrackApp from './MultiTrackApp'
 
   const multiTrackApp = new MultiTrackApp()
 
-  // Tab switcher: two fully independent views, #session-view (the original
+  // View switcher: two fully independent views, #session-view (the original
   // single-session app) and #multitrack-view (file-review only). Switching
   // never tears anything down — each view keeps running underneath; this
   // just toggles which one is visible.
   const sessionView = document.getElementById('session-view')
   const multiTrackView = document.getElementById('multitrack-view')
-  const tabSession = document.getElementById('tab-session')
-  const tabMultiTrack = document.getElementById('tab-multitrack')
+  const viewSelect = document.getElementById('view-select')
 
   const showSession = () => {
     sessionView.hidden = false
     multiTrackView.hidden = true
-    tabSession.classList.add('active')
-    tabMultiTrack.classList.remove('active')
     // Canvases laid out while this tab was hidden report zero size; App.js
     // already re-sizes them on 'resize', so just re-fire that event now
     // rather than reaching into its internals.
@@ -29,11 +26,11 @@ import MultiTrackApp from './MultiTrackApp'
   const showMultiTrack = () => {
     sessionView.hidden = true
     multiTrackView.hidden = false
-    tabMultiTrack.classList.add('active')
-    tabSession.classList.remove('active')
     multiTrackApp.onShow()
   }
 
-  tabSession.addEventListener('click', showSession)
-  tabMultiTrack.addEventListener('click', showMultiTrack)
+  viewSelect.addEventListener('change', () => {
+    if (viewSelect.value === 'multitrack') showMultiTrack()
+    else showSession()
+  })
 })()
