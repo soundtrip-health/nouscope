@@ -58,6 +58,18 @@ const ROLL_SHIFT_LIMIT = 20000
 // empty stretch of a window that reaches back before the session began.
 const SPEC_NEAREST_TOLERANCE = 1.5
 
+// The three spectrograms share one 70 s window/time-axis (see PANEL_WINDOWS),
+// so one gate covers all of them. Each repaint sorts up to SPEC_SCALE_SAMPLE_CAP
+// values per canvas for auto-scaling and does a full ImageData upload — real
+// cost that buys nothing between column arrivals (EEG spectra land at ~1-2 Hz,
+// the audio tempogram at 2 Hz) or between sub-pixel cursor moves: at the window's
+// 70s/280px ratio, a pixel's nearest-column mapping can't even change more often
+// than every ~60ms at the fastest (4×) playback speed. 30 Hz is comfortably
+// above that floor — no visible loss — while halving the heaviest per-frame cost.
+// Multiplied by however many tracks are open, this is the panel most worth
+// throttling in this view.
+const SPEC_REPAINT_INTERVAL_MS = 33
+
 export default class MultiTrackDisplay {
   /**
    * @param {HTMLElement} rootEl — the cloned `#track-lane-template` instance
@@ -74,6 +86,8 @@ export default class MultiTrackDisplay {
     this._inited = false
     this._enabled = new Set(opts.enabledPanels ?? Object.keys(PANEL_WINDOWS))
     this._panelReady = {}
+    this._specLastPaint = -Infinity
+    this._specImgCache = new Map()
   }
 
   init() {
@@ -192,6 +206,7 @@ export default class MultiTrackDisplay {
   /** Release every currently-held panel resource — call when a track is removed. */
   dispose() {
     for (const key of Object.keys(this._panelReady)) this._disposePanel(key)
+    this._specImgCache.clear()
   }
 
   _ctx(cls) {
@@ -260,15 +275,21 @@ export default class MultiTrackDisplay {
     if (this._enabled.has('bands')) this._renderBands(store, ...w('bands'))
     if (this._enabled.has('mse'))   this._renderMse(store, ...w('mse'))
 
-    if (this._enabled.has('spec')) {
-      const [st0, st1] = w('spec')
-      this._renderSpec(this._specCtx, store.specColumns('main', st0, st1), st0, st1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
+    // See SPEC_REPAINT_INTERVAL_MS — the heaviest per-frame work (sort + full
+    // ImageData blit ×3), throttled well below the rate any of it can visibly change.
+    const now = performance.now()
+    if (now - this._specLastPaint >= SPEC_REPAINT_INTERVAL_MS) {
+      this._specLastPaint = now
+      if (this._enabled.has('spec')) {
+        const [st0, st1] = w('spec')
+        this._renderSpec(this._specCtx, store.specColumns('main', st0, st1), st0, st1, SPEC_START_IDX, SPEC_BINS, SPEC_PX_PER_BIN, SPEC_LOG_CAP)
+      }
+      if (this._enabled.has('specLo')) {
+        const [lt0, lt1] = w('specLo')
+        this._renderSpec(this._specLoCtx, store.specColumns('lo', lt0, lt1), lt0, lt1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
+      }
+      if (this._enabled.has('specAudio')) this._renderAudioSpec(store, ...w('specAudio'))
     }
-    if (this._enabled.has('specLo')) {
-      const [lt0, lt1] = w('specLo')
-      this._renderSpec(this._specLoCtx, store.specColumns('lo', lt0, lt1), lt0, lt1, 0, SPEC_LO_BINS, SPEC_LO_PX_PER_BIN, SPEC_LOG_CAP)
-    }
-    if (this._enabled.has('specAudio')) this._renderAudioSpec(store, ...w('specAudio'))
 
     this._renderReadouts(store, cursor)
   }
@@ -514,6 +535,26 @@ export default class MultiTrackDisplay {
   // ── Spectrograms ────────────────────────────────────────────────────────────
 
   /**
+   * Reuse a cached `ImageData` per canvas+size instead of allocating fresh on
+   * every repaint — `createImageData` for the largest spectrogram (up to
+   * ~560×172 px at 2x devicePixelRatio) is real GC pressure at 30 Hz, ×N open
+   * tracks. Cleared to fully transparent on reuse so an unpainted
+   * (out-of-tolerance) column doesn't carry over stale pixels from a previous
+   * frame — a freshly created `ImageData` is already zeroed, so only the
+   * reuse path needs the clear.
+   */
+  _imageDataFor(ctx, W, H) {
+    let img = this._specImgCache.get(ctx)
+    if (!img || img.width !== W || img.height !== H) {
+      img = ctx.createImageData(W, H)
+      this._specImgCache.set(ctx, img)
+    } else {
+      img.data.fill(0)
+    }
+    return img
+  }
+
+  /**
    * Blit stored spectrogram columns across the canvas, one column per output
    * pixel (nearest column in time). Auto-scales with the shared robust policy
    * (`specColumnsScale`) so the analysis view matches the live panel; `cap`
@@ -534,8 +575,8 @@ export default class MultiTrackDisplay {
     const { lo, range } = scale
 
     const span = t1 - t0
-    const img = ctx.createImageData(W, H)
     if (W < 2) return   // need at least 2 columns for a meaningful mapping
+    const img = this._imageDataFor(ctx, W, H)
 
     // How far a stored column may sit from an output pixel's time and still be
     // painted there: a multiple of the columns' own spacing, so pixels that fall
