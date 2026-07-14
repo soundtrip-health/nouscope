@@ -52,22 +52,29 @@ export function renderQualityRibbon(canvas, store, colors, { offsetSeconds, mast
  * position adds `offsetSeconds` rather than subtracting it — that cancels out
  * `addTick`'s `- offsetSeconds` conversion, landing every marker at the same
  * absolute position on every track's strip regardless of that track's offset.
+ *
+ * Marker ticks are also genuinely clickable (music/gap ticks are purely
+ * visual, `pointer-events: none`): `onMarkerClick`, if given, fires on
+ * `pointerdown` with the exact marker object, and stops the event from
+ * bubbling to the strip's own click-to-seek handler — so a click lands on
+ * the marker's precise time rather than wherever the pointer happened to be.
  */
-export function renderEventTicks(container, store, { offsetSeconds, masterDuration }, markers = []) {
+export function renderEventTicks(container, store, { offsetSeconds, masterDuration }, markers = [], onMarkerClick) {
   container.innerHTML = ''
   if (masterDuration <= 0) return
-  const addTick = (t, cls, title) => {
+  const addTick = (t, cls, title, onClick) => {
     const pos = ((t - offsetSeconds) / masterDuration) * 100
     if (pos < 0 || pos > 100) return
     const el = document.createElement('div')
     el.className = `scrub-tick ${cls}`
     el.style.left = `${pos.toFixed(2)}%`
     if (title) el.title = title
+    if (onClick) el.addEventListener('pointerdown', (e) => { e.stopPropagation(); onClick() })
     container.appendChild(el)
   }
   if (store) {
     for (const rec of store.music) addTick(rec.t, 'scrub-tick--music')
     for (const gap of store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
   }
-  for (const m of markers) addTick(m.t + offsetSeconds, 'scrub-tick--marker', m.label)
+  for (const m of markers) addTick(m.t + offsetSeconds, 'scrub-tick--marker', m.label, () => onMarkerClick?.(m))
 }

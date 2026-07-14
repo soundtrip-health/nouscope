@@ -6,6 +6,11 @@ import { renderEventTicks } from './timelineDecor'
 // an offset edit), not every sub-frame float rounding difference.
 const DRIFT_S = 0.18
 
+// Fixed scope id for markers added via this row's own "+ Marker" button —
+// there's only ever one audio row, so a constant works (see `Track` for the
+// per-recording equivalent, which uses each track's own generated `id`).
+export const AUDIO_TRACK_ID = 'audio'
+
 /**
  * AudioTrack — the (at most one) loaded stimulus-audio file in the
  * Multi-Track tab, played back in sync with the master transport (see
@@ -27,9 +32,13 @@ export default class AudioTrack {
    * @param {(t: number) => void} opts.seekMaster
    * @param {() => void} [opts.markDirty] — force the master scrubber to redraw next frame.
    * @param {() => void} [opts.onRemove] — called when the "✕" button is clicked.
-   * @param {() => {t:number,label:string}[]} [opts.getMarkers]
+   * @param {() => {t:number,label:string,trackId:?string}[]} [opts.getMarkers] —
+   *   every marker; this row overlays the global ones (`trackId == null`)
+   *   plus any scoped to `AUDIO_TRACK_ID`.
+   * @param {() => void} [opts.onAddMarker] — called when this row's own
+   *   "+ Marker" button is clicked, to add a marker scoped to the audio row alone.
    */
-  constructor({ getMasterDuration, seekMaster, markDirty, onRemove, getMarkers }) {
+  constructor({ getMasterDuration, seekMaster, markDirty, onRemove, getMarkers, onAddMarker }) {
     this.label = ''
     this.offsetSeconds = 0
     this.bpmValue = 0
@@ -43,6 +52,7 @@ export default class AudioTrack {
     this._markDirty = markDirty ?? (() => {})
     this._onRemove = onRemove ?? (() => {})
     this._getMarkers = getMarkers ?? (() => [])
+    this._onAddMarker = onAddMarker ?? (() => {})
     this._dragging = false
 
     this._ticksDirty = true
@@ -65,6 +75,7 @@ export default class AudioTrack {
         <div class="mt-track-buttons">
           <button type="button" class="mt-audio-mute-btn scrub-btn" title="Mute"></button>
           <input type="number" class="mt-track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
+          <button type="button" class="mt-marker-add-btn scrub-btn" title="Queue a marker here (this audio row only) — name it in the box that gets focused">+ Marker</button>
           <span class="mt-audio-bpm"></span>
         </div>
       </div>
@@ -82,6 +93,7 @@ export default class AudioTrack {
     this._removeBtn    = root.querySelector('.mt-track-remove-btn')
     this._muteBtn      = root.querySelector('.mt-audio-mute-btn')
     this._offsetInput  = root.querySelector('.mt-track-offset-input')
+    this._addMarkerBtn = root.querySelector('.mt-marker-add-btn')
     this._bpmEl        = root.querySelector('.mt-audio-bpm')
     this._timelineEl   = root.querySelector('.mt-track-timeline')
     this._fillEl       = root.querySelector('.scrub-fill')
@@ -101,6 +113,8 @@ export default class AudioTrack {
       this.offsetSeconds = Number.isFinite(v) ? v : 0
       this._markDirty()
     })
+
+    this._addMarkerBtn.addEventListener('click', () => this._onAddMarker())
 
     const fracFromEvent = (e) => {
       const rect = this._timelineEl.getBoundingClientRect()
@@ -206,8 +220,10 @@ export default class AudioTrack {
     this._ticksDirty = false
     this._ticksBuiltFor = masterDur
     // offsetSeconds: 0 — this strip is always in absolute master-frame terms
-    // (see class doc), unlike `sync()`'s playback-position mapping.
-    renderEventTicks(this._ticksEl, null, { offsetSeconds: 0, masterDuration: masterDur }, this._getMarkers())
+    // (see class doc), unlike `sync()`'s playback-position mapping. Global
+    // markers plus any scoped to this audio row alone — never a track's.
+    const markers = this._getMarkers().filter(m => m.trackId == null || m.trackId === AUDIO_TRACK_ID)
+    renderEventTicks(this._ticksEl, null, { offsetSeconds: 0, masterDuration: masterDur }, markers, (m) => this._seekMaster(m.t))
   }
 
   /** Force the tick row to refresh after a marker add/edit/delete. */

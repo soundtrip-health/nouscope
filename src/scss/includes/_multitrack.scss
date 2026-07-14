@@ -115,12 +115,6 @@ main[hidden] { display: none; }
   justify-content: center;
 }
 
-.mt-audio-mute-btn {
-  flex-shrink: 0;
-  padding: 0.2rem 0.4rem;
-  font-size: 0.75rem;
-}
-
 .mt-audio-bpm {
   font-size: 0.7rem;
   color: var(--text-value);
@@ -151,8 +145,26 @@ main[hidden] { display: none; }
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.5rem;
   font-size: 0.7rem;
+
+  // Link button, offset input, "+ Marker", the mute button (audio row), and
+  // the "☰ graphs" popover summary all sit in this one row — give them a
+  // shared height and horizontal-only padding so they line up cleanly
+  // regardless of each control's own font-size/border/native-input quirks.
+  > .mt-track-link-btn,
+  > .mt-track-offset-input,
+  > .mt-marker-add-btn,
+  > .mt-audio-mute-btn,
+  > .mt-track-menu > .mt-track-menu-btn {
+    height: 1.6rem;
+    box-sizing: border-box;
+    padding: 0 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+  }
 }
 
 .mt-track-label {
@@ -166,8 +178,6 @@ main[hidden] { display: none; }
 
 .mt-track-link-btn {
   flex-shrink: 0;
-  padding: 0.2rem 0.4rem;
-  font-size: 0.75rem;
 
   &.active { border-color: var(--entrain-to); }
 }
@@ -179,8 +189,12 @@ main[hidden] { display: none; }
   border: 1px solid var(--border-control);
   color: var(--color-text);
   border-radius: 3px;
-  font-size: 0.7rem;
-  padding: 0.15rem 0.3rem;
+}
+
+// Per-track/per-audio-row "add a marker scoped to just this one" button —
+// distinct from the master transport's "Markers" browse-everything popover.
+.mt-marker-add-btn {
+  flex-shrink: 0;
 }
 
 .mt-track-replace-btn {
@@ -208,8 +222,6 @@ main[hidden] { display: none; }
 }
 
 .mt-track-menu-btn {
-  padding: 0.2rem 0.4rem;
-  font-size: 0.7rem;
   cursor: pointer;
 }
 
@@ -475,6 +487,22 @@ main[hidden] { display: none; }
   padding: 0.15rem 0.35rem;
   font-size: 0.65rem;
   font-variant-numeric: tabular-nums;
+}
+
+// Which strip(s) a marker shows on — "All", or the owning track/audio row's
+// label (see MultiTrackApp._scopeLabel).
+.mt-marker-scope {
+  flex-shrink: 0;
+  max-width: 5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6rem;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
 }
 
 .mt-marker-label-edit {

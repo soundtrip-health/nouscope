@@ -384,10 +384,10 @@
 
         <!-- Markers: annotate a moment ("music started") at the current
              playhead — see MultiTrackApp.js's marker wiring. -->
-        <input type="text" id="mt-marker-label-input" class="mt-marker-label-input" placeholder="Marker label" title="Label for a new marker (or press M for a quick default-labeled one)" />
-        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a marker at the current playhead (M)">+ Marker</button>
+        <input type="text" id="mt-marker-label-input" class="mt-marker-label-input" placeholder="Marker name" title="Name the marker, then press Enter or + Marker (M queues the current moment to name)" />
+        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a global marker at the current playhead — requires a name">+ Marker</button>
         <details class="mt-marker-menu" id="mt-marker-menu">
-          <summary class="mt-track-menu-btn scrub-btn" title="View / edit / jump to markers">🏷 Markers (<span id="mt-marker-count">0</span>)</summary>
+          <summary class="mt-track-menu-btn scrub-btn" title="View / edit / jump to markers">Markers (<span id="mt-marker-count">0</span>)</summary>
           <div class="mt-marker-popover" id="mt-marker-list"></div>
         </details>
       </div>

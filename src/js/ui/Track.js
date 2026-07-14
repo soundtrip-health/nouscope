@@ -55,11 +55,15 @@ export default class Track {
    *   since `renderTimeline`/`renderAt` only run as part of its render loop).
    * @param {(track: Track) => void} [opts.onRemove] — called when this
    *   track's "✕" button is clicked.
-   * @param {() => {t:number,label:string}[]} [opts.getMarkers] — shared
-   *   master-timeline markers (see `MultiTrackApp`) to overlay as ticks
-   *   alongside this track's own music/gap ticks.
+   * @param {() => {t:number,label:string,trackId:?string}[]} [opts.getMarkers] —
+   *   every marker (see `MultiTrackApp`); this track overlays the global ones
+   *   (`trackId == null`) plus any scoped to its own `id`, ignoring markers
+   *   scoped to other tracks.
+   * @param {(trackId: string) => void} [opts.onAddMarker] — called (with this
+   *   track's own `id`) when its "+ Marker" button is clicked, to add a
+   *   marker scoped to this track alone.
    */
-  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove, getMarkers }) {
+  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove, getMarkers, onAddMarker }) {
     this.id = id
     this.store = store
     this.label = label
@@ -76,6 +80,7 @@ export default class Track {
     this._markDirty = markDirty ?? (() => {})
     this._onRemove = onRemove ?? (() => {})
     this._getMarkers = getMarkers ?? (() => [])
+    this._onAddMarker = onAddMarker ?? (() => {})
     this._dragging = false
 
     this._colors = {
@@ -107,6 +112,7 @@ export default class Track {
       <div class="mt-track-buttons">
         <button type="button" class="mt-track-link-btn scrub-btn" title="Unlink from master"></button>
         <input type="number" class="mt-track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
+        <button type="button" class="mt-marker-add-btn scrub-btn" title="Queue a marker here (this track only) — name it in the box that gets focused">+ Marker</button>
         <details class="mt-track-menu">
           <summary class="mt-track-menu-btn scrub-btn" title="Choose which graphs to show">☰ graphs</summary>
           <div class="mt-track-menu-popover">
@@ -125,12 +131,15 @@ export default class Track {
     this._labelEl      = header.querySelector('.mt-track-label')
     this._linkBtn      = header.querySelector('.mt-track-link-btn')
     this._offsetInput  = header.querySelector('.mt-track-offset-input')
+    this._addMarkerBtn = header.querySelector('.mt-marker-add-btn')
     this._menuCountEl  = header.querySelector('.mt-track-menu-count')
     this._menuChecks   = [...header.querySelectorAll('.mt-track-menu-check')]
 
     this._labelEl.textContent = this.label
     this._buildReplaceControl()
     this._buildRemoveControl()
+
+    this._addMarkerBtn.addEventListener('click', () => this._onAddMarker(this.id))
 
     this._menuChecks.forEach(cb => {
       cb.addEventListener('change', () => {
@@ -345,7 +354,17 @@ export default class Track {
     this._ribbonLastBuiltAt = now
     const geom = { offsetSeconds: this.offsetSeconds, masterDuration: masterDur }
     renderQualityRibbon(this._ribbonCanvas, this.store, this._colors, geom)
-    renderEventTicks(this._ticksEl, this.store, geom, this._getMarkers())
+    // Global markers (trackId == null) plus any scoped to this track alone —
+    // never another track's.
+    const markers = this._getMarkers().filter(m => m.trackId == null || m.trackId === this.id)
+    renderEventTicks(this._ticksEl, this.store, geom, markers, (m) => this._seekToMarker(m))
+  }
+
+  /** Jump to a marker's exact time — mirrors the strip's own click-to-seek branching. */
+  _seekToMarker(m) {
+    if (this.linked) this._seekMaster(m.t)
+    else this.ownCursor = this.clampTime(m.t + this.offsetSeconds)
+    this._markDirty()
   }
 
   /** Force this track's ticks to refresh (within the usual throttle) after a marker add/edit/delete. */

@@ -204,6 +204,13 @@ export default class MultiTrackScrubber {
       if (this._cursor >= this._durationSource() - 0.01) this._cursor = 0
       this._lastPerf = performance.now()
     }
+    // Force at least one render even though pausing alone wouldn't otherwise
+    // trigger one (`_loop`'s needRender check skips idle frames) — synced
+    // audio playback only actually stops when `onFrame`/`sync()` runs with
+    // `playing=false`; without this, the `<audio>` element just kept
+    // physically playing under a frozen "paused" transport until the next
+    // real seek/play forced a render and caught the drift.
+    this._dirty = true
     this._updatePlayBtn()
   }
 
@@ -314,7 +321,7 @@ export default class MultiTrackScrubber {
     // Marker ticks only — no per-track music/gap store here, and cheap enough
     // (a handful of divs) to redraw every frame with no throttling.
     if (this._els.ticks) {
-      renderEventTicks(this._els.ticks, null, { offsetSeconds: 0, masterDuration: dur }, this._markersSource())
+      renderEventTicks(this._els.ticks, null, { offsetSeconds: 0, masterDuration: dur }, this._markersSource(), (m) => this.seek(m.t))
     }
   }
 }

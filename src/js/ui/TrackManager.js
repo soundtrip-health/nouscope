@@ -23,10 +23,16 @@ export default class TrackManager {
    * @param {(count: number) => void} [sourceFns.onCountChange] — called after
    *   a track is added or removed, with the new track count (lets callers
    *   enforce `MAX_TRACKS` against the "+Add track" control).
-   * @param {() => {t:number,label:string}[]} [sourceFns.getMarkers] — shared
-   *   master-timeline markers, forwarded to every track (see `Track`).
+   * @param {() => {t:number,label:string,trackId:?string}[]} [sourceFns.getMarkers] —
+   *   every marker, forwarded to every track (see `Track`, which filters to
+   *   the global ones plus any scoped to its own id).
+   * @param {(trackId: string) => void} [sourceFns.onAddMarker] — forwarded to
+   *   every track's own "+ Marker" button, called with that track's own `id`.
+   * @param {(trackId: string) => void} [sourceFns.onTrackRemoved] — called
+   *   after a track is removed, with its `id` (lets callers prune markers
+   *   scoped to a track that no longer exists).
    */
-  constructor(containerEl, { getMasterDuration, seekMaster, markDirty, onCountChange, getMarkers } = {}) {
+  constructor(containerEl, { getMasterDuration, seekMaster, markDirty, onCountChange, getMarkers, onAddMarker, onTrackRemoved } = {}) {
     this._container = containerEl
     this._template = document.getElementById('mt-track-lane-template')
     this._getMasterDuration = getMasterDuration ?? (() => 0)
@@ -34,6 +40,8 @@ export default class TrackManager {
     this._markDirty = markDirty ?? (() => {})
     this._onCountChange = onCountChange ?? (() => {})
     this._getMarkers = getMarkers ?? (() => [])
+    this._onAddMarker = onAddMarker ?? (() => {})
+    this._onTrackRemoved = onTrackRemoved ?? (() => {})
     this.tracks = []
     this.focusedTrack = null
   }
@@ -82,6 +90,7 @@ export default class TrackManager {
       markDirty: this._markDirty,
       onRemove: (t) => this.removeTrack(t),
       getMarkers: this._getMarkers,
+      onAddMarker: this._onAddMarker,
     })
     return this._mountTrack(track)
   }
@@ -93,6 +102,7 @@ export default class TrackManager {
     if (this.focusedTrack === track) this.focusedTrack = null
     track.dispose()
     this._onCountChange(this.tracks.length)
+    this._onTrackRemoved(track.id)
   }
 
   forEach(fn) {
