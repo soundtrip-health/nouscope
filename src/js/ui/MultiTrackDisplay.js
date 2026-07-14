@@ -167,13 +167,26 @@ export default class MultiTrackDisplay {
     this._panelReady[key] = false
   }
 
-  /** Free a WebglLineRoll's GPU buffers/program and lose its GL context. */
+  /**
+   * Free a WebglLineRoll's GPU buffers/program and lose its GL context. Once
+   * `loseContext()` is called, that `<canvas>` element's context is dead for
+   * good — per spec, `canvas.getContext()` on the same node forever returns
+   * the same lost context object rather than creating a fresh one, so if this
+   * panel is re-enabled later, `_ensurePanel`'s `createWebGL2Context` would
+   * silently hand back a context that can never compile a shader again (the
+   * roll would construct against a context stuck in the lost state, so
+   * nothing ever draws — the panel just goes blank). Swap in a fresh,
+   * contextless clone of the canvas so a later `_ensurePanel()` gets a
+   * genuinely new context.
+   */
   _disposeRoll(plot) {
     if (!plot) return
+    const canvas = plot.gl.canvas
     plot.gl.deleteBuffer(plot.vertexBuffer)
     plot.gl.deleteBuffer(plot.colorBuffer)
     plot.gl.deleteProgram(plot.program)
     plot.gl.getExtension('WEBGL_lose_context')?.loseContext()
+    canvas.replaceWith(canvas.cloneNode(true))
   }
 
   /** Release every currently-held panel resource — call when a track is removed. */

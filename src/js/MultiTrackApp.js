@@ -1,4 +1,4 @@
-import TrackManager from './ui/TrackManager'
+import TrackManager, { MAX_TRACKS } from './ui/TrackManager'
 import MultiTrackScrubber from './ui/MultiTrackScrubber'
 
 /**
@@ -21,15 +21,17 @@ export default class MultiTrackApp {
     })
     this._scrubber.attach()
 
+    const addInput = document.getElementById('mt-add-track-input')
+
     this._trackManager = new TrackManager(this._tracksEl, {
       getMasterDuration: () => this._scrubber.getDuration(),
       seekMaster: (t) => this._scrubber.seek(t),
       markDirty: () => this._scrubber.refresh(),
+      onCountChange: (count) => { addInput.disabled = count >= MAX_TRACKS },
     })
     this._scrubber.setDurationSource(() => this._trackManager.maxDuration())
     this._scrubber.setFocusedTrackSource(() => this._trackManager.focusedTrack)
 
-    const addInput = document.getElementById('mt-add-track-input')
     addInput.addEventListener('change', (e) => {
       const file = e.target.files[0]
       if (!file) return

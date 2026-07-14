@@ -26,7 +26,7 @@ const RIBBON_REBUILD_MS = 1000
 /**
  * Track — one loaded recording in the Multi-Track tab: a `SessionStore` plus
  * the `MultiTrackDisplay` that draws it, plus its own header (label, a
- * replace-recording button, link/offset, graph-select menu) and timeline
+ * replace/remove-recording button pair, link/offset, graph-select menu) and timeline
  * strip (quality ribbon + event ticks), all wrapped in one root. This tab is
  * file-review only — see App.js/MultiTrackApp.js — so every track is a
  * loaded `.jsonl`; there is no live EEG connection here.
@@ -53,8 +53,10 @@ export default class Track {
    *   next frame even though the master cursor itself didn't move (needed
    *   whenever this track's own `ownCursor`/`offsetSeconds`/`linked` changes,
    *   since `renderTimeline`/`renderAt` only run as part of its render loop).
+   * @param {(track: Track) => void} [opts.onRemove] — called when this
+   *   track's "✕" button is clicked.
    */
-  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty }) {
+  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove }) {
     this.id = id
     this.store = store
     this.label = label
@@ -69,6 +71,7 @@ export default class Track {
     this._getMasterDuration = getMasterDuration
     this._seekMaster = seekMaster
     this._markDirty = markDirty ?? (() => {})
+    this._onRemove = onRemove ?? (() => {})
     this._dragging = false
 
     this._colors = {
@@ -96,6 +99,8 @@ export default class Track {
       <div class="mt-track-controls"></div>
       <div class="mt-track-strip">
         <span class="mt-track-label"></span>
+      </div>
+      <div class="mt-track-buttons">
         <button type="button" class="mt-track-link-btn scrub-btn" title="Unlink from master"></button>
         <input type="number" class="mt-track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
         <details class="mt-track-menu">
@@ -121,6 +126,7 @@ export default class Track {
 
     this._labelEl.textContent = this.label
     this._buildReplaceControl()
+    this._buildRemoveControl()
 
     this._menuChecks.forEach(cb => {
       cb.addEventListener('change', () => {
@@ -132,6 +138,12 @@ export default class Track {
         }
         this._updateMenu()
         this._applyPanelVisibility()
+        // setEnabledPanels lazily creates/frees each panel's canvas context —
+        // must run before resize() sizes it, or a freshly-enabled panel's
+        // canvas keeps its default backing-buffer resolution (blurry, since
+        // CSS still stretches it to the full panel size) until some later,
+        // unrelated resize.
+        this.display.setEnabledPanels(this.enabledPanels)
         this.resize()
         this._markDirty()
       })
@@ -182,6 +194,17 @@ export default class Track {
       this._markDirty()
     })
     this._controlsEl.appendChild(label)
+  }
+
+  /** A small "✕" button that removes this track entirely. */
+  _buildRemoveControl() {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'mt-track-remove-btn controls-upload-btn'
+    btn.title = 'Remove this track'
+    btn.textContent = '✕'
+    btn.addEventListener('click', () => this._onRemove(this))
+    this._controlsEl.appendChild(btn)
   }
 
   /** Right-lane timeline strip: the ribbon/ticks/head row above this track's graphs. */

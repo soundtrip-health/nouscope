@@ -3,6 +3,11 @@ import Track, { DEFAULT_PANELS } from './Track'
 
 let _nextTrackId = 1
 
+// Hard cap on concurrent tracks: each enabled panel holds its own WebGL
+// context (see `MAX_PANELS` in Track.js), so unbounded tracks risk
+// exhausting the browser's live-context budget.
+export const MAX_TRACKS = 4
+
 /**
  * TrackManager — owns the stack of `Track`s in the Multi-Track tab. Every
  * track is a loaded `.jsonl` file (this tab is file-review only — there is no
@@ -15,13 +20,17 @@ export default class TrackManager {
    * @param {() => number} sourceFns.getMasterDuration — read the master scrubber's current duration
    * @param {(t: number) => void} sourceFns.seekMaster — seek the master scrubber
    * @param {() => void} [sourceFns.markDirty] — force the master scrubber to redraw next frame
+   * @param {(count: number) => void} [sourceFns.onCountChange] — called after
+   *   a track is added or removed, with the new track count (lets callers
+   *   enforce `MAX_TRACKS` against the "+Add track" control).
    */
-  constructor(containerEl, { getMasterDuration, seekMaster, markDirty } = {}) {
+  constructor(containerEl, { getMasterDuration, seekMaster, markDirty, onCountChange } = {}) {
     this._container = containerEl
     this._template = document.getElementById('mt-track-lane-template')
     this._getMasterDuration = getMasterDuration ?? (() => 0)
     this._seekMaster = seekMaster ?? (() => {})
     this._markDirty = markDirty ?? (() => {})
+    this._onCountChange = onCountChange ?? (() => {})
     this.tracks = []
     this.focusedTrack = null
   }
@@ -47,6 +56,7 @@ export default class TrackManager {
     this._container.appendChild(wrapper)
     track.init()
     this.tracks.push(track)
+    this._onCountChange(this.tracks.length)
     return track
   }
 
@@ -67,6 +77,7 @@ export default class TrackManager {
       getMasterDuration: this._getMasterDuration,
       seekMaster: this._seekMaster,
       markDirty: this._markDirty,
+      onRemove: (t) => this.removeTrack(t),
     })
     return this._mountTrack(track)
   }
@@ -77,6 +88,7 @@ export default class TrackManager {
     this.tracks.splice(i, 1)
     if (this.focusedTrack === track) this.focusedTrack = null
     track.dispose()
+    this._onCountChange(this.tracks.length)
   }
 
   forEach(fn) {

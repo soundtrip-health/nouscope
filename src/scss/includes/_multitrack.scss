@@ -15,6 +15,15 @@
 // underneath the visible tab.
 main[hidden] { display: none; }
 
+// Scroll is still needed (track stack grows vertically, a track's panel row
+// scrolls horizontally once more panels are enabled than fit) — just the
+// native scrollbar chrome is unwanted here.
+@mixin no-scrollbar {
+  scrollbar-width: none;       // Firefox
+  -ms-overflow-style: none;    // legacy Edge
+  &::-webkit-scrollbar { display: none; }  // Chrome/Safari/new Edge
+}
+
 // ── View switcher ────────────────────────────────────────────────────────
 // A single compact dropdown, top-right — the same corner the session-label
 // (track name) used to occupy in the single view; the label has moved to
@@ -45,6 +54,7 @@ main[hidden] { display: none; }
   // the +Add-track button stacked below the view-select dropdown.
   padding: 5.5rem 1rem 1rem;
   overflow-y: auto;
+  @include no-scrollbar;
 
   &[hidden] { display: none; }
 }
@@ -54,6 +64,8 @@ main[hidden] { display: none; }
   top: 3.4rem;
   right: 1.5rem;
   z-index: 2001;
+
+  &:has(input:disabled) { opacity: 0.4; cursor: not-allowed; }
 }
 
 .mt-tracks {
@@ -88,6 +100,12 @@ main[hidden] { display: none; }
 }
 
 .mt-track-strip {
+  display: flex;
+  align-items: center;
+  font-size: 0.7rem;
+}
+
+.mt-track-buttons {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -125,6 +143,12 @@ main[hidden] { display: none; }
 
 .mt-track-replace-btn {
   align-self: flex-start;
+}
+
+.mt-track-remove-btn {
+  align-self: flex-start;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
 }
 
 // Pop-out graph-select menu — a native <details>/<summary> popover so open/
@@ -200,6 +224,7 @@ main[hidden] { display: none; }
   flex-direction: row;
   flex-wrap: nowrap;
   overflow-x: auto;
+  @include no-scrollbar;
   gap: 0.75rem;
 }
 
