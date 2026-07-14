@@ -889,9 +889,15 @@ Out-of-data columns come back as zeros.
 - **Band smoothing** — band powers arrive at ~2 Hz, so resampling them onto ~280
   pixels of a 5 s window gives a coarse staircase. `_renderBands` applies a one-pole
   low-pass **across pixels**, with `alpha = 1 − exp(−dt / BAND_SMOOTH_TAU)` derived
-  from the per-pixel time step, seeded at the first sample so the curve doesn't ramp
-  in from zero at the left edge. `BAND_SMOOTH_TAU = 0.21 s` is the time constant of
-  the per-frame lerp the old live panel used, so the curve reads the same.
+  from the per-pixel time step. `BAND_SMOOTH_TAU = 0.21 s` is the time constant of
+  the per-frame lerp the old live panel used, so the curve reads the same. The whole
+  window is recomputed from scratch every frame, so the filter is warmed up for
+  `5 × BAND_SMOOTH_TAU` before `t0` (unplotted) rather than seeded cold right at the
+  visible left edge — a cold seed's accumulated smoothing depends on how many pixels
+  a sample sits from *that frame's* `t0`, which shrinks as the window rolls forward,
+  so the same real sample would visibly snap toward its raw value right before
+  scrolling off the left edge. The warm-up converges to the same steady value
+  regardless of frame, so the trace no longer depends on where the window is cut.
 - **Resolution** — `AnalysisDisplay.resize()` sizes each canvas's drawing buffer to
   its on-screen size × devicePixelRatio (capped 2×) and updates the GL viewport, so
   the fullscreen grid isn't upscaling 280-px buffers. Called on panel-show and

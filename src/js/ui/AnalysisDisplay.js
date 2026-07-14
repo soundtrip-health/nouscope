@@ -354,8 +354,19 @@ export default class AnalysisDisplay {
    * Band powers are produced at ~2 Hz, so resampling them onto ~280 pixels of a
    * 5 s window gives a coarse staircase. The live panel hid that behind a
    * per-frame lerp; reproduce it here as a one-pole low-pass across pixels with
-   * the same time constant, seeded at the first sample so the curve doesn't ramp
-   * in from zero at the left edge.
+   * the same time constant.
+   *
+   * This whole window is recomputed from scratch every frame (nothing carries
+   * over from the previous frame), so the filter needs its own warm-up before
+   * t0 rather than seeding cold right at the visible left edge: with a cold
+   * seed, a given real sample's accumulated smoothing depends on how many
+   * pixels it happens to sit from *this* frame's t0, which shrinks as the
+   * window rolls forward and that sample ages toward becoming the new x=0 —
+   * so its plotted value visibly snaps toward the raw unsmoothed value right
+   * before it scrolls off the left edge. Running the filter for a few time
+   * constants before t0 (unplotted) lets it converge to the same steady value
+   * regardless of frame, so the visible trace no longer depends on where the
+   * window happens to be cut.
    */
   _renderBands(store, t0, t1) {
     const BAND_KEYS = ['delta', 'theta', 'alpha', 'beta', 'gamma']
@@ -366,15 +377,16 @@ export default class AnalysisDisplay {
 
     const dt = (t1 - t0) / (OUT_N - 1)
     const alpha = 1 - Math.exp(-dt / BAND_SMOOTH_TAU)
+    const warmupSteps = Math.ceil((5 * BAND_SMOOTH_TAU) / dt)   // ~5 time constants: <1% residual
     const smoothed = new Float64Array(5)
     let seeded = false
 
-    for (let x = 0; x < OUT_N; x++) {
+    for (let x = -warmupSteps; x < OUT_N; x++) {
       const rec = store.sampleAt('bands', t0 + x * dt)
       for (let b = 0; b < 5; b++) {
         const v = rec ? rec[BAND_KEYS[b]] : 0
         smoothed[b] = seeded ? smoothed[b] + alpha * (v - smoothed[b]) : v
-        lines[b][x] = (smoothed[b] / ymax) * 2 - 1
+        if (x >= 0) lines[b][x] = (smoothed[b] / ymax) * 2 - 1
       }
       seeded = true
     }
