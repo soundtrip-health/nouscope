@@ -42,18 +42,32 @@ export function renderQualityRibbon(canvas, store, colors, { offsetSeconds, mast
   }
 }
 
-/** Music-BPM-change and recording-gap ticks, positioned the same way as the ribbon. */
-export function renderEventTicks(container, store, { offsetSeconds, masterDuration }) {
+/**
+ * Music-BPM-change ticks, recording-gap ticks, and user-placed markers,
+ * positioned the same way as the ribbon. `store` is nullable so this can also
+ * render the master transport's own tick row (markers only, no store).
+ *
+ * Markers are already in *master*-timeline seconds (unlike `store.music`/
+ * `store.gaps()`, which are in each track's own local time), so their tick
+ * position adds `offsetSeconds` rather than subtracting it — that cancels out
+ * `addTick`'s `- offsetSeconds` conversion, landing every marker at the same
+ * absolute position on every track's strip regardless of that track's offset.
+ */
+export function renderEventTicks(container, store, { offsetSeconds, masterDuration }, markers = []) {
   container.innerHTML = ''
   if (masterDuration <= 0) return
-  const addTick = (t, cls) => {
+  const addTick = (t, cls, title) => {
     const pos = ((t - offsetSeconds) / masterDuration) * 100
     if (pos < 0 || pos > 100) return
     const el = document.createElement('div')
     el.className = `scrub-tick ${cls}`
     el.style.left = `${pos.toFixed(2)}%`
+    if (title) el.title = title
     container.appendChild(el)
   }
-  for (const rec of store.music) addTick(rec.t, 'scrub-tick--music')
-  for (const gap of store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
+  if (store) {
+    for (const rec of store.music) addTick(rec.t, 'scrub-tick--music')
+    for (const gap of store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
+  }
+  for (const m of markers) addTick(m.t + offsetSeconds, 'scrub-tick--marker', m.label)
 }

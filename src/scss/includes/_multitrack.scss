@@ -50,19 +50,35 @@ main[hidden] { display: none; }
   position: fixed;
   inset: 0;
   // Top inset starts at the same 1.5rem the single view uses for its
-  // top-right/top-center fixed controls, plus enough extra room to clear
-  // the +Add-track button stacked below the view-select dropdown.
-  padding: 5.5rem 1rem 1rem;
+  // top-right fixed controls — the +Add-track/+Add-music buttons now sit in
+  // that same row, to the view-select dropdown's left, rather than stacked
+  // below it.
+  padding: 5rem 1rem 1rem;
   overflow-y: auto;
   @include no-scrollbar;
 
   &[hidden] { display: none; }
 }
 
+// Both buttons sit in the view-select's row (top: 1.5rem, matching it) rather
+// than stacked below it — `right` is hand-spaced from the view-select's own
+// right:1.5rem outward past its ~7.3rem width, then past the Music button's
+// own ~4.6rem width, each with a ~0.75rem gap (same spacing `.mt-tracks` uses
+// between cards). Same manual-offset approach the vertical stack used before;
+// there are only ever these three fixed controls, so a shared flex wrapper
+// wasn't worth the DOM change. Re-measure/adjust these two `right` values if
+// the button labels ever change length again.
+.mt-add-music-btn {
+  position: fixed;
+  top: 1.5rem;
+  right: 9.75rem;
+  z-index: 2001;
+}
+
 .mt-add-track-btn {
   position: fixed;
-  top: 3.4rem;
-  right: 1.5rem;
+  top: 1.5rem;
+  right: 15rem;
   z-index: 2001;
 
   &:has(input:disabled) { opacity: 0.4; cursor: not-allowed; }
@@ -83,6 +99,32 @@ main[hidden] { display: none; }
   border: 1px solid var(--border-hairline);
   border-radius: 4px;
   background: var(--surface-panel);
+}
+
+// ── Stimulus audio row (sits above .mt-tracks; see AudioTrack.js) ───────
+// Reuses .mt-track's grid/border/etc.; just far shorter than an EEG track
+// since there's no panel grid, only the timeline strip.
+#mt-audio-mount:empty { display: none; }
+
+.mt-audio-track {
+  margin-bottom: 0.75rem;
+  border-color: var(--entrain-to);
+}
+
+.mt-audio-lane-col {
+  justify-content: center;
+}
+
+.mt-audio-mute-btn {
+  flex-shrink: 0;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.mt-audio-bpm {
+  font-size: 0.7rem;
+  color: var(--text-value);
+  font-variant-numeric: tabular-nums;
 }
 
 // ── Per-track header (left column) ──────────────────────────────────────
@@ -369,4 +411,85 @@ main[hidden] { display: none; }
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+// ── Markers (master-timeline annotations) ────────────────────────────────
+.mt-marker-label-input {
+  flex-shrink: 1;
+  min-width: 0;
+  width: 8rem;
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  padding: 0.3rem 0.4rem;
+}
+
+// Pop-out markers list — same native <details>/<summary> popover pattern as
+// .mt-track-menu, just anchored off the master transport instead of a track.
+.mt-marker-menu {
+  position: relative;
+  flex-shrink: 0;
+
+  > summary {
+    list-style: none;
+    &::-webkit-details-marker { display: none; }
+  }
+
+  &[open] .mt-track-menu-btn { border-color: var(--entrain-to); }
+}
+
+.mt-marker-popover {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  z-index: 2010;
+  margin-bottom: 0.25rem;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  min-width: 16rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  @include no-scrollbar;
+}
+
+.mt-marker-empty {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.mt-marker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.mt-marker-time {
+  flex-shrink: 0;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.mt-marker-label-edit {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.35rem;
+}
+
+.mt-marker-delete-btn {
+  flex-shrink: 0;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.7rem;
 }

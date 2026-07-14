@@ -752,6 +752,16 @@ body.analysis-mode {
 
   &.scrub-tick--music { background: var(--color-text); opacity: 0.6; }
   &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
+  // Wider + interactive (unlike music/gap, which are purely visual) so its
+  // hover title (the marker's label) is actually reachable, and it's easier
+  // to aim at than a 1px hairline.
+  &.scrub-tick--marker {
+    width: 3px;
+    margin-left: -1px;
+    background: var(--entrain-to);
+    pointer-events: auto;
+    cursor: help;
+  }
 }
 
 // Floating time preview that tracks the pointer on hover/drag, before a seek

@@ -23,14 +23,17 @@ export default class TrackManager {
    * @param {(count: number) => void} [sourceFns.onCountChange] — called after
    *   a track is added or removed, with the new track count (lets callers
    *   enforce `MAX_TRACKS` against the "+Add track" control).
+   * @param {() => {t:number,label:string}[]} [sourceFns.getMarkers] — shared
+   *   master-timeline markers, forwarded to every track (see `Track`).
    */
-  constructor(containerEl, { getMasterDuration, seekMaster, markDirty, onCountChange } = {}) {
+  constructor(containerEl, { getMasterDuration, seekMaster, markDirty, onCountChange, getMarkers } = {}) {
     this._container = containerEl
     this._template = document.getElementById('mt-track-lane-template')
     this._getMasterDuration = getMasterDuration ?? (() => 0)
     this._seekMaster = seekMaster ?? (() => {})
     this._markDirty = markDirty ?? (() => {})
     this._onCountChange = onCountChange ?? (() => {})
+    this._getMarkers = getMarkers ?? (() => [])
     this.tracks = []
     this.focusedTrack = null
   }
@@ -78,6 +81,7 @@ export default class TrackManager {
       seekMaster: this._seekMaster,
       markDirty: this._markDirty,
       onRemove: (t) => this.removeTrack(t),
+      getMarkers: this._getMarkers,
     })
     return this._mountTrack(track)
   }
@@ -93,6 +97,11 @@ export default class TrackManager {
 
   forEach(fn) {
     this.tracks.forEach(fn)
+  }
+
+  /** Force every track's ticks to refresh after a marker add/edit/delete. */
+  notifyMarkersChanged() {
+    this.tracks.forEach(t => t.notifyMarkersChanged())
   }
 
   maxDuration() {

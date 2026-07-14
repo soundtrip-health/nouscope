@@ -55,8 +55,11 @@ export default class Track {
    *   since `renderTimeline`/`renderAt` only run as part of its render loop).
    * @param {(track: Track) => void} [opts.onRemove] — called when this
    *   track's "✕" button is clicked.
+   * @param {() => {t:number,label:string}[]} [opts.getMarkers] — shared
+   *   master-timeline markers (see `MultiTrackApp`) to overlay as ticks
+   *   alongside this track's own music/gap ticks.
    */
-  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove }) {
+  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove, getMarkers }) {
     this.id = id
     this.store = store
     this.label = label
@@ -72,6 +75,7 @@ export default class Track {
     this._seekMaster = seekMaster
     this._markDirty = markDirty ?? (() => {})
     this._onRemove = onRemove ?? (() => {})
+    this._getMarkers = getMarkers ?? (() => [])
     this._dragging = false
 
     this._colors = {
@@ -341,7 +345,12 @@ export default class Track {
     this._ribbonLastBuiltAt = now
     const geom = { offsetSeconds: this.offsetSeconds, masterDuration: masterDur }
     renderQualityRibbon(this._ribbonCanvas, this.store, this._colors, geom)
-    renderEventTicks(this._ticksEl, this.store, geom)
+    renderEventTicks(this._ticksEl, this.store, geom, this._getMarkers())
+  }
+
+  /** Force this track's ticks to refresh (within the usual throttle) after a marker add/edit/delete. */
+  notifyMarkersChanged() {
+    this._ribbonDirty = true
   }
 
   setLabel(text) {

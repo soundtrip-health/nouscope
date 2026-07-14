@@ -21,6 +21,8 @@
  * original multi-track work rather than a divergent rewrite.
  */
 
+import { renderEventTicks } from './timelineDecor'
+
 const SPEEDS = [1, 2, 4]
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
 
@@ -35,6 +37,8 @@ export default class MultiTrackScrubber {
     this._liveDurationSource = () => null
     // () => the Track a keyboard nudge should redirect to when it's unlinked.
     this._focusedTrackSource = () => null
+    // () => shared master-timeline markers (see MultiTrackApp) for the tick row.
+    this._markersSource = () => []
 
     this._cursor = 0        // playhead time (s)
     this._speedIdx = 0
@@ -50,9 +54,18 @@ export default class MultiTrackScrubber {
   setDurationSource(fn) { this._durationSource = fn }
   setLiveDurationSource(fn) { this._liveDurationSource = fn }
   setFocusedTrackSource(fn) { this._focusedTrackSource = fn }
+  setMarkersSource(fn) { this._markersSource = fn }
 
   /** Current master timeline length (seconds) — for callers outside the render loop. */
   getDuration() { return this._durationSource() }
+  /** Current playhead position (seconds) — e.g. for "add a marker here". */
+  getCursor() { return this._cursor }
+  /** Whether the transport is actively playing (for driving synced audio playback). */
+  isPlaying() { return this._playing }
+  /** Current playback speed multiplier (1/2/4×). */
+  getSpeed() { return SPEEDS[this._speedIdx] }
+  /** Whether the scrubber is shown/wired up (for gating keyboard shortcuts). */
+  isActive() { return this._active }
 
   /** Wire DOM once (idempotent). */
   attach() {
@@ -65,6 +78,7 @@ export default class MultiTrackScrubber {
       duration: $('mt-scrub-duration'),
       timeline: $('mt-scrub-timeline'),
       track:    $('mt-scrub-track'),
+      ticks:    $('mt-scrub-ticks'),
       fill:     $('mt-scrub-fill'),
       head:     $('mt-scrub-head'),
       hoverTime: $('mt-scrub-hover-time'),
@@ -296,6 +310,12 @@ export default class MultiTrackScrubber {
     this._els.head.style.left = `${(frac * 100).toFixed(2)}%`
     this._els.time.textContent = fmt(this._cursor)
     this._els.duration.textContent = fmt(dur)
+
+    // Marker ticks only — no per-track music/gap store here, and cheap enough
+    // (a handful of divs) to redraw every frame with no throttling.
+    if (this._els.ticks) {
+      renderEventTicks(this._els.ticks, null, { offsetSeconds: 0, masterDuration: dur }, this._markersSource())
+    }
   }
 }
 

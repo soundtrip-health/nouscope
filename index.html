@@ -350,9 +350,18 @@
       </template>
 
       <label class="controls-upload-btn mt-add-track-btn" title="Load a saved .jsonl recording as a new track">
-        + Add track
+        ↑ Track
         <input type="file" id="mt-add-track-input" accept=".jsonl,application/x-ndjson" />
       </label>
+
+      <!-- Stimulus audio (at most one) — played back in sync with the master
+           transport, see AudioTrack.js/MultiTrackApp.js. -->
+      <label class="controls-upload-btn mt-add-music-btn" title="Load the stimulus audio used in these sessions">
+        ↑ Music
+        <input type="file" id="mt-add-music-input" accept="audio/*" />
+      </label>
+
+      <div id="mt-audio-mount"></div>
 
       <div class="mt-tracks" id="mt-tracks"></div>
 
@@ -366,11 +375,21 @@
             <div class="scrub-fill" id="mt-scrub-fill"></div>
             <div class="scrub-head" id="mt-scrub-head"></div>
           </div>
+          <div class="scrub-ticks" id="mt-scrub-ticks"></div>
           <div class="scrub-hover-time" id="mt-scrub-hover-time" hidden></div>
         </div>
         <span class="scrub-time scrub-duration" id="mt-scrub-duration">00:00</span>
         <button class="scrub-btn" id="mt-scrub-live" title="Jump to the latest data (End)" hidden>● LIVE</button>
         <button class="scrub-btn" id="mt-scrub-speed" title="Playback speed">1×</button>
+
+        <!-- Markers: annotate a moment ("music started") at the current
+             playhead — see MultiTrackApp.js's marker wiring. -->
+        <input type="text" id="mt-marker-label-input" class="mt-marker-label-input" placeholder="Marker label" title="Label for a new marker (or press M for a quick default-labeled one)" />
+        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a marker at the current playhead (M)">+ Marker</button>
+        <details class="mt-marker-menu" id="mt-marker-menu">
+          <summary class="mt-track-menu-btn scrub-btn" title="View / edit / jump to markers">🏷 Markers (<span id="mt-marker-count">0</span>)</summary>
+          <div class="mt-marker-popover" id="mt-marker-list"></div>
+        </details>
       </div>
     </main>
 
