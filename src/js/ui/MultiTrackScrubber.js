@@ -14,14 +14,13 @@
  * `ownCursor` when unlinked — see `Track`). Per-track quality ribbons/ticks
  * are drawn by each track itself (`timelineDecor`), not here.
  *
- * There is no live track in this tab (file-review only — see App/MultiTrackApp),
- * so `_liveDurationSource` always resolves to null: "● LIVE" stays hidden and
- * follow/live-edge behavior is simply inert. The duration/live-edge source
- * indirection is kept anyway so this stays a straightforward sibling of the
- * original multi-track work rather than a divergent rewrite.
+ * This tab is file-review only (see App/MultiTrackApp) — there is no live
+ * track and no growing timeline here, so unlike `Scrubber` there is no
+ * "● LIVE"/follow-the-leading-edge concept at all.
  */
 
 import { renderEventTicks } from './timelineDecor'
+import { formatTime as fmt } from './formatTime'
 
 const SPEEDS = [1, 2, 4]
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
@@ -33,8 +32,6 @@ export default class MultiTrackScrubber {
 
     // () => overall timeline length (seconds) — max across every track.
     this._durationSource = () => 0
-    // () => the live track's own duration, or null (always null — file-review only).
-    this._liveDurationSource = () => null
     // () => the Track a keyboard nudge should redirect to when it's unlinked.
     this._focusedTrackSource = () => null
     // () => shared master-timeline markers (see MultiTrackApp) for the tick row.
@@ -43,7 +40,6 @@ export default class MultiTrackScrubber {
     this._cursor = 0        // playhead time (s)
     this._speedIdx = 0
     this._playing = false
-    this._following = false // track the live leading edge
     this._dragging = false
     this._active = false
     this._dirty = false
@@ -52,7 +48,6 @@ export default class MultiTrackScrubber {
   }
 
   setDurationSource(fn) { this._durationSource = fn }
-  setLiveDurationSource(fn) { this._liveDurationSource = fn }
   setFocusedTrackSource(fn) { this._focusedTrackSource = fn }
   setMarkersSource(fn) { this._markersSource = fn }
 
@@ -66,6 +61,18 @@ export default class MultiTrackScrubber {
   getSpeed() { return SPEEDS[this._speedIdx] }
   /** Whether the scrubber is shown/wired up (for gating keyboard shortcuts). */
   isActive() { return this._active }
+
+  /**
+   * Whether this tab is actually the one on screen right now — `_active`
+   * alone stays true once this tab has been shown once (see MultiTrackApp's
+   * `onShow`, which never deactivates it on tab-out), so without this check
+   * this scrubber's global keydown listener would keep firing shortcuts even
+   * while the Single Track tab is the one visible, colliding with its
+   * identical listener (Scrubber.js).
+   */
+  isVisible() {
+    return !!this._els?.root && this._els.root.closest('[hidden]') === null
+  }
 
   /** Wire DOM once (idempotent). */
   attach() {
@@ -82,12 +89,10 @@ export default class MultiTrackScrubber {
       fill:     $('mt-scrub-fill'),
       head:     $('mt-scrub-head'),
       hoverTime: $('mt-scrub-hover-time'),
-      live:     $('mt-scrub-live'),
       speed:    $('mt-scrub-speed'),
     }
 
     this._els.play.addEventListener('click', () => this.togglePlay())
-    this._els.live.addEventListener('click', () => this.goLive())
     this._els.speed.addEventListener('click', () => this._cycleSpeed())
 
     // Timeline drag / click-to-seek — the whole timeline (track + ribbon + ticks)
@@ -99,7 +104,6 @@ export default class MultiTrackScrubber {
     const seekFromEvent = (e) => this.seek(fracFromEvent(e) * this._durationSource())
     this._els.timeline.addEventListener('pointerdown', (e) => {
       this._dragging = true
-      this._following = false
       this._els.timeline.setPointerCapture(e.pointerId)
       seekFromEvent(e)
       this._showHoverTime(e)
@@ -127,7 +131,7 @@ export default class MultiTrackScrubber {
     // master cursor, but redirect to the focused track's own cursor when that
     // track is unlinked — otherwise there'd be no way to keyboard-nudge it.
     this._onKey = (e) => {
-      if (!this._active) return
+      if (!this._active || !this.isVisible()) return
       if (e.target && /^(input|textarea)$/i.test(e.target.tagName)) return
       const focused = this._focusedTrackSource()
       if (e.key === ' ') { e.preventDefault(); this.togglePlay() }
@@ -138,7 +142,7 @@ export default class MultiTrackScrubber {
         if (focused && !focused.linked) { focused.ownCursor = focused.clampTime(focused.ownCursor + SEEK_STEP_S); this.refresh() }
         else this.seek(this._cursor + SEEK_STEP_S)
       } else if (e.key === 'Home')       { this.seek(0) }
-      else if (e.key === 'End')          { this.goLive() }
+      else if (e.key === 'End')          { this.seek(this._durationSource()) }
     }
     document.addEventListener('keydown', this._onKey)
   }
@@ -165,27 +169,20 @@ export default class MultiTrackScrubber {
     this._els.hoverTime.style.left = `${Math.max(half, Math.min(rect.width - half, rawLeft))}px`
   }
 
-  /** ● LIVE only means something with a live track to follow — always hidden here. */
-  _updateLiveBtn() {
-    if (this._els?.live) this._els.live.hidden = this._liveDurationSource() == null
-  }
-
   /** Force a redraw on the next frame (e.g. after new data was ingested). */
   refresh() { this._dirty = true }
 
   /**
-   * Show/hide + start/stop the scrubber. On activation, jumps to the start, or
-   * follows the live track's leading edge.
+   * Show/hide + start/stop the scrubber. On activation, jumps to the start
+   * unless told otherwise.
    * @param {boolean} on
-   * @param {{atStart?:boolean, follow?:boolean}} [opts]
+   * @param {{atStart?:boolean}} [opts]
    */
   setActive(on, opts = {}) {
     this._active = on
     if (this._els?.root) this._els.root.hidden = !on
-    this._updateLiveBtn()
     if (on) {
-      if (opts.follow) { this._following = true; this._cursor = this._liveDurationSource() ?? this._durationSource() }
-      else if (opts.atStart) { this._following = false; this._cursor = 0 }
+      if (opts.atStart) this._cursor = 0
       this._dirty = true
       this._lastPerf = performance.now()
       if (!this._raf) this._loop()
@@ -199,7 +196,6 @@ export default class MultiTrackScrubber {
   togglePlay() {
     this._playing = !this._playing
     if (this._playing) {
-      this._following = false
       // If parked at the end, restart from the beginning.
       if (this._cursor >= this._durationSource() - 0.01) this._cursor = 0
       this._lastPerf = performance.now()
@@ -214,44 +210,10 @@ export default class MultiTrackScrubber {
     this._updatePlayBtn()
   }
 
-  /**
-   * Stop tracking the leading edge without moving the playhead — used when the
-   * headset drops, since the live track stops growing and "following" would
-   * just pin the cursor to a frozen duration.
-   */
-  stopFollowing() {
-    this._following = false
-    this._updatePlayBtn()
-    this._dirty = true
-  }
-
-  goLive() {
-    this._following = true
-    this._playing = false
-    this._updatePlayBtn()
-    this._cursor = this._liveDurationSource() ?? this._durationSource()
-    this._dirty = true
-  }
-
   seek(tSeconds) {
     const dur = this._durationSource()
     this._cursor = Math.max(0, Math.min(dur, tSeconds))
-    this._following = this._isLiveEdge(dur)
     this._dirty = true
-  }
-
-  /**
-   * True only when the cursor sits on the live track's own leading edge *and*
-   * that edge is also the master timeline's end. A loaded file can be far
-   * longer than the live track, so a seek anywhere past the live track's own
-   * (short) duration must not by itself re-engage live-follow — otherwise
-   * every seek into the longer file's later data would snap straight back to
-   * the live edge instead of landing where it was aimed. (Always false here —
-   * there is no live track in this tab.)
-   */
-  _isLiveEdge(dur) {
-    const liveDur = this._liveDurationSource()
-    return liveDur != null && dur - liveDur <= 0.01 && this._cursor >= liveDur - 0.01
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -263,7 +225,6 @@ export default class MultiTrackScrubber {
 
   _updatePlayBtn() {
     if (this._els?.play) this._els.play.textContent = this._playing ? '⏸' : '▶'
-    if (this._els?.live) this._els.live.classList.toggle('active', this._following)
   }
 
   _loop() {
@@ -274,21 +235,14 @@ export default class MultiTrackScrubber {
     const dt = (now - this._lastPerf) / 1000
     this._lastPerf = now
     const dur = this._durationSource()
-    const liveDur = this._liveDurationSource()
 
     let needRender = this._dirty || this._dragging
 
-    if (this._following) {
-      this._cursor = liveDur ?? dur
-      needRender = true
-    } else if (this._playing) {
+    if (this._playing) {
       this._cursor += dt * SPEEDS[this._speedIdx]
-      // Playback reaching the overall (longest-track) end stops; it only
-      // re-engages live-follow if that end is actually the live track's edge.
       if (this._cursor >= dur) {
         this._cursor = dur
         this._playing = false
-        if (this._isLiveEdge(dur)) this._following = true
       }
       needRender = true
     }
@@ -302,13 +256,11 @@ export default class MultiTrackScrubber {
   _render(dur) {
     this._onFrame(this._cursor)
 
-    // Re-sync the play/pause icon and ● LIVE's red/grey state on every actual
-    // render — not just from the handful of call sites that flip `_playing`/
-    // `_following` directly (togglePlay/stopFollowing/goLive/etc). A drag-seek
-    // or the panel's first frame both change `_following` without going
-    // through any of those, so without this the button could show stale state
-    // (e.g. not starting red, or staying red after dragging away) until some
-    // unrelated call happened to refresh it.
+    // Re-sync the play/pause icon on every actual render — not just from the
+    // handful of call sites that flip `_playing` directly (togglePlay/etc).
+    // A drag-seek or the panel's first frame both trigger a render without
+    // going through any of those, so without this the button could show
+    // stale state until some unrelated call happened to refresh it.
     this._updatePlayBtn()
 
     // Master track UI. Per-track ribbons/ticks are drawn by each Track itself.
@@ -324,15 +276,4 @@ export default class MultiTrackScrubber {
       renderEventTicks(this._els.ticks, null, { offsetSeconds: 0, masterDuration: dur }, this._markersSource(), (m) => this.seek(m.t))
     }
   }
-}
-
-/** Seconds → MM:SS (or H:MM:SS past an hour). */
-function fmt(s) {
-  s = Math.max(0, Math.floor(s))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const mm = m.toString().padStart(2, '0')
-  const ss = sec.toString().padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

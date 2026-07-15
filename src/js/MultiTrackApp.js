@@ -1,6 +1,7 @@
 import TrackManager, { MAX_TRACKS } from './ui/TrackManager'
 import MultiTrackScrubber from './ui/MultiTrackScrubber'
 import AudioTrack, { AUDIO_TRACK_ID } from './ui/AudioTrack'
+import { formatTime as fmtTime } from './ui/formatTime'
 
 /**
  * MultiTrackApp — orchestrator for the Multi-Track tab.
@@ -60,7 +61,15 @@ export default class MultiTrackApp {
       onAddMarker: (trackId) => this._queueMarker(trackId),
       onTrackRemoved: (trackId) => this._pruneMarkersForScope(trackId),
     })
-    this._scrubber.setDurationSource(() => this._trackManager.maxDuration())
+    // Master duration must cover both the loaded .jsonl tracks and the
+    // separately-loaded stimulus audio (same offset convention as
+    // TrackManager.maxDuration — see there), so an audio-only session (no
+    // data track) can still play, and a track's data can't truncate a
+    // longer audio file's tail.
+    this._scrubber.setDurationSource(() => Math.max(
+      this._trackManager.maxDuration(),
+      this._audioTrack ? this._audioTrack.duration() - this._audioTrack.offsetSeconds : 0,
+    ))
     this._scrubber.setFocusedTrackSource(() => this._trackManager.focusedTrack)
     this._scrubber.setMarkersSource(() => this._markers)
 
@@ -173,7 +182,7 @@ export default class MultiTrackApp {
     // up front still lets you mark an exact moment while watching playback
     // and only stop to type the name a beat later.
     document.addEventListener('keydown', (e) => {
-      if (!this._scrubber.isActive()) return
+      if (!this._scrubber.isActive() || !this._scrubber.isVisible()) return
       if (e.target && /^(input|textarea)$/i.test(e.target.tagName)) return
       if (e.key === 'm' || e.key === 'M') this._queueMarker(null)
     })
@@ -278,15 +287,4 @@ export default class MultiTrackApp {
       this._markerListEl.appendChild(row)
     }
   }
-}
-
-/** Seconds → MM:SS (or H:MM:SS past an hour) — same format as MultiTrackScrubber's. */
-function fmtTime(s) {
-  s = Math.max(0, Math.floor(s))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const mm = m.toString().padStart(2, '0')
-  const ss = sec.toString().padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

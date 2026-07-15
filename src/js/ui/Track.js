@@ -2,11 +2,19 @@ import MultiTrackDisplay from './MultiTrackDisplay'
 import { renderQualityRibbon, renderEventTicks } from './timelineDecor'
 import { cssVar } from './palette'
 
-/** All panel keys a track can show/hide — see `PANEL_WINDOWS` in bioRender. */
-export const ALL_PANELS = ['eeg', 'spec', 'specLo', 'specAudio', 'bands', 'mse', 'ppg', 'imu']
+/**
+ * All panel keys a track can show/hide — see `PANEL_WINDOWS` in bioRender.
+ * Excludes `specAudio` (Audio Tempo): every track in this tab is a loaded
+ * `.jsonl` file with no live entrainment computation feeding it, so that
+ * panel can never have data here (see `MultiTrackDisplay.renderAt`, which
+ * hides it unconditionally for file-sourced stores) — offering it in the
+ * menu would just waste one of the 4 panel slots on a panel that can never
+ * show anything.
+ */
+export const ALL_PANELS = ['eeg', 'spec', 'specLo', 'bands', 'mse', 'ppg', 'imu']
 
 const PANEL_LABELS = {
-  eeg: 'EEG', spec: 'Spectrogram', specLo: 'Delta / Theta', specAudio: 'Audio Tempo',
+  eeg: 'EEG', spec: 'Spectrogram', specLo: 'Delta / Theta',
   bands: 'EEG Bands', mse: 'Complexity (MSE)', ppg: 'PPG', imu: 'IMU',
 }
 

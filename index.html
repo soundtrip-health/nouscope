@@ -201,7 +201,7 @@
         <button id="pause-btn" hidden title="Pause/resume playback">⏸</button>
         <button id="mic-btn" title="Use microphone as audio source">Microphone</button>
         <label class="controls-upload-btn" title="Upload audio file">
-          ↑ Track
+          ↑ Music
           <input type="file" id="audio-upload" accept="audio/*" />
         </label>
         <label class="controls-upload-btn" title="Load a saved .jsonl recording to analyze">
@@ -350,7 +350,7 @@
       </template>
 
       <label class="controls-upload-btn mt-add-track-btn" title="Load a saved .jsonl recording as a new track">
-        ↑ Track
+        ↑ Recording
         <input type="file" id="mt-add-track-input" accept=".jsonl,application/x-ndjson" />
       </label>
 
@@ -379,7 +379,6 @@
           <div class="scrub-hover-time" id="mt-scrub-hover-time" hidden></div>
         </div>
         <span class="scrub-time scrub-duration" id="mt-scrub-duration">00:00</span>
-        <button class="scrub-btn" id="mt-scrub-live" title="Jump to the latest data (End)" hidden>● LIVE</button>
         <button class="scrub-btn" id="mt-scrub-speed" title="Playback speed">1×</button>
 
         <!-- Markers: annotate a moment ("music started") at the current

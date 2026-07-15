@@ -114,9 +114,17 @@ export default class TrackManager {
     this.tracks.forEach(t => t.notifyMarkersChanged())
   }
 
+  /**
+   * Master timeline length: long enough that every track's full local range
+   * remains reachable. A track's local time `t` sits at master time
+   * `t - offsetSeconds` (the inverse of `Track.effectiveCursor`, see Track.js),
+   * so its own duration needs `duration() - offsetSeconds` of master range —
+   * more than the raw duration whenever offsetSeconds is negative (its
+   * recording started later than the reference track).
+   */
   maxDuration() {
     let d = 0
-    for (const t of this.tracks) d = Math.max(d, t.duration())
+    for (const t of this.tracks) d = Math.max(d, t.duration() - t.offsetSeconds)
     return d
   }
 

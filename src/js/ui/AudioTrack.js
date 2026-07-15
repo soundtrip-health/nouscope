@@ -186,6 +186,12 @@ export default class AudioTrack {
     if (this._labelEl) this._labelEl.textContent = text
   }
 
+  /** This audio's own duration (0 before metadata loads) — see `sync()`'s offset convention. */
+  duration() {
+    const d = this._audio.duration
+    return Number.isFinite(d) ? d : 0
+  }
+
   /**
    * Keep the `<audio>` element's position/rate/play-state matching the master
    * transport. Called every master render tick (see `MultiTrackApp`).
@@ -193,7 +199,9 @@ export default class AudioTrack {
   sync(masterCursor, playing, speed) {
     const dur = this._audio.duration
     if (!dur || Number.isNaN(dur)) return
-    const target = masterCursor - this.offsetSeconds
+    // Same sign convention as Track.effectiveCursor (masterCursor + offsetSeconds):
+    // positive offset means this recording started earlier, so skip ahead to sync with master t=0.
+    const target = masterCursor + this.offsetSeconds
     const inRange = target >= 0 && target <= dur
     if (!inRange) {
       if (!this._audio.paused) this._audio.pause()
