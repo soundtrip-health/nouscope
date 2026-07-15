@@ -35,6 +35,9 @@ import { formatTime as fmtTime } from './ui/formatTime'
  *   submitted (Enter, or the master button again). Queuing the *time* up
  *   front (rather than at submission) keeps `M`'s original point — mark this
  *   exact instant, then name it — even though naming is no longer optional.
+ *
+ *   `[` / `]` seek the playhead to the nearest marker before/after the
+ *   cursor, across every scope — see `_jumpMarker`.
  */
 export default class MultiTrackApp {
   constructor() {
@@ -181,13 +184,29 @@ export default class MultiTrackApp {
     // input — markers can't be added without a name, but capturing the *time*
     // up front still lets you mark an exact moment while watching playback
     // and only stop to type the name a beat later.
+    // "[" / "]" jump the playhead to the previous/next marker (across every
+    // scope — global, per-track, and audio-row alike), since `this._markers`
+    // is kept sorted by `t` on every add.
     document.addEventListener('keydown', (e) => {
       if (!this._scrubber.isActive() || !this._scrubber.isVisible()) return
       if (e.target && /^(input|textarea)$/i.test(e.target.tagName)) return
       if (e.key === 'm' || e.key === 'M') this._queueMarker(null)
+      else if (e.key === '[') this._jumpMarker(-1)
+      else if (e.key === ']') this._jumpMarker(1)
     })
 
     this._renderMarkerList()
+  }
+
+  /** Seek to the nearest marker before (-1) or after (+1) the current playhead, if any. */
+  _jumpMarker(dir) {
+    if (!this._markers.length) return
+    const cursor = this._scrubber.getCursor()
+    const EPS = 0.05   // ignore a marker sitting right at the cursor already
+    const target = dir < 0
+      ? [...this._markers].reverse().find(m => m.t < cursor - EPS)
+      : this._markers.find(m => m.t > cursor + EPS)
+    if (target) this._scrubber.seek(target.t)
   }
 
   /** Queue a marker at the current playhead, scoped to `trackId`, and focus the label input to name it. */

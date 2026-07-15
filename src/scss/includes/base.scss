@@ -592,6 +592,14 @@ button:focus-visible {
   &[hidden] { display: none; }
 }
 
+.bio-backlog-warning {
+  font-size: 0.7rem;
+  color: var(--status-battery-warn);
+  letter-spacing: 0.03em;
+
+  &[hidden] { display: none; }
+}
+
 .bio-mse-value {
   font-size: 0.6rem;
   color: var(--text-value);
@@ -907,4 +915,103 @@ body.analysis-mode {
   color: rgba(255, 255, 255, 0.7);
   line-height: 1.4;
   z-index: 200;
+}
+
+// ── Keyboard-shortcuts reference (shared across both tabs) ────────────────
+// See ShortcutsModal.js — opened from either transport bar's own "?" button.
+.shortcuts-btn {
+  width: 1.8rem;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font-weight: 600;
+}
+
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+
+  &[hidden] { display: none; }
+}
+
+.shortcuts-modal {
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.shortcuts-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  margin-bottom: 0.75rem;
+}
+
+.shortcuts-close-btn {
+  background: none;
+  border: 1px solid var(--border-button);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+
+  &:hover { color: var(--color-text); border-color: var(--color-text); }
+}
+
+.shortcuts-group {
+  & + & { margin-top: 1rem; }
+
+  h3 {
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-label);
+    margin: 0 0 0.5rem;
+    font-weight: 400;
+  }
+
+  dl {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  dl > div {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+
+  dt {
+    flex-shrink: 0;
+    min-width: 5rem;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text);
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-hairline);
+    border-radius: 3px;
+    padding: 0.1rem 0.4rem;
+    text-align: center;
+  }
+
+  dd {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
 }

@@ -26,6 +26,12 @@ const PANEL_LABELS = {
 export const MAX_PANELS = 4
 export const DEFAULT_PANELS = ['eeg', 'bands', 'spec']
 
+// Per-track accent color, cycled by creation order — reuses the EEG-electrode
+// hue tokens (see _tokens.scss) rather than inventing new ones, and lines up
+// 1:1 with MAX_TRACKS (TrackManager.js) so every concurrent track gets a
+// distinct, already-themed color.
+export const TRACK_ACCENT_VARS = ['--eeg-tp9', '--eeg-af7', '--eeg-af8', '--eeg-tp10']
+
 // Throttle: re-sample the quality ribbon/ticks at most this often while a
 // session grows — see the identical guard the original single-session
 // Scrubber has (now per-track, since each track's store grows independently).
@@ -54,6 +60,8 @@ export default class Track {
    * @param {import('../managers/SessionStore').default} opts.store
    * @param {HTMLElement} opts.laneEl — the cloned track-lane-template root, passed to MultiTrackDisplay
    * @param {string} [opts.label]
+   * @param {string} [opts.colorVar] — one of `TRACK_ACCENT_VARS`, this track's
+   *   accent color (header label, border, timeline fill/head); defaults to the first.
    * @param {string[]|Set<string>} [opts.enabledPanels] — starting panel set; defaults to `DEFAULT_PANELS`.
    * @param {() => number} opts.getMasterDuration
    * @param {(t: number) => void} opts.seekMaster
@@ -71,11 +79,12 @@ export default class Track {
    *   track's own `id`) when its "+ Marker" button is clicked, to add a
    *   marker scoped to this track alone.
    */
-  constructor({ id, store, laneEl, label = '', enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove, getMarkers, onAddMarker }) {
+  constructor({ id, store, laneEl, label = '', colorVar, enabledPanels, getMasterDuration, seekMaster, markDirty, onRemove, getMarkers, onAddMarker }) {
     this.id = id
     this.store = store
     this.label = label
     this.laneEl = laneEl
+    this.color = cssVar(colorVar || TRACK_ACCENT_VARS[0])
     this.root = null   // the `.mt-track` wrapper — set by TrackManager once mounted
 
     this.linked = true
@@ -144,6 +153,7 @@ export default class Track {
     this._menuChecks   = [...header.querySelectorAll('.mt-track-menu-check')]
 
     this._labelEl.textContent = this.label
+    this._labelEl.style.color = this.color
     this._buildReplaceControl()
     this._buildRemoveControl()
 

@@ -96,8 +96,20 @@ main[hidden] { display: none; }
   gap: 0.75rem;
   padding: 0.6rem;
   border: 1px solid var(--border-hairline);
+  // Set per-track by TrackManager (`--track-accent`, one of TRACK_ACCENT_VARS
+  // in Track.js) so concurrent tracks are distinguishable at a glance; falls
+  // back to the plain hairline for the (single, colorless) audio row.
+  border-left: 3px solid var(--track-accent, var(--border-hairline));
   border-radius: 4px;
   background: var(--surface-panel);
+
+  // Tint this track's own playhead to match its accent — scoped away from
+  // the audio row (no --track-accent set there) so its fill/head keep their
+  // original look.
+  &:not(.mt-audio-track) .scrub-fill,
+  &:not(.mt-audio-track) .scrub-head {
+    background: var(--track-accent);
+  }
 }
 
 // ── Stimulus audio row (sits above .mt-tracks; see AudioTrack.js) ───────

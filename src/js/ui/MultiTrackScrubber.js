@@ -22,7 +22,8 @@
 import { renderEventTicks } from './timelineDecor'
 import { formatTime as fmt } from './formatTime'
 
-const SPEEDS = [1, 2, 4]
+const SPEEDS = [0.25, 0.5, 1, 2, 4]
+const DEFAULT_SPEED_IDX = SPEEDS.indexOf(1)
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
 
 export default class MultiTrackScrubber {
@@ -38,7 +39,7 @@ export default class MultiTrackScrubber {
     this._markersSource = () => []
 
     this._cursor = 0        // playhead time (s)
-    this._speedIdx = 0
+    this._speedIdx = DEFAULT_SPEED_IDX
     this._playing = false
     this._dragging = false
     this._active = false

@@ -16,7 +16,8 @@
 import { cssVar } from './palette'
 import { formatTime as fmt } from './formatTime'
 
-const SPEEDS = [1, 2, 4]
+const SPEEDS = [0.25, 0.5, 1, 2, 4]
+const DEFAULT_SPEED_IDX = SPEEDS.indexOf(1)
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
 const RIBBON_SAMPLES = 300      // ribbon resolution, independent of canvas pixel width
 const RIBBON_REBUILD_MS = 1000  // throttle: re-sample at most this often while a live session grows
@@ -28,7 +29,7 @@ export default class Scrubber {
     this._store = null
 
     this._cursor = 0        // playhead time (s)
-    this._speedIdx = 0
+    this._speedIdx = DEFAULT_SPEED_IDX
     this._playing = false
     this._following = false // track the live leading edge
     this._dragging = false

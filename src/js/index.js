@@ -1,11 +1,13 @@
 import App from './App'
 import MultiTrackApp from './MultiTrackApp'
+import ShortcutsModal from './ui/ShortcutsModal'
 
 ;(() => {
   new App()
   window._App = App   // dev-only: console access to App.eegManager etc.
 
   const multiTrackApp = new MultiTrackApp()
+  new ShortcutsModal()
 
   // View switcher: two fully independent views, #session-view (the original
   // single-session app) and #multitrack-view (file-review only). Switching

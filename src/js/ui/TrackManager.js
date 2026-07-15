@@ -1,5 +1,5 @@
 import SessionStore from '../managers/SessionStore'
-import Track, { DEFAULT_PANELS } from './Track'
+import Track, { DEFAULT_PANELS, TRACK_ACCENT_VARS } from './Track'
 
 let _nextTrackId = 1
 
@@ -54,6 +54,7 @@ export default class TrackManager {
     const wrapper = document.createElement('div')
     wrapper.className = 'mt-track'
     wrapper.dataset.trackId = track.id
+    wrapper.style.setProperty('--track-accent', track.color)
     wrapper.appendChild(track.headerEl)
 
     const laneCol = document.createElement('div')
@@ -79,11 +80,16 @@ export default class TrackManager {
   addFileTrack(text, label) {
     const store = new SessionStore()
     store.loadFromText(text)
+    // Cycle accent colors by current track count, so each concurrent slot
+    // (bounded by MAX_TRACKS, same length as TRACK_ACCENT_VARS) gets a color
+    // distinct from every other track on screen right now.
+    const colorVar = TRACK_ACCENT_VARS[this.tracks.length % TRACK_ACCENT_VARS.length]
     const track = new Track({
       id: `track-${_nextTrackId++}`,
       store,
       laneEl: this._cloneLane(),
       label,
+      colorVar,
       enabledPanels: DEFAULT_PANELS,
       getMasterDuration: this._getMasterDuration,
       seekMaster: this._seekMaster,

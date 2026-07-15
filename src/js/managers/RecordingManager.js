@@ -72,6 +72,13 @@ export default class RecordingManager {
   onRecord      = null
   captureActive = false
 
+  // Optional UI hook: called with `true` the moment the pre-record backlog
+  // first starts dropping its oldest lines, and `false` when a fresh capture
+  // epoch (enableCapture without resume, or resetCapture) clears that state —
+  // lets the UI surface a persistent warning instead of the console.warn in
+  // start() alone, which only fires if/when the user happens to press ⏺.
+  onBacklogTrimmed = null
+
   /**
    * Begin forwarding records to `onRecord` and retaining them in the backlog,
    * independent of disk recording. The epoch stamped here is the session's true
@@ -97,9 +104,11 @@ export default class RecordingManager {
 
   /** Drop the retained backlog (e.g. a saved file replaced the live session). */
   resetCapture() {
+    const wasTrimmed = this._backlogTrimmed
     this._backlog        = []
     this._backlogBytes   = 0
     this._backlogTrimmed = false
+    if (wasTrimmed) this.onBacklogTrimmed?.(false)
   }
 
   _mode        = 'memory' // 'stream' | 'memory'
@@ -350,7 +359,9 @@ export default class RecordingManager {
       dropped++
     }
     this._backlog.splice(0, dropped)
+    const wasTrimmed = this._backlogTrimmed
     this._backlogTrimmed = true
+    if (!wasTrimmed) this.onBacklogTrimmed?.(true)
   }
 
   /**

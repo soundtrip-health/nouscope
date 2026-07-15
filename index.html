@@ -184,6 +184,7 @@
         <span class="scrub-time scrub-duration" id="scrub-duration">00:00</span>
         <button class="scrub-btn" id="scrub-live" title="Jump to the latest data (End)">● LIVE</button>
         <button class="scrub-btn" id="scrub-speed" title="Playback speed">1×</button>
+        <button class="scrub-btn shortcuts-btn" id="scrub-shortcuts-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
       </div>
 
       <div class="eeg-controls" id="eeg-controls">
@@ -198,6 +199,7 @@
         <span class="heart-rate-display" id="heart-rate"></span>
         <button class="bio-record" id="bio-record" hidden title="Record raw data to JSONL">⏺</button>
         <span class="bio-record-time" id="bio-record-time" hidden></span>
+        <span class="bio-backlog-warning" id="bio-backlog-warning" hidden title="The pre-record buffer hit its 64 MB cap — a recording saved from here on will start partway into the session, not at its true beginning.">⚠ buffer full</span>
         <button id="pause-btn" hidden title="Pause/resume playback">⏸</button>
         <button id="mic-btn" title="Use microphone as audio source">Microphone</button>
         <label class="controls-upload-btn" title="Upload audio file">
@@ -380,6 +382,7 @@
         </div>
         <span class="scrub-time scrub-duration" id="mt-scrub-duration">00:00</span>
         <button class="scrub-btn" id="mt-scrub-speed" title="Playback speed">1×</button>
+        <button class="scrub-btn shortcuts-btn" id="mt-scrub-shortcuts-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
 
         <!-- Markers: annotate a moment ("music started") at the current
              playhead — see MultiTrackApp.js's marker wiring. -->
@@ -391,6 +394,37 @@
         </details>
       </div>
     </main>
+
+    <!-- Shared keyboard-shortcuts reference — one instance, opened from either
+         tab's own "?" transport button (see ShortcutsModal.js). Lives outside
+         both #session-view/#multitrack-view so switching tabs never tears it
+         down or duplicates it. -->
+    <div class="shortcuts-overlay" id="shortcuts-overlay" hidden>
+      <div class="shortcuts-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+        <div class="shortcuts-modal-header">
+          <span>Keyboard Shortcuts</span>
+          <button type="button" class="shortcuts-close-btn" id="shortcuts-close-btn" aria-label="Close">✕</button>
+        </div>
+        <div class="shortcuts-modal-body">
+          <div class="shortcuts-group">
+            <h3>Transport — both tabs</h3>
+            <dl>
+              <div><dt>Space</dt><dd>Play / pause</dd></div>
+              <div><dt>← / →</dt><dd>Seek 5s back / forward</dd></div>
+              <div><dt>Home</dt><dd>Jump to the start</dd></div>
+              <div><dt>End</dt><dd>Jump to the end (Single Track: the live edge)</dd></div>
+            </dl>
+          </div>
+          <div class="shortcuts-group">
+            <h3>Multiple Tracks — markers</h3>
+            <dl>
+              <div><dt>M</dt><dd>Queue a marker at the playhead — name it, then Enter</dd></div>
+              <div><dt>[ / ]</dt><dd>Jump to the previous / next marker</dd></div>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <script>
       if (!navigator.bluetooth) {

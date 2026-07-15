@@ -243,8 +243,14 @@ export default class App {
 
     const btn     = document.getElementById('bio-record')
     const timeEl  = document.getElementById('bio-record-time')
+    const warnEl  = document.getElementById('bio-backlog-warning')
     this._recordBtn    = btn
     this._recordTimeEl = timeEl
+
+    // Surfaces in the UI the same condition start() otherwise only console.warns
+    // about — the pre-record backlog hit its cap, so a recording saved from here
+    // on will start partway into the session rather than at its true beginning.
+    App.recordingManager.onBacklogTrimmed = (trimmed) => { warnEl.hidden = !trimmed }
 
     btn.addEventListener('click', async () => {
       const rm = App.recordingManager
