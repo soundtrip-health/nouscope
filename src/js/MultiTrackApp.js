@@ -98,12 +98,23 @@ export default class MultiTrackApp {
     })
   }
 
-  /** Called by the tab switcher when this tab becomes visible, to size freshly-visible canvases. */
+  /** Called by the tab switcher when this tab becomes visible: size freshly-visible canvases and (re)start the transport. */
   onShow() {
     this._trackManager.resizeAll()
     this._scrubber.resize()
     this._scrubber.refresh()
-    if (!this._scrubber._active) this._scrubber.setActive(true, { atStart: true })
+    // Always (re)activate: onHide() deactivates on tab-out, so _active is false
+    // whenever we return. setActive(true) restarts the render loop and preserves
+    // the playhead (no atStart reset) — the user picks up where they left off.
+    this._scrubber.setActive(true)
+  }
+
+  /** Called by the tab switcher when this tab is hidden: stop the transport's render loop and pause any synced audio. */
+  onHide() {
+    this._scrubber.setActive(false)
+    // setActive(false) cancels the render loop, so sync() won't run again to
+    // actually pause the <audio> element — force one final sync with playing=false.
+    this._audioTrack?.sync(this._scrubber.getCursor(), false, this._scrubber.getSpeed())
   }
 
   async _loadTrackFile(file) {
@@ -205,6 +216,11 @@ export default class MultiTrackApp {
     const submitOnEnter = (e) => { if (e.key === 'Enter') this._saveMarkerFromModal() }
     this._modalNameInput.addEventListener('keydown', submitOnEnter)
     this._modalTimeInput.addEventListener('keydown', submitOnEnter)
+    // Track whether the user actually edited the time field. It is prefilled
+    // with a whole-second value (formatTime floors), so an untouched field
+    // must NOT be re-parsed — that would silently drop the sub-second part of
+    // the playhead. Only re-parse once the user types (see _saveMarkerFromModal).
+    this._modalTimeInput.addEventListener('input', () => { this._modalTimeEdited = true })
 
     // Escape closes the marker modal first if it's open, regardless of the
     // scrubber-active gating below (mirrors ShortcutsModal's own Escape
@@ -226,15 +242,29 @@ export default class MultiTrackApp {
     this._renderMarkerList()
   }
 
-  /** Seek to the nearest marker before (-1) or after (+1) the current playhead, if any. */
+  /** Seek to the nearest marker before (-1) or after (+1) the current playhead. Mirrors the ←/→ redirect: when an unlinked track is focused, the jump lands on that track's own cursor, not the master's. */
   _jumpMarker(dir) {
     if (!this._markers.length) return
-    const cursor = this._scrubber.getCursor()
+    const focused = this._trackManager.focusedTrack
+    // A focused unlinked track's playhead lives in its own local frame; express
+    // it in the shared [0, masterDuration] frame its strip is drawn in, so the
+    // "before/after the cursor" comparison matches what the user sees.
+    const cursor = (focused && !focused.linked)
+      ? focused.ownCursor - focused.offsetSeconds
+      : this._scrubber.getCursor()
     const EPS = 0.05   // ignore a marker sitting right at the cursor already
     const target = dir < 0
       ? [...this._markers].reverse().find(m => m.t < cursor - EPS)
       : this._markers.find(m => m.t > cursor + EPS)
-    if (target) this._scrubber.seek(target.t)
+    if (!target) return
+    if (focused && !focused.linked) {
+      // Map the marker's master time back into this track's local frame — same
+      // as Track._seekToMarker / the strip's shared-frame math.
+      focused.ownCursor = focused.clampTime(target.t + focused.offsetSeconds)
+      this._scrubber.refresh()
+    } else {
+      this._scrubber.seek(target.t)
+    }
   }
 
   /** Rebuild the "All tracks" + per-track/audio-row checkbox list, checked according to `selectedIds` (null = all). */
@@ -311,6 +341,10 @@ export default class MultiTrackApp {
     this._modalNameInput.value = label
     this._modalTimeInput.value = fmtTime(t)
     this._modalRawTime = t
+    // Reset the "user edited the time field" flag — the field is prefilled
+    // programmatically (which does not fire 'input'), so an untouched field
+    // keeps its exact sub-second playhead via _modalRawTime.
+    this._modalTimeEdited = false
     this._buildTrackRows(trackIds)
     this._buildSwatches(editing?.color ?? this._markerColorSwatches[0])
     this._modalOverlay.hidden = false
@@ -328,8 +362,14 @@ export default class MultiTrackApp {
     const label = this._modalNameInput.value.trim()
     if (!label) { this._modalNameInput.focus(); return }
 
-    const parsed = parseTime(this._modalTimeInput.value)
-    const t = parsed != null ? Math.max(0, Math.min(this._scrubber.getDuration(), parsed)) : this._modalRawTime
+    // Keep the exact playhead time unless the user edited the field (see the
+    // input listener in _setupMarkers). Re-parsing the prefilled whole-second
+    // string would drop any sub-second fraction of the original cursor.
+    let t = this._modalRawTime
+    if (this._modalTimeEdited) {
+      const parsed = parseTime(this._modalTimeInput.value)
+      if (parsed != null) t = Math.max(0, Math.min(this._scrubber.getDuration(), parsed))
+    }
 
     const trackIds = this._modalAllCheckbox.checked
       ? null

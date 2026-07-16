@@ -23,6 +23,7 @@ export default class AnalysisDisplay extends RenderPipeline {
   constructor() {
     super()
     this._inited = false
+    this._suspended = false
     this._enabled = new Set(['eeg', 'spec', 'specLo', 'specAudio', 'bands', 'mse', 'ppg', 'imu'])
   }
 
@@ -76,6 +77,7 @@ export default class AnalysisDisplay extends RenderPipeline {
     this._audioSection = document.getElementById('an-audio-section')
 
     this._inited = true
+    this._suspended = false
   }
 
   _ctx(id) {
@@ -94,5 +96,45 @@ export default class AnalysisDisplay extends RenderPipeline {
 
   _activeBands() {
     return App.eegManager?.normalizeBands
+  }
+  /**
+   * Release this view's WebGL contexts so another view can use them (called
+   * when the Multi-Track tab is shown — see index.js). The view keeps
+   * capturing/scrolling underneath; it simply stops drawing until `resume()`
+   * recreates the contexts. Browsers cap live WebGL contexts at ~16 and this
+   * view holds 5 permanently, so freeing them lets the Multi-Track tab use its
+   * full panel budget without the oldest contexts being force-lost (which
+   * blanks panels). The single-session Scrubber's render loop calls renderAt,
+   * which no-ops while `_inited` is false, so suspending is safe mid-loop.
+   */
+  suspend() {
+    if (!this._inited) return
+    for (const gl of [this._eegGL, this._bandGL, this._mseGL, this._ppgGL, this._imuGL]) {
+      gl?.getExtension('WEBGL_lose_context')?.loseContext()
+    }
+    // Replace each canvas with a fresh, context-less clone so a later resume()
+    // (or init()) gets a genuinely new context — a lost GL context can never be
+    // revived on the same canvas node (see MultiTrackDisplay._disposeRoll).
+    for (const id of ['an-eeg-canvas', 'an-band-canvas', 'an-mse-canvas', 'an-ppg-canvas', 'an-imu-canvas']) {
+      const c = document.getElementById(id)
+      if (c) c.replaceWith(c.cloneNode(true))
+    }
+    this._eegGL = this._bandGL = this._mseGL = this._ppgGL = this._imuGL = null
+    this._eegPlot = this._bandPlot = this._msePlot = this._ppgPlot = this._imuPlot = null
+    this._inited = false
+    this._suspended = true
+  }
+
+  /**
+   * Recreate the WebGL contexts released by `suspend()` (called when the Single
+   * Track tab is shown again). Gated on `_suspended` — not `_inited` — so a
+   * round-trip through the Multi-Track tab before any session exists does NOT
+   * eagerly init this hidden, storeless view. Contexts are only ever created by
+   * `_showPanel()` when a session appears, or re-created here after a real suspend.
+   */
+  resume() {
+    if (!this._suspended) return
+    this._suspended = false
+    this.init()
   }
 }

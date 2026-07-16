@@ -236,6 +236,31 @@ export default class App {
     this._analysisPanel.hidden = true
     this._scrubber.setActive(false)
   }
+  /** Free this view's WebGL contexts and stop its transport loop so the Multi-Track tab can use them (see index.js). */
+  suspendAnalysis() {
+    if (!this._analysisDisplay) return
+    // Also stop the scrubber's render loop: freeing the GL contexts stops the
+    // line panels drawing, but the loop keeps rebuilding the 2D quality
+    // ribbon/ticks against the now-hidden tab. Capture into SessionStore is
+    // driven by App.update(), not this loop, so nothing stops filling the
+    // timeline — we're only pausing the drawing. Remember whether it was
+    // running so resumeAnalysis() restarts it only when appropriate.
+    this._scrubberWasActive = this._scrubber.isActive()
+    if (this._scrubberWasActive) this._scrubber.setActive(false)
+    this._analysisDisplay.suspend()
+  }
+
+  /** Recreate this view's WebGL contexts and restart its transport after the Multi-Track tab is hidden (see index.js). */
+  resumeAnalysis() {
+    if (!this._analysisDisplay) return
+    this._analysisDisplay.resume()   // recreate GL first so the loop's first renderAt has live contexts
+    if (this._scrubberWasActive) {
+      // No opts: preserve cursor + follow-state. If it was following the live
+      // edge, the loop's first frame re-snaps to the grown edge on its own.
+      this._scrubber.setActive(true)
+      this._scrubberWasActive = false
+    }
+  }
 
   /** Wire up the record button + download-on-stop flow. */
   _setupRecording() {
@@ -293,6 +318,9 @@ export default class App {
     this._scrubber = new Scrubber((store, cursor) => this._analysisDisplay.renderAt(store, cursor))
     this._scrubber.attach()
     this._scrubber.setStore(App.sessionStore)
+    this._scrubberWasActive = false   // set by suspendAnalysis() to restore the loop on return
+
+
 
     this._analysisPanel = document.getElementById('analysis-panel')
 

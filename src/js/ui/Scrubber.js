@@ -183,6 +183,9 @@ export default class Scrubber {
   /** Force a redraw on the next frame (e.g. after new data was ingested). */
   refresh() { this._dirty = true }
 
+  /** Whether the render loop is running (used to remember state across a tab-out suspend). */
+  isActive() { return this._active }
+
   /** Whether this scrubber's tab is actually the one on screen right now (see `_onKey`). */
   isVisible() {
     return !!this._els?.root && this._els.root.closest('[hidden]') === null
