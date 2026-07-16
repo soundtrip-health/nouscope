@@ -77,4 +77,9 @@
   // ── Entrainment meter (scalar accent, not a status) ────────────────────────
   --entrain-from: #34d399;
   --entrain-to: #60a5fa;
+
+  // ── Markers ─────────────────────────────────────────────────────────────
+  --marker-neutral: #9ca3af;   // default marker color — grey keeps the white
+                                // "selected" ring (see _multitrack.scss)
+                                // visible, unlike --color-text (white on white)
 }

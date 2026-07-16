@@ -385,13 +385,51 @@
         <button class="scrub-btn shortcuts-btn" id="mt-scrub-shortcuts-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
 
         <!-- Markers: annotate a moment ("music started") at the current
-             playhead — see MultiTrackApp.js's marker wiring. -->
-        <input type="text" id="mt-marker-label-input" class="mt-marker-label-input" placeholder="Marker name" title="Name the marker, then press Enter or + Marker (M queues the current moment to name)" />
-        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a global marker at the current playhead — requires a name">+ Marker</button>
+             playhead — see MultiTrackApp.js's marker wiring. Every "+ Marker"
+             trigger (this button, a track/audio row's own, or `M`) opens
+             #mt-marker-modal rather than adding anything directly. -->
+        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a marker at the current playhead">+ Marker</button>
         <details class="mt-marker-menu" id="mt-marker-menu">
           <summary class="mt-track-menu-btn scrub-btn" title="View / edit / jump to markers">Markers (<span id="mt-marker-count">0</span>)</summary>
           <div class="mt-marker-popover" id="mt-marker-list"></div>
         </details>
+      </div>
+
+      <!-- Add/Edit marker modal — the only way markers are created or edited
+           (see MultiTrackApp.js's `_openMarkerModal`/`_saveMarkerFromModal`).
+           `#mt-marker-modal-tracks` is populated at open-time with one row
+           per currently-loaded track/audio row, plus the "All tracks" row. -->
+      <div class="mt-marker-modal-overlay" id="mt-marker-modal-overlay" hidden>
+        <div class="mt-marker-modal" role="dialog" aria-modal="true" aria-label="Marker">
+          <div class="mt-marker-modal-header">
+            <span id="mt-marker-modal-title">Add marker</span>
+          </div>
+
+          <label class="mt-marker-modal-field">
+            <span>Name</span>
+            <input type="text" id="mt-marker-modal-name" placeholder="Marker name" />
+          </label>
+
+          <label class="mt-marker-modal-field">
+            <span>Time</span>
+            <input type="text" id="mt-marker-modal-time" />
+          </label>
+
+          <div class="mt-marker-modal-field">
+            <span>Color</span>
+            <div class="mt-marker-modal-swatches" id="mt-marker-modal-swatches"></div>
+          </div>
+
+          <div class="mt-marker-modal-field">
+            <span>Tracks</span>
+            <div class="mt-marker-modal-tracks" id="mt-marker-modal-tracks"></div>
+          </div>
+
+          <div class="mt-marker-modal-actions">
+            <button type="button" class="scrub-btn" id="mt-marker-modal-cancel-btn">Cancel</button>
+            <button type="button" class="scrub-btn" id="mt-marker-modal-save-btn">Save</button>
+          </div>
+        </div>
       </div>
     </main>
 
@@ -418,7 +456,7 @@
           <div class="shortcuts-group">
             <h3>Multiple Tracks — markers</h3>
             <dl>
-              <div><dt>M</dt><dd>Queue a marker at the playhead — name it, then Enter</dd></div>
+              <div><dt>M</dt><dd>Open the marker dialog at the playhead</dd></div>
               <div><dt>[ / ]</dt><dd>Jump to the previous / next marker</dd></div>
             </dl>
           </div>

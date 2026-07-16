@@ -783,16 +783,17 @@ body.analysis-mode {
 
   &.scrub-tick--music { background: var(--color-text); opacity: 0.6; }
   &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
-  // A small flag-pin (unlike music/gap, which are plain hairlines) — built
-  // from pseudo-elements rather than `background` so it reads as a marker,
-  // not just another data tick. Interactive (unlike music/gap) so its hover
-  // title (the marker's label) is reachable; `cursor: pointer` since it's
-  // genuinely clickable-through to the timeline's own seek handler — not
-  // `help`, which paints the browser's native "?" cursor glyph and has
-  // nothing to do with what this tick actually does.
+  // A pin (unlike music/gap, which are plain hairlines) — a stem plus a
+  // round head, both painted via `currentColor` so a marker's own `color`
+  // (set inline per-marker by renderEventTicks — chosen in the marker modal)
+  // only needs to be set once rather than repeated on each pseudo-element.
+  // Interactive (unlike music/gap) so its hover label is reachable;
+  // `cursor: pointer` since it's genuinely clickable-through to the
+  // timeline's own seek handler — not `help`, which paints the browser's
+  // native "?" cursor glyph and has nothing to do with what this tick does.
   &.scrub-tick--marker {
-    top: -2px;
-    // A wider invisible hit-box than the visible flag/stem, centered on the
+    top: -3px;
+    // A wider invisible hit-box than the visible pin, centered on the
     // marker's exact time (the pseudo-elements below are positioned at this
     // box's centre, not its edge) — easier to click without shifting where
     // it visually points.
@@ -800,41 +801,66 @@ body.analysis-mode {
     margin-left: -7px;
     pointer-events: auto;
     cursor: pointer;
+    color: var(--band-delta);   // fallback if a marker somehow has no color
 
     &::before {   // stem
       content: '';
       position: absolute;
-      top: 4px;
+      top: 8px;
       bottom: 0;
       left: 7px;
       width: 2px;
       margin-left: -1px;
-      background: var(--band-delta);
-      opacity: 0.85;
-      transition: opacity 0.15s, transform 0.15s;
-      transform-origin: 50% 0;
+      background: currentColor;
+      opacity: 0.7;
+      transition: opacity 0.15s;
     }
 
-    &::after {    // pennant
+    &::after {    // head — a ring cutout (surface-panel) separates it from
+                   // whatever the tick sits over, so heads read distinctly
+                   // even when a few land close together on a busy strip.
       content: '';
       position: absolute;
       top: 0;
       left: 7px;
-      width: 0;
-      height: 0;
-      border-style: solid;
-      border-width: 3.5px 0 3.5px 7px;
-      border-color: transparent transparent transparent var(--band-delta);
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
-      transition: transform 0.15s, border-left-color 0.15s;
-      transform-origin: 0 50%;
+      width: 8px;
+      height: 8px;
+      margin-left: -4px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 2px var(--surface-panel);
+      transition: transform 0.15s;
     }
 
-    &:hover {
-      &::before { opacity: 1; transform: scaleY(1.08); }
-      &::after { transform: scale(1.4); border-left-color: var(--color-text); }
+    &:hover,
+    &:focus-visible {
+      &::before { opacity: 1; }
+      &::after { transform: scale(1.35); }
+      .scrub-tick-label { opacity: 1; transform: translate(-50%, -2px); }
     }
   }
+}
+
+// Custom hover label for a marker tick, replacing the native `title`
+// tooltip (slow to appear, unstyled, easy to lose on a dense timeline).
+// Hidden until the tick's own :hover/:focus-visible reveals it (see above);
+// `pointer-events: none` so it never itself blocks the click-through seek.
+.scrub-tick-label {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, 2px);
+  white-space: nowrap;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  color: var(--color-text);
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+  z-index: 20;
 }
 
 // Floating time preview that tracks the pointer on hover/drag, before a seek

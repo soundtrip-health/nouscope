@@ -58,23 +58,35 @@ export function renderQualityRibbon(canvas, store, colors, { offsetSeconds, mast
  * `pointerdown` with the exact marker object, and stops the event from
  * bubbling to the strip's own click-to-seek handler — so a click lands on
  * the marker's precise time rather than wherever the pointer happened to be.
+ *
+ * Each marker carries its own explicit `color` (chosen in the marker modal —
+ * see `MultiTrackApp._openMarkerModal`), applied as an inline `color` style
+ * that the pin's stem/head pick up via `currentColor` (see base.scss) — this
+ * file doesn't need to know whether a marker is global or track-scoped.
  */
 export function renderEventTicks(container, store, { offsetSeconds, masterDuration }, markers = [], onMarkerClick) {
   container.innerHTML = ''
   if (masterDuration <= 0) return
-  const addTick = (t, cls, title, onClick) => {
+  const addTick = (t, cls, label, onClick, color) => {
     const pos = ((t - offsetSeconds) / masterDuration) * 100
     if (pos < 0 || pos > 100) return
     const el = document.createElement('div')
     el.className = `scrub-tick ${cls}`
     el.style.left = `${pos.toFixed(2)}%`
-    if (title) el.title = title
+    if (color) el.style.color = color
     if (onClick) el.addEventListener('pointerdown', (e) => { e.stopPropagation(); onClick() })
+    if (label) {
+      el.setAttribute('aria-label', label)
+      const chip = document.createElement('span')
+      chip.className = 'scrub-tick-label'
+      chip.textContent = label
+      el.appendChild(chip)
+    }
     container.appendChild(el)
   }
   if (store) {
     for (const rec of store.music) addTick(rec.t, 'scrub-tick--music')
     for (const gap of store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
   }
-  for (const m of markers) addTick(m.t + offsetSeconds, 'scrub-tick--marker', m.label, () => onMarkerClick?.(m))
+  for (const m of markers) addTick(m.t + offsetSeconds, 'scrub-tick--marker', m.label, () => onMarkerClick?.(m), m.color)
 }

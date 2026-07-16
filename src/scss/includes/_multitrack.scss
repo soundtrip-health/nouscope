@@ -158,13 +158,12 @@ main[hidden] { display: none; }
   gap: 0.5rem;
   font-size: 0.7rem;
 
-  // Link button, offset input, "+ Marker", the mute button (audio row), and
-  // the "☰ graphs" popover summary all sit in this one row — give them a
+  // Link button, offset input, the mute button (audio row), and the
+  // "☰ graphs" popover summary all sit in this one row — give them a
   // shared height and horizontal-only padding so they line up cleanly
   // regardless of each control's own font-size/border/native-input quirks.
   > .mt-track-link-btn,
   > .mt-track-offset-input,
-  > .mt-marker-add-btn,
   > .mt-audio-mute-btn,
   > .mt-track-menu > .mt-track-menu-btn {
     height: 1.6rem;
@@ -199,12 +198,6 @@ main[hidden] { display: none; }
   border: 1px solid var(--border-control);
   color: var(--color-text);
   border-radius: 3px;
-}
-
-// Per-track/per-audio-row "add a marker scoped to just this one" button —
-// distinct from the master transport's "Markers" browse-everything popover.
-.mt-marker-add-btn {
-  flex-shrink: 0;
 }
 
 .mt-track-replace-btn {
@@ -440,17 +433,6 @@ main[hidden] { display: none; }
 }
 
 // ── Markers (master-timeline annotations) ────────────────────────────────
-.mt-marker-label-input {
-  flex-shrink: 1;
-  min-width: 0;
-  width: 8rem;
-  background: none;
-  border: 1px solid var(--border-control);
-  color: var(--color-text);
-  border-radius: 3px;
-  font-size: 0.7rem;
-  padding: 0.3rem 0.4rem;
-}
 
 // Pop-out markers list — same native <details>/<summary> popover pattern as
 // .mt-track-menu, just anchored off the master transport instead of a track.
@@ -496,6 +478,16 @@ main[hidden] { display: none; }
   gap: 0.4rem;
 }
 
+// The marker's own color (see the modal below) — a small dot rather than
+// tinting the whole row, so the scope/name text stays legible regardless of
+// how light or saturated the chosen color is.
+.mt-marker-color-dot {
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+}
+
 .mt-marker-time {
   flex-shrink: 0;
   padding: 0.15rem 0.35rem;
@@ -503,8 +495,18 @@ main[hidden] { display: none; }
   font-variant-numeric: tabular-nums;
 }
 
+.mt-marker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--color-text);
+}
+
 // Which strip(s) a marker shows on — "All", or the owning track/audio row's
-// label (see MultiTrackApp._scopeLabel).
+// label(s) (see MultiTrackApp._scopeLabel).
 .mt-marker-scope {
   flex-shrink: 0;
   max-width: 5rem;
@@ -519,19 +521,111 @@ main[hidden] { display: none; }
   padding: 0.1rem 0.3rem;
 }
 
-.mt-marker-label-edit {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: 1px solid var(--border-control);
-  color: var(--color-text);
-  border-radius: 3px;
-  font-size: 0.7rem;
-  padding: 0.15rem 0.35rem;
-}
-
+.mt-marker-edit-btn,
 .mt-marker-delete-btn {
   flex-shrink: 0;
   padding: 0.15rem 0.35rem;
   font-size: 0.7rem;
+}
+
+// ── Marker modal (Add/Edit — see MultiTrackApp._openMarkerModal) ─────────
+// Same fixed-overlay/centered-panel pattern as .shortcuts-overlay/.shortcuts-modal
+// (base.scss), just with its own form fields instead of a shortcuts list.
+.mt-marker-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+
+  &[hidden] { display: none; }
+}
+
+.mt-marker-modal {
+  width: min(22rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 1rem 1.25rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mt-marker-modal-header {
+  font-size: 0.9rem;
+  color: var(--color-text);
+}
+
+.mt-marker-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+
+  > input[type="text"] {
+    background: none;
+    border: 1px solid var(--border-control);
+    color: var(--color-text);
+    border-radius: 3px;
+    font-size: 0.8rem;
+    padding: 0.35rem 0.5rem;
+  }
+}
+
+.mt-marker-modal-swatches {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mt-marker-modal-swatch {
+  width: 1.4rem;
+  height: 1.4rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.1s;
+
+  &.selected {
+    border-color: var(--color-text);
+    transform: scale(1.25);
+  }
+}
+
+.mt-marker-modal-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 8rem;
+  overflow-y: auto;
+  @include no-scrollbar;
+}
+
+.mt-marker-modal-track-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.mt-marker-modal-track-dot {
+  flex-shrink: 0;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+}
+
+.mt-marker-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }

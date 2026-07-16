@@ -1,5 +1,6 @@
 import { guess } from 'web-audio-beat-detector'
 import { renderEventTicks } from './timelineDecor'
+import { cssVar } from './palette'
 
 // Deadband before hard-seeking the <audio> element — its own clock is
 // accurate once actually playing, so only correct real drift (a scrub-drag,
@@ -32,16 +33,20 @@ export default class AudioTrack {
    * @param {(t: number) => void} opts.seekMaster
    * @param {() => void} [opts.markDirty] — force the master scrubber to redraw next frame.
    * @param {() => void} [opts.onRemove] — called when the "✕" button is clicked.
-   * @param {() => {t:number,label:string,trackId:?string}[]} [opts.getMarkers] —
-   *   every marker; this row overlays the global ones (`trackId == null`)
-   *   plus any scoped to `AUDIO_TRACK_ID`.
-   * @param {() => void} [opts.onAddMarker] — called when this row's own
-   *   "+ Marker" button is clicked, to add a marker scoped to the audio row alone.
+   * @param {() => {t:number,label:string,color:string,trackIds:?string[]}[]} [opts.getMarkers] —
+   *   every marker; this row overlays the global ones (`trackIds == null`)
+   *   plus any whose `trackIds` includes `AUDIO_TRACK_ID`. Markers are only
+   *   ever added/edited via the master transport's "+ Marker" button/modal —
+   *   this row has no add-marker control of its own.
    */
-  constructor({ getMasterDuration, seekMaster, markDirty, onRemove, getMarkers, onAddMarker }) {
+  constructor({ getMasterDuration, seekMaster, markDirty, onRemove, getMarkers }) {
     this.label = ''
     this.offsetSeconds = 0
     this.bpmValue = 0
+    // Fixed accent for this row's marker-modal swatch/default — there's only
+    // ever one audio row, so a constant works (see `Track.color`, the
+    // per-recording equivalent, which cycles through TRACK_ACCENT_VARS instead).
+    this.color = cssVar('--ppg')
 
     this._audio = new Audio()
     this._audio.preload = 'auto'
@@ -52,7 +57,6 @@ export default class AudioTrack {
     this._markDirty = markDirty ?? (() => {})
     this._onRemove = onRemove ?? (() => {})
     this._getMarkers = getMarkers ?? (() => [])
-    this._onAddMarker = onAddMarker ?? (() => {})
     this._dragging = false
 
     this._ticksDirty = true
@@ -75,7 +79,6 @@ export default class AudioTrack {
         <div class="mt-track-buttons">
           <button type="button" class="mt-audio-mute-btn scrub-btn" title="Mute"></button>
           <input type="number" class="mt-track-offset-input" step="0.5" value="0" title="Offset from master (s)" />
-          <button type="button" class="mt-marker-add-btn scrub-btn" title="Queue a marker here (this audio row only) — name it in the box that gets focused">+ Marker</button>
           <span class="mt-audio-bpm"></span>
         </div>
       </div>
@@ -93,7 +96,6 @@ export default class AudioTrack {
     this._removeBtn    = root.querySelector('.mt-track-remove-btn')
     this._muteBtn      = root.querySelector('.mt-audio-mute-btn')
     this._offsetInput  = root.querySelector('.mt-track-offset-input')
-    this._addMarkerBtn = root.querySelector('.mt-marker-add-btn')
     this._bpmEl        = root.querySelector('.mt-audio-bpm')
     this._timelineEl   = root.querySelector('.mt-track-timeline')
     this._fillEl       = root.querySelector('.scrub-fill')
@@ -113,8 +115,6 @@ export default class AudioTrack {
       this.offsetSeconds = Number.isFinite(v) ? v : 0
       this._markDirty()
     })
-
-    this._addMarkerBtn.addEventListener('click', () => this._onAddMarker())
 
     const fracFromEvent = (e) => {
       const rect = this._timelineEl.getBoundingClientRect()
@@ -229,8 +229,8 @@ export default class AudioTrack {
     this._ticksBuiltFor = masterDur
     // offsetSeconds: 0 — this strip is always in absolute master-frame terms
     // (see class doc), unlike `sync()`'s playback-position mapping. Global
-    // markers plus any scoped to this audio row alone — never a track's.
-    const markers = this._getMarkers().filter(m => m.trackId == null || m.trackId === AUDIO_TRACK_ID)
+    // markers plus any whose trackIds includes this audio row — never a track's.
+    const markers = this._getMarkers().filter(m => m.trackIds == null || m.trackIds.includes(AUDIO_TRACK_ID))
     renderEventTicks(this._ticksEl, null, { offsetSeconds: 0, masterDuration: masterDur }, markers, (m) => this._seekMaster(m.t))
   }
 
