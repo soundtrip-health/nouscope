@@ -102,6 +102,8 @@ main[hidden] { display: none; }
   border-left: 3px solid var(--track-accent, var(--border-hairline));
   border-radius: 4px;
   background: var(--surface-panel);
+  // Ease the focus "pull out of the shelf" slide (see .mt-track.focused).
+  transition: transform 0.12s ease-out, border-left-width 0.12s ease-out;
 
   // Tint this track's own playhead to match its accent — scoped away from
   // the audio row (no --track-accent set there) so its fill/head keep their
@@ -110,6 +112,17 @@ main[hidden] { display: none; }
   &:not(.mt-audio-track) .scrub-head {
     background: var(--track-accent);
   }
+}
+
+// Focused track — the visible cue for which track keyboard shortcuts will
+// target (see TrackManager._setFocused). The track is "pulled out of the
+// shelf" a little: it slides left and its always-on accent spine thickens, so
+// the selected track physically sticks out past the others' left edge. No
+// glow, no full-border ring — obvious but calm. The other three edges keep
+// their hairline. The audio row (no --track-accent) can't be focused anyway.
+.mt-track.focused {
+  transform: translateX(-8px);
+  border-left-width: 8px;
 }
 
 // ── Stimulus audio row (sits above .mt-tracks; see AudioTrack.js) ───────

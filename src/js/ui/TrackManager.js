@@ -43,6 +43,29 @@ export default class TrackManager {
     this._onTrackRemoved = onTrackRemoved ?? (() => {})
     this.tracks = []
     this.focusedTrack = null
+
+    // Clicking anywhere outside a track (the master transport, the empty
+    // stack background, a marker, etc.) clears the focused track so shortcuts
+    // target the main timeline again. A track's own listener (set in
+    // _mountTrack) sets focus after this capture-phase clear runs.
+    document.addEventListener('pointerdown', (e) => {
+      const el = e.target
+      if (!el || !el.closest || !el.closest('.mt-track')) this._setFocused(null)
+    })
+  }
+
+  /**
+   * Set or clear (with `track = null`) the focused track. Toggles a `.focused`
+   * class on the focused track's wrapper so its edge lights up in that track's
+   * accent color — the visible cue for which track keyboard shortcuts target
+   * (see `MultiTrackScrubber._onKey` / `MultiTrackApp._jumpMarker`).
+   * @param {Track|null} track
+   */
+  _setFocused(track) {
+    if (this.focusedTrack === track) return
+    if (this.focusedTrack && this.focusedTrack.root) this.focusedTrack.root.classList.remove('focused')
+    this.focusedTrack = track
+    if (track && track.root) track.root.classList.add('focused')
   }
 
   _cloneLane() {
@@ -62,7 +85,7 @@ export default class TrackManager {
     laneCol.appendChild(track.laneEl)
     wrapper.appendChild(laneCol)
 
-    wrapper.addEventListener('pointerdown', () => { this.focusedTrack = track }, { capture: true })
+    wrapper.addEventListener('pointerdown', () => this._setFocused(track), { capture: true })
     track.root = wrapper
     this._container.appendChild(wrapper)
     track.init()
@@ -103,7 +126,7 @@ export default class TrackManager {
     const i = this.tracks.indexOf(track)
     if (i === -1) return
     this.tracks.splice(i, 1)
-    if (this.focusedTrack === track) this.focusedTrack = null
+    if (this.focusedTrack === track) this._setFocused(null)
     track.dispose()
     this._onCountChange(this.tracks.length)
     this._onTrackRemoved(track.id)

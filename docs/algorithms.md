@@ -1084,9 +1084,12 @@ track's local time `t` lands at position `t − offsetSeconds`, the inverse of
 the `effectiveCursor` formula above — so a track's data visibly shifts
 left/right as its offset changes. Clicking a track's own strip seeks the
 **master** cursor if linked, or the track's own `ownCursor` if unlinked
-(`frac × masterDuration + offsetSeconds`, inverting the same transform). A
-`TrackManager.focusedTrack` (set by clicking anywhere in a track's row) lets
-the master's ←/→ keyboard shortcuts redirect to an unlinked track's own cursor.
+(`frac × masterDuration + offsetSeconds`, inverting the same transform).
+A `TrackManager.focusedTrack` (set by clicking anywhere in a track's row, or
+cleared by clicking outside any track) lets the master's ←/→ keyboard
+shortcuts redirect to an unlinked track's own cursor; the focused track is
+visibly marked with an accent-colored edge + ring (`.mt-track.focused` in
+`_multitrack.scss`).
 
 ### Graph-select menu — per-track panel cap
 
