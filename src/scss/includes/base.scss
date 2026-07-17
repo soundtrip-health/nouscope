@@ -115,6 +115,18 @@ a:focus-visible {
   outline: none;
 }
 
+// Real <button> elements (play/pause, scrubber transport, EEG connect, mic,
+// etc.) get a native focus ring/highlight on click since browsers keep focus
+// on a button after a mouse press. Suppress it on mouse focus but keep a
+// visible ring for keyboard navigation.
+button:focus {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--color-link);
+}
+
 .upload-btn {
   display: inline-block;
   padding: 0.75rem 1.5rem;
@@ -244,6 +256,17 @@ a:focus-visible {
   &:hover {
     border-color: var(--color-text);
     background: var(--wash-hover);
+  }
+
+  // The wrapped file input is display:none and can't take focus itself, so
+  // browsers redirect the post-dialog focus ring to this label instead —
+  // shows as a blue highlight around the "Track"/"Recording" upload button.
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-link);
   }
 }
 
@@ -569,6 +592,14 @@ a:focus-visible {
   &[hidden] { display: none; }
 }
 
+.bio-backlog-warning {
+  font-size: 0.7rem;
+  color: var(--status-battery-warn);
+  letter-spacing: 0.03em;
+
+  &[hidden] { display: none; }
+}
+
 .bio-mse-value {
   font-size: 0.6rem;
   color: var(--text-value);
@@ -594,7 +625,7 @@ body.analysis-mode {
     grid-template-columns: 1fr 1fr;
     grid-auto-rows: minmax(0, 1fr);
     gap: 1rem;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .bio-section {
@@ -697,7 +728,8 @@ body.analysis-mode {
 .session-label {
   position: fixed;
   top: 1.5rem;
-  right: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1006;
   font-size: 0.7rem;
   color: var(--text-muted);
@@ -706,7 +738,7 @@ body.analysis-mode {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
+  text-align: center;
 
   &:empty { display: none; }
 }
@@ -751,6 +783,84 @@ body.analysis-mode {
 
   &.scrub-tick--music { background: var(--color-text); opacity: 0.6; }
   &.scrub-tick--gap   { background: var(--status-poor); opacity: 0.8; }
+  // A pin (unlike music/gap, which are plain hairlines) — a stem plus a
+  // round head, both painted via `currentColor` so a marker's own `color`
+  // (set inline per-marker by renderEventTicks — chosen in the marker modal)
+  // only needs to be set once rather than repeated on each pseudo-element.
+  // Interactive (unlike music/gap) so its hover label is reachable;
+  // `cursor: pointer` since it's genuinely clickable-through to the
+  // timeline's own seek handler — not `help`, which paints the browser's
+  // native "?" cursor glyph and has nothing to do with what this tick does.
+  &.scrub-tick--marker {
+    top: -3px;
+    // A wider invisible hit-box than the visible pin, centered on the
+    // marker's exact time (the pseudo-elements below are positioned at this
+    // box's centre, not its edge) — easier to click without shifting where
+    // it visually points.
+    width: 14px;
+    margin-left: -7px;
+    pointer-events: auto;
+    cursor: pointer;
+    color: var(--band-delta);   // fallback if a marker somehow has no color
+
+    &::before {   // stem
+      content: '';
+      position: absolute;
+      top: 8px;
+      bottom: 0;
+      left: 7px;
+      width: 2px;
+      margin-left: -1px;
+      background: currentColor;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+
+    &::after {    // head — a ring cutout (surface-panel) separates it from
+                   // whatever the tick sits over, so heads read distinctly
+                   // even when a few land close together on a busy strip.
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 7px;
+      width: 8px;
+      height: 8px;
+      margin-left: -4px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 2px var(--surface-panel);
+      transition: transform 0.15s;
+    }
+
+    &:hover,
+    &:focus-visible {
+      &::before { opacity: 1; }
+      &::after { transform: scale(1.35); }
+      .scrub-tick-label { opacity: 1; transform: translate(-50%, -2px); }
+    }
+  }
+}
+
+// Custom hover label for a marker tick, replacing the native `title`
+// tooltip (slow to appear, unstyled, easy to lose on a dense timeline).
+// Hidden until the tick's own :hover/:focus-visible reveals it (see above);
+// `pointer-events: none` so it never itself blocks the click-through seek.
+.scrub-tick-label {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, 2px);
+  white-space: nowrap;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  color: var(--color-text);
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+  z-index: 20;
 }
 
 // Floating time preview that tracks the pointer on hover/drag, before a seek
@@ -831,4 +941,90 @@ body.analysis-mode {
   color: rgba(255, 255, 255, 0.7);
   line-height: 1.4;
   z-index: 200;
+}
+
+// ── Keyboard-shortcuts reference (shared across both tabs) ────────────────
+// See ShortcutsModal.js — opened from either transport bar's own "?" button.
+.shortcuts-btn {
+  width: 1.8rem;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font-weight: 600;
+}
+
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+
+  &[hidden] { display: none; }
+}
+
+.shortcuts-modal {
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.shortcuts-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  margin-bottom: 0.75rem;
+}
+
+.shortcuts-close-btn {
+  background: none;
+  border: 1px solid var(--border-button);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+
+  &:hover { color: var(--color-text); border-color: var(--color-text); }
+}
+
+.shortcuts-modal-body dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.shortcuts-modal-body dl > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.shortcuts-modal-body dt {
+  flex-shrink: 0;
+  min-width: 5rem;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 0.1rem 0.4rem;
+  text-align: center;
+}
+
+.shortcuts-modal-body dd {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
 }

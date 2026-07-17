@@ -1,0 +1,644 @@
+// ── Multi-Track tab ───────────────────────────────────────────────────────
+// A separate, independent feature from the original single-session view
+// (base.scss): reviewing several loaded `.jsonl` recordings side by side,
+// GarageBand-style. Every class here is `mt-`-prefixed (aside from the
+// generic `an-*` canvas/readout classes MultiTrackDisplay queries and pure
+// color-utility classes like `.glyph-*`/`.quality-dot`/`.scrub-*`, none of
+// which carry any rule in base.scss that could leak into this tab, or vice
+// versa — see index.html's comment on `#multitrack-view`).
+
+// reset.scss sets `main { display: block }` (an author rule, which beats the
+// UA stylesheet's `[hidden] { display: none }` regardless of specificity
+// tiers) — harmless with the original single `<main>`, which was never
+// toggled hidden, but now that the tab switcher hides one of two `<main>`s,
+// that reset rule would otherwise leave the "hidden" one rendered full-size
+// underneath the visible tab.
+main[hidden] { display: none; }
+
+// Scroll is still needed for the track stack, which grows vertically — just
+// the native scrollbar chrome is unwanted here.
+@mixin no-scrollbar {
+  scrollbar-width: none;       // Firefox
+  -ms-overflow-style: none;    // legacy Edge
+  &::-webkit-scrollbar { display: none; }  // Chrome/Safari/new Edge
+}
+
+// ── View switcher ────────────────────────────────────────────────────────
+// A single compact dropdown, top-right — the same corner the session-label
+// (track name) used to occupy in the single view; the label has moved to
+// top-center so the two don't collide.
+.view-select {
+  position: fixed;
+  top: 1.5rem;
+  right: 1.5rem;
+  z-index: 2000;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+
+  &:hover { border-color: var(--color-text); }
+}
+
+// ── Track stack ──────────────────────────────────────────────────────────
+#multitrack-view {
+  position: fixed;
+  inset: 0;
+  // Top inset starts at the same 1.5rem the single view uses for its
+  // top-right fixed controls — the +Add-track/+Add-music buttons now sit in
+  // that same row, to the view-select dropdown's left, rather than stacked
+  // below it.
+  padding: 5rem 1rem 1rem;
+  overflow-y: auto;
+  @include no-scrollbar;
+
+  &[hidden] { display: none; }
+}
+
+// Both buttons sit in the view-select's row (top: 1.5rem, matching it) rather
+// than stacked below it — `right` is hand-spaced from the view-select's own
+// right:1.5rem outward past its ~7.3rem width, then past the Music button's
+// own ~4.6rem width, each with a ~0.75rem gap (same spacing `.mt-tracks` uses
+// between cards). Same manual-offset approach the vertical stack used before;
+// there are only ever these three fixed controls, so a shared flex wrapper
+// wasn't worth the DOM change. Re-measure/adjust these two `right` values if
+// the button labels ever change length again.
+.mt-add-music-btn {
+  position: fixed;
+  top: 1.5rem;
+  right: 9.75rem;
+  z-index: 2001;
+}
+
+.mt-add-track-btn {
+  position: fixed;
+  top: 1.5rem;
+  right: 15rem;
+  z-index: 2001;
+
+  &:has(input:disabled) { opacity: 0.4; cursor: not-allowed; }
+}
+
+.mt-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-bottom: 4rem;   // room for the master transport
+}
+
+.mt-track {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 0.75rem;
+  padding: 0.6rem;
+  border: 1px solid var(--border-hairline);
+  // Set per-track by TrackManager (`--track-accent`, one of TRACK_ACCENT_VARS
+  // in Track.js) so concurrent tracks are distinguishable at a glance; falls
+  // back to the plain hairline for the (single, colorless) audio row.
+  border-left: 3px solid var(--track-accent, var(--border-hairline));
+  border-radius: 4px;
+  background: var(--surface-panel);
+  // Ease the focus "pull out of the shelf" slide (see .mt-track.focused).
+  transition: transform 0.12s ease-out, border-left-width 0.12s ease-out;
+
+  // Tint this track's own playhead to match its accent — scoped away from
+  // the audio row (no --track-accent set there) so its fill/head keep their
+  // original look.
+  &:not(.mt-audio-track) .scrub-fill,
+  &:not(.mt-audio-track) .scrub-head {
+    background: var(--track-accent);
+  }
+}
+
+// Focused track — the visible cue for which track keyboard shortcuts will
+// target (see TrackManager._setFocused). The track is "pulled out of the
+// shelf" a little: it slides left and its always-on accent spine thickens, so
+// the selected track physically sticks out past the others' left edge. No
+// glow, no full-border ring — obvious but calm. The other three edges keep
+// their hairline. The audio row (no --track-accent) can't be focused anyway.
+.mt-track.focused {
+  transform: translateX(-8px);
+  border-left-width: 8px;
+}
+
+// ── Stimulus audio row (sits above .mt-tracks; see AudioTrack.js) ───────
+// Reuses .mt-track's grid/border/etc.; just far shorter than an EEG track
+// since there's no panel grid, only the timeline strip.
+#mt-audio-mount:empty { display: none; }
+
+.mt-audio-track {
+  margin-bottom: 0.75rem;
+}
+
+.mt-audio-lane-col {
+  justify-content: center;
+}
+
+.mt-audio-bpm {
+  font-size: 0.7rem;
+  color: var(--text-value);
+  font-variant-numeric: tabular-nums;
+}
+
+// ── Per-track header (left column) ──────────────────────────────────────
+.mt-track-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.mt-track-controls {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 0.3rem;
+}
+
+.mt-track-strip {
+  display: flex;
+  align-items: center;
+  font-size: 0.7rem;
+}
+
+.mt-track-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+
+  // Link button, offset input, the mute button (audio row), and the
+  // "☰ graphs" popover summary all sit in this one row — give them a
+  // shared height and horizontal-only padding so they line up cleanly
+  // regardless of each control's own font-size/border/native-input quirks.
+  > .mt-track-link-btn,
+  > .mt-track-offset-input,
+  > .mt-audio-mute-btn,
+  > .mt-track-menu > .mt-track-menu-btn {
+    height: 1.6rem;
+    box-sizing: border-box;
+    padding: 0 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+  }
+}
+
+.mt-track-label {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-value);
+}
+
+.mt-track-link-btn {
+  flex-shrink: 0;
+
+  &.active { border-color: var(--entrain-to); }
+}
+
+.mt-track-offset-input {
+  flex-shrink: 0;
+  width: 3.5rem;
+  background: none;
+  border: 1px solid var(--border-control);
+  color: var(--color-text);
+  border-radius: 3px;
+}
+
+.mt-track-replace-btn {
+  align-self: flex-start;
+}
+
+.mt-track-remove-btn {
+  align-self: flex-start;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+// Pop-out graph-select menu — a native <details>/<summary> popover so open/
+// close needs no hand-rolled outside-click JS.
+.mt-track-menu {
+  position: relative;
+  flex-shrink: 0;
+
+  > summary {
+    list-style: none;
+    &::-webkit-details-marker { display: none; }
+  }
+
+  &[open] .mt-track-menu-btn { border-color: var(--entrain-to); }
+}
+
+.mt-track-menu-btn {
+  cursor: pointer;
+}
+
+.mt-track-menu-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 2010;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.mt-track-menu-count {
+  font-size: 0.65rem;
+  color: var(--text-value);
+  margin-bottom: 0.15rem;
+}
+
+.mt-track-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+
+  &:has(input:disabled) { opacity: 0.4; cursor: not-allowed; }
+}
+
+// ── Lane column (right): timeline strip + this track's graphs ───────────
+.mt-track-lane-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.mt-track-timeline {
+  height: 20px;
+}
+
+// The lane itself: enabled graphs laid out horizontally/compact — one
+// track's cloned `#mt-track-lane-template` instance (see MultiTrackDisplay).
+// No individual scroll here — when more panels are enabled than fit in one
+// row, they wrap to additional rows instead; the page-level scroll on
+// #multitrack-view handles any resulting extra height.
+.mt-bio-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.75rem;
+}
+
+.mt-bio-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  flex: 1 1 220px;
+  min-width: 160px;
+  // Fixed (not stretch-derived) height: .mt-bio-panel no longer has a fixed
+  // height of its own now that it wraps, so each section carries its own.
+  height: 180px;
+  min-height: 0;
+
+  &[hidden] { display: none; }
+
+  canvas {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0;
+    flex: 1;
+  }
+}
+
+// EEG gets width priority — it's the panel every track opens with.
+.mt-bio-section[data-panel='eeg'] { flex: 2 1 320px; }
+
+.mt-bio-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mt-bio-label {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  color: var(--text-label);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.mt-bio-hr {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+.mt-bio-window-stat {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 0.3rem;
+}
+
+.mt-bio-spec-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.3rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.mt-bio-spec-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  min-width: 1.4rem;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.mt-bio-entrain-bar {
+  position: relative;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.mt-bio-entrain-fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--entrain-from), var(--entrain-to));
+}
+
+.mt-bio-entrain-value {
+  font-size: 0.6rem;
+  color: var(--text-value);
+}
+
+.mt-bio-bands-body, .mt-bio-mse-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
+
+  canvas { width: 200px; }
+}
+
+.mt-bio-band-legend, .mt-bio-mse-legend {
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  flex-shrink: 0;
+}
+
+.mt-bio-band-item, .mt-bio-mse-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.mt-bio-band-val, .mt-bio-mse-val {
+  font-size: 0.55rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-value);
+  min-width: 2.2rem;
+}
+
+.mt-bio-mse-value {
+  font-size: 0.6rem;
+  color: var(--text-value);
+}
+
+.mt-bio-imu-legend {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.3rem;
+}
+
+.mt-eeg-quality-dots {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.mt-plot-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+// ── Markers (master-timeline annotations) ────────────────────────────────
+
+// Pop-out markers list — same native <details>/<summary> popover pattern as
+// .mt-track-menu, just anchored off the master transport instead of a track.
+.mt-marker-menu {
+  position: relative;
+  flex-shrink: 0;
+
+  > summary {
+    list-style: none;
+    &::-webkit-details-marker { display: none; }
+  }
+
+  &[open] .mt-track-menu-btn { border-color: var(--entrain-to); }
+}
+
+.mt-marker-popover {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  z-index: 2010;
+  margin-bottom: 0.25rem;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  min-width: 16rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  @include no-scrollbar;
+}
+
+.mt-marker-empty {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.mt-marker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+// The marker's own color (see the modal below) — a small dot rather than
+// tinting the whole row, so the scope/name text stays legible regardless of
+// how light or saturated the chosen color is.
+.mt-marker-color-dot {
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+}
+
+.mt-marker-time {
+  flex-shrink: 0;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.mt-marker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--color-text);
+}
+
+// Which strip(s) a marker shows on — "All", or the owning track/audio row's
+// label(s) (see MultiTrackApp._scopeLabel).
+.mt-marker-scope {
+  flex-shrink: 0;
+  max-width: 5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6rem;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+}
+
+.mt-marker-edit-btn,
+.mt-marker-delete-btn {
+  flex-shrink: 0;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.7rem;
+}
+
+// ── Marker modal (Add/Edit — see MultiTrackApp._openMarkerModal) ─────────
+// Same fixed-overlay/centered-panel pattern as .shortcuts-overlay/.shortcuts-modal
+// (base.scss), just with its own form fields instead of a shortcuts list.
+.mt-marker-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+
+  &[hidden] { display: none; }
+}
+
+.mt-marker-modal {
+  width: min(22rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 1rem 1.25rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mt-marker-modal-header {
+  font-size: 0.9rem;
+  color: var(--color-text);
+}
+
+.mt-marker-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+
+  > input[type="text"] {
+    background: none;
+    border: 1px solid var(--border-control);
+    color: var(--color-text);
+    border-radius: 3px;
+    font-size: 0.8rem;
+    padding: 0.35rem 0.5rem;
+  }
+}
+
+.mt-marker-modal-swatches {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mt-marker-modal-swatch {
+  width: 1.4rem;
+  height: 1.4rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.1s;
+
+  &.selected {
+    border-color: var(--color-text);
+    transform: scale(1.25);
+  }
+}
+
+.mt-marker-modal-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 8rem;
+  overflow-y: auto;
+  @include no-scrollbar;
+}
+
+.mt-marker-modal-track-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.mt-marker-modal-track-dot {
+  flex-shrink: 0;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+}
+
+.mt-marker-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}

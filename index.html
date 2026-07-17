@@ -26,7 +26,20 @@
     <script type="module" src="/src/js/index.js"></script>
   </head>
   <body class="demo-1">
-    <main>
+    <!-- Two independent, isolated views: #session-view is the original
+         single-session app (untouched); #multitrack-view is a separate
+         opt-in feature for reviewing several loaded .jsonl recordings side
+         by side. Nothing in #multitrack-view shares ids or wrapper classes
+         with #session-view, so nothing here can affect the original tab.
+         A compact top-right dropdown rather than a full-width bar, so it
+         can't cover the EEG dots; the session-label (track name) sits
+         top-center in the single view to stay clear of it. -->
+    <select class="view-select" id="view-select" title="Switch view">
+      <option value="session" selected>Single Track</option>
+      <option value="multitrack">Multiple Tracks</option>
+    </select>
+
+    <main id="session-view">
       <span class="session-label" id="scrub-session-label"></span>
 
       <!-- The one data panel: every graph is rendered from the stored session
@@ -171,6 +184,7 @@
         <span class="scrub-time scrub-duration" id="scrub-duration">00:00</span>
         <button class="scrub-btn" id="scrub-live" title="Jump to the latest data (End)">● LIVE</button>
         <button class="scrub-btn" id="scrub-speed" title="Playback speed">1×</button>
+        <button class="scrub-btn shortcuts-btn" id="scrub-shortcuts-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
       </div>
 
       <div class="eeg-controls" id="eeg-controls">
@@ -185,10 +199,11 @@
         <span class="heart-rate-display" id="heart-rate"></span>
         <button class="bio-record" id="bio-record" hidden title="Record raw data to JSONL">⏺</button>
         <span class="bio-record-time" id="bio-record-time" hidden></span>
+        <span class="bio-backlog-warning" id="bio-backlog-warning" hidden title="The pre-record buffer hit its 64 MB cap — a recording saved from here on will start partway into the session, not at its true beginning.">⚠ buffer full</span>
         <button id="pause-btn" hidden title="Pause/resume playback">⏸</button>
         <button id="mic-btn" title="Use microphone as audio source">Microphone</button>
         <label class="controls-upload-btn" title="Upload audio file">
-          ↑ Track
+          ↑ Music
           <input type="file" id="audio-upload" accept="audio/*" />
         </label>
         <label class="controls-upload-btn" title="Load a saved .jsonl recording to analyze">
@@ -203,6 +218,244 @@
         The visualizer works without EEG in any modern browser.
       </div>
     </main>
+
+    <!-- Multi-Track tab: file-review only, no live EEG. Every class here is
+         `mt-`-prefixed (aside from the generic `an-*` canvas/readout lookup
+         classes MultiTrackDisplay queries and pure color-utility classes like
+         `.glyph-*`/`.quality-dot`, none of which carry any analysis-mode-
+         specific override in the original stylesheet) so nothing here can be
+         affected by, or affect, #session-view's styling. -->
+    <main id="multitrack-view" hidden>
+      <template id="mt-track-lane-template">
+        <div class="mt-bio-panel">
+          <div class="mt-bio-section" data-panel="eeg">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">EEG</span>
+              <div class="mt-eeg-quality-dots an-quality-dots">
+                <span class="quality-dot" data-ch="0" title="TP9"></span>
+                <span class="quality-dot" data-ch="1" title="AF7"></span>
+                <span class="quality-dot" data-ch="2" title="AF8"></span>
+                <span class="quality-dot" data-ch="3" title="TP10"></span>
+              </div>
+            </div>
+            <div class="mt-plot-wrap">
+              <canvas class="an-eeg-canvas" width="280" height="90"></canvas>
+            </div>
+          </div>
+          <div class="mt-bio-section mt-bio-spec-section" data-panel="spec">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">SPECTROGRAM</span>
+            </div>
+            <div class="mt-bio-spec-body">
+              <div class="mt-bio-spec-axis">
+                <span>50</span>
+                <span>8</span>
+              </div>
+              <div class="mt-plot-wrap">
+                <canvas class="an-spec-canvas" width="280" height="86"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="mt-bio-section mt-bio-spec-lo-section" data-panel="specLo">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">DELTA / THETA</span>
+            </div>
+            <div class="mt-bio-spec-body">
+              <div class="mt-bio-spec-axis">
+                <span>8</span>
+                <span>4</span>
+                <span>0.5</span>
+              </div>
+              <div class="mt-plot-wrap">
+                <canvas class="an-spec-lo-canvas" width="280" height="76"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="mt-bio-section mt-bio-spec-audio-section an-audio-section" data-panel="specAudio">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">AUDIO TEMPO</span>
+              <span class="mt-bio-entrain-value an-entrain-value"></span>
+              <span class="mt-bio-window-stat an-entrain-avg"></span>
+            </div>
+            <div class="mt-bio-spec-body">
+              <div class="mt-bio-spec-axis">
+                <span>5</span>
+                <span>2.5</span>
+                <span>0.5</span>
+              </div>
+              <div class="mt-plot-wrap">
+                <canvas class="an-spec-audio-canvas" width="280" height="46"></canvas>
+              </div>
+            </div>
+            <div class="mt-bio-entrain-bar">
+              <div class="mt-bio-entrain-fill an-entrain-fill"></div>
+            </div>
+          </div>
+          <div class="mt-bio-section" data-panel="bands">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">EEG BANDS</span>
+            </div>
+            <div class="mt-bio-bands-body">
+              <div class="mt-plot-wrap">
+                <canvas class="an-band-canvas" width="200" height="75"></canvas>
+              </div>
+              <div class="mt-bio-band-legend">
+                <div class="mt-bio-band-item an-band-item-delta"><span class="glyph-delta">δ</span><span class="mt-bio-band-val an-band-val-delta">—</span></div>
+                <div class="mt-bio-band-item an-band-item-theta"><span class="glyph-theta">θ</span><span class="mt-bio-band-val an-band-val-theta">—</span></div>
+                <div class="mt-bio-band-item an-band-item-alpha"><span class="glyph-alpha">α</span><span class="mt-bio-band-val an-band-val-alpha">—</span></div>
+                <div class="mt-bio-band-item an-band-item-beta"><span class="glyph-beta">β</span><span class="mt-bio-band-val an-band-val-beta">—</span></div>
+                <div class="mt-bio-band-item an-band-item-gamma"><span class="glyph-gamma">γ</span><span class="mt-bio-band-val an-band-val-gamma">—</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-bio-section" data-panel="mse">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">COMPLEXITY (MSE)</span>
+              <span class="mt-bio-mse-value an-mse-value"></span>
+            </div>
+            <div class="mt-bio-mse-body">
+              <div class="mt-plot-wrap">
+                <canvas class="an-mse-canvas" width="200" height="75"></canvas>
+              </div>
+              <div class="mt-bio-mse-legend">
+                <div class="mt-bio-mse-item"><span class="glyph-mse-1">τ=1</span><span class="mt-bio-mse-val an-mse-val-0">—</span></div>
+                <div class="mt-bio-mse-item"><span class="glyph-mse-2">τ=3</span><span class="mt-bio-mse-val an-mse-val-1">—</span></div>
+                <div class="mt-bio-mse-item"><span class="glyph-mse-3">τ=5</span><span class="mt-bio-mse-val an-mse-val-2">—</span></div>
+                <div class="mt-bio-mse-item"><span class="glyph-mse-4">τ=7</span><span class="mt-bio-mse-val an-mse-val-3">—</span></div>
+                <div class="mt-bio-mse-item"><span class="glyph-mse-5">τ=9</span><span class="mt-bio-mse-val an-mse-val-4">—</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-bio-section" data-panel="ppg">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">PPG</span>
+              <span class="mt-bio-hr an-hr"></span>
+              <span class="mt-bio-window-stat an-hr-avg"></span>
+            </div>
+            <div class="mt-plot-wrap">
+              <canvas class="an-ppg-canvas" width="280" height="60"></canvas>
+            </div>
+          </div>
+          <div class="mt-bio-section" data-panel="imu">
+            <div class="mt-bio-section-header">
+              <span class="mt-bio-label">IMU</span>
+              <span class="mt-bio-imu-legend">
+                <span class="glyph-imu-accel">A</span>
+                <span class="glyph-imu-gyro">G</span>
+              </span>
+            </div>
+            <div class="mt-plot-wrap">
+              <canvas class="an-imu-canvas" width="280" height="60"></canvas>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <label class="controls-upload-btn mt-add-track-btn" title="Load a saved .jsonl recording as a new track">
+        ↑ Recording
+        <input type="file" id="mt-add-track-input" accept=".jsonl,application/x-ndjson" />
+      </label>
+
+      <!-- Stimulus audio (at most one) — played back in sync with the master
+           transport, see AudioTrack.js/MultiTrackApp.js. -->
+      <label class="controls-upload-btn mt-add-music-btn" title="Load the stimulus audio used in these sessions">
+        ↑ Music
+        <input type="file" id="mt-add-music-input" accept="audio/*" />
+      </label>
+
+      <div id="mt-audio-mount"></div>
+
+      <div class="mt-tracks" id="mt-tracks"></div>
+
+      <!-- Master transport for the track stack — a sibling of #scrubber above,
+           with its own mt-scrub-* ids (see MultiTrackScrubber.js). -->
+      <div class="scrubber" id="mt-scrubber" hidden>
+        <button class="scrub-play" id="mt-scrub-play" title="Play / pause (Space)">▶</button>
+        <span class="scrub-time" id="mt-scrub-time">00:00</span>
+        <div class="scrub-timeline" id="mt-scrub-timeline" title="Shortcuts: ← / → to skip 5s, Home / End for start / end">
+          <div class="scrub-track" id="mt-scrub-track">
+            <div class="scrub-fill" id="mt-scrub-fill"></div>
+            <div class="scrub-head" id="mt-scrub-head"></div>
+          </div>
+          <div class="scrub-ticks" id="mt-scrub-ticks"></div>
+          <div class="scrub-hover-time" id="mt-scrub-hover-time" hidden></div>
+        </div>
+        <span class="scrub-time scrub-duration" id="mt-scrub-duration">00:00</span>
+        <button class="scrub-btn" id="mt-scrub-speed" title="Playback speed">1×</button>
+        <button class="scrub-btn shortcuts-btn" id="mt-scrub-shortcuts-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
+
+        <!-- Markers: annotate a moment ("music started") at the current
+             playhead — see MultiTrackApp.js's marker wiring. Every "+ Marker"
+             trigger (this button, a track/audio row's own, or `M`) opens
+             #mt-marker-modal rather than adding anything directly. -->
+        <button class="scrub-btn" id="mt-marker-add-btn" title="Add a marker at the current playhead">+ Marker</button>
+        <details class="mt-marker-menu" id="mt-marker-menu">
+          <summary class="mt-track-menu-btn scrub-btn" title="View / edit / jump to markers">Markers (<span id="mt-marker-count">0</span>)</summary>
+          <div class="mt-marker-popover" id="mt-marker-list"></div>
+        </details>
+      </div>
+
+      <!-- Add/Edit marker modal — the only way markers are created or edited
+           (see MultiTrackApp.js's `_openMarkerModal`/`_saveMarkerFromModal`).
+           `#mt-marker-modal-tracks` is populated at open-time with one row
+           per currently-loaded track/audio row, plus the "All tracks" row. -->
+      <div class="mt-marker-modal-overlay" id="mt-marker-modal-overlay" hidden>
+        <div class="mt-marker-modal" role="dialog" aria-modal="true" aria-label="Marker">
+          <div class="mt-marker-modal-header">
+            <span id="mt-marker-modal-title">Add marker</span>
+          </div>
+
+          <label class="mt-marker-modal-field">
+            <span>Name</span>
+            <input type="text" id="mt-marker-modal-name" placeholder="Marker name" />
+          </label>
+
+          <label class="mt-marker-modal-field">
+            <span>Time</span>
+            <input type="text" id="mt-marker-modal-time" />
+          </label>
+
+          <div class="mt-marker-modal-field">
+            <span>Color</span>
+            <div class="mt-marker-modal-swatches" id="mt-marker-modal-swatches"></div>
+          </div>
+
+          <div class="mt-marker-modal-field">
+            <span>Tracks</span>
+            <div class="mt-marker-modal-tracks" id="mt-marker-modal-tracks"></div>
+          </div>
+
+          <div class="mt-marker-modal-actions">
+            <button type="button" class="scrub-btn" id="mt-marker-modal-cancel-btn">Cancel</button>
+            <button type="button" class="scrub-btn" id="mt-marker-modal-save-btn">Save</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Shared keyboard-shortcuts reference — one instance, opened from either
+         tab's own "?" transport button (see ShortcutsModal.js). Lives outside
+         both #session-view/#multitrack-view so switching tabs never tears it
+         down or duplicates it. -->
+    <div class="shortcuts-overlay" id="shortcuts-overlay" hidden>
+      <div class="shortcuts-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+        <div class="shortcuts-modal-header">
+          <span>Keyboard Shortcuts</span>
+          <button type="button" class="shortcuts-close-btn" id="shortcuts-close-btn" aria-label="Close">✕</button>
+        </div>
+        <div class="shortcuts-modal-body">
+          <dl>
+            <div><dt>Space</dt><dd>Play / pause</dd></div>
+            <div><dt>← / →</dt><dd>Seek 5s back / forward</dd></div>
+            <div><dt>Home</dt><dd>Jump to the start</dd></div>
+            <div><dt>End</dt><dd>Jump to the end (Single Track: the live edge)</dd></div>
+            <div><dt>M</dt><dd>Create new marker</dd></div>
+            <div><dt>[ / ]</dt><dd>Jump to the previous / next marker</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+
     <script>
       if (!navigator.bluetooth) {
         document.getElementById('bt-warning').hidden = false

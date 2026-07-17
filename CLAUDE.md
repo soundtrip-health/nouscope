@@ -21,7 +21,7 @@ No test suite is configured.
 ### Entry Point & Boot Sequence
 
 `src/js/index.js` instantiates `App`. The `App` constructor immediately:
-1. Wires the `↑ Track` file-upload input (first upload starts audio; later uploads swap the track)
+1. Wires the `↑ Music` file-upload input (first upload starts audio; later uploads swap the track)
 2. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires connect/disconnect (and reads the `?sim` developer flag)
 3. `_setupRecording()` — instantiates `RecordingManager`, wires the `⏺` record button
 4. `_setupAnalysis()` — instantiates `SessionStore`, `AnalysisDisplay`, `Scrubber`; wires the `↑ Recording` file input
@@ -29,7 +29,7 @@ No test suite is configured.
 
 Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
 
-- **`↑ Track` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
+- **`↑ Music` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
 - **`Microphone` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
 There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.

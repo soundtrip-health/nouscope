@@ -14,8 +14,10 @@
  */
 
 import { cssVar } from './palette'
+import { formatTime as fmt } from './formatTime'
 
-const SPEEDS = [1, 2, 4]
+const SPEEDS = [0.25, 0.5, 1, 2, 4]
+const DEFAULT_SPEED_IDX = SPEEDS.indexOf(1)
 const SEEK_STEP_S = 5           // ← / → keyboard nudge
 const RIBBON_SAMPLES = 300      // ribbon resolution, independent of canvas pixel width
 const RIBBON_REBUILD_MS = 1000  // throttle: re-sample at most this often while a live session grows
@@ -27,7 +29,7 @@ export default class Scrubber {
     this._store = null
 
     this._cursor = 0        // playhead time (s)
-    this._speedIdx = 0
+    this._speedIdx = DEFAULT_SPEED_IDX
     this._playing = false
     this._following = false // track the live leading edge
     this._dragging = false
@@ -108,9 +110,15 @@ export default class Scrubber {
     this._els.timeline.addEventListener('pointercancel', endDrag)
     this._fracFromEvent = fracFromEvent
 
-    // Keyboard (only acts while the scrubber is active).
+    // Keyboard (only acts while the scrubber is active AND its tab is the one
+    // actually on screen — this and MultiTrackScrubber both register a global
+    // keydown listener gated only by their own `_active`, which stays true
+    // once a session/track is loaded regardless of which tab is later shown;
+    // without the visibility check, switching tabs leaves both listeners
+    // firing on every shortcut, silently pausing/seeking whichever one is
+    // hidden underneath).
     this._onKey = (e) => {
-      if (!this._active) return
+      if (!this._active || !this.isVisible()) return
       if (e.key === ' ') { e.preventDefault(); this.togglePlay() }
       else if (e.key === 'ArrowLeft')  { this.seek(this._cursor - SEEK_STEP_S) }
       else if (e.key === 'ArrowRight') { this.seek(this._cursor + SEEK_STEP_S) }
@@ -174,6 +182,14 @@ export default class Scrubber {
 
   /** Force a redraw on the next frame (e.g. after new data was ingested). */
   refresh() { this._dirty = true }
+
+  /** Whether the render loop is running (used to remember state across a tab-out suspend). */
+  isActive() { return this._active }
+
+  /** Whether this scrubber's tab is actually the one on screen right now (see `_onKey`). */
+  isVisible() {
+    return !!this._els?.root && this._els.root.closest('[hidden]') === null
+  }
 
   /**
    * Show/hide + start/stop the scrubber. On activation, jumps to the start of a
@@ -368,15 +384,4 @@ export default class Scrubber {
     for (const rec of this._store.music) addTick(rec.t, 'scrub-tick--music')
     for (const gap of this._store.gaps()) addTick(gap.t0, 'scrub-tick--gap')
   }
-}
-
-/** Seconds → MM:SS (or H:MM:SS past an hour). */
-function fmt(s) {
-  s = Math.max(0, Math.floor(s))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const mm = m.toString().padStart(2, '0')
-  const ss = sec.toString().padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

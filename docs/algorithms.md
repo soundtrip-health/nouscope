@@ -2,6 +2,8 @@
 
 This document explains the key algorithms that drive Nouscope: how raw biometric signals (and an optional audio track) are processed into the numbers rendered in the bio-data panel — which is itself the visualization. There is one data view: `AnalysisDisplay` renders a stored session timeline at the scrubber's playhead, so the same panels serve as a live monitor (playhead at the leading edge) and as a post-hoc review surface (playhead anywhere else). Intended for developers (human or AI) modifying the internals.
 
+A second, independent tab — Multi-Track (§11) — reviews several loaded `.jsonl` recordings side by side; it is file-review only (no live EEG) and shares no code, DOM, or CSS with the view described in §1–§10, which remains exactly the original single-session app.
+
 ---
 
 ## Table of Contents
@@ -17,6 +19,7 @@ This document explains the key algorithms that drive Nouscope: how raw biometric
 9. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
 10. [The Data View — Timeline Reconstruction & Scrubbing](#9--the-data-view--timeline-reconstruction--scrubbing)
 11. [Muse Data Simulator](#10--muse-data-simulator)
+12. [The Multi-Track Tab — Independent File Review](#11--the-multi-track-tab--independent-file-review)
 
 ---
 
@@ -886,9 +889,15 @@ Out-of-data columns come back as zeros.
 - **Band smoothing** — band powers arrive at ~2 Hz, so resampling them onto ~280
   pixels of a 5 s window gives a coarse staircase. `_renderBands` applies a one-pole
   low-pass **across pixels**, with `alpha = 1 − exp(−dt / BAND_SMOOTH_TAU)` derived
-  from the per-pixel time step, seeded at the first sample so the curve doesn't ramp
-  in from zero at the left edge. `BAND_SMOOTH_TAU = 0.21 s` is the time constant of
-  the per-frame lerp the old live panel used, so the curve reads the same.
+  from the per-pixel time step. `BAND_SMOOTH_TAU = 0.21 s` is the time constant of
+  the per-frame lerp the old live panel used, so the curve reads the same. The whole
+  window is recomputed from scratch every frame, so the filter is warmed up for
+  `5 × BAND_SMOOTH_TAU` before `t0` (unplotted) rather than seeded cold right at the
+  visible left edge — a cold seed's accumulated smoothing depends on how many pixels
+  a sample sits from *that frame's* `t0`, which shrinks as the window rolls forward,
+  so the same real sample would visibly snap toward its raw value right before
+  scrolling off the left edge. The warm-up converges to the same steady value
+  regardless of frame, so the trace no longer depends on where the window is cut.
 - **Resolution** — `AnalysisDisplay.resize()` sizes each canvas's drawing buffer to
   its on-screen size × devicePixelRatio (capped 2×) and updates the GL viewport, so
   the fullscreen grid isn't upscaling 280-px buffers. Called on panel-show and
@@ -1008,3 +1017,110 @@ for minutes produces a burst of catch-up packets, capped at `MAX_CATCHUP_PACKETS
 (64) per tick per stream. The resulting jump in `index` is exactly the packet loss
 `SessionStore` already renders as a gap. All four electrodes of an EEG packet share
 one `index` and `timestamp`, which is what `zipSamples` groups on.
+
+---
+
+## §11 — The Multi-Track Tab — Independent File Review
+
+A second tab (`Session` / `Multi-Track` switcher at the top of the page) for
+reviewing several loaded `.jsonl` recordings side by side, GarageBand-style: a
+vertical stack of tracks, each its own quality ribbon + graphs, all scrubbed by
+one shared master transport. It is a **separate, independent feature** from
+the single-session view documented above — **file-review only, no live EEG
+connection** (an explicit product decision: this tab never touches
+`EEGManager`/`RecordingManager`/`AudioManager`), and shares no DOM ids, no
+CSS classes, and no runtime state with §1–§10's view. Switching tabs only
+toggles which `<main>` is visible; the original tab's live connection (if any)
+keeps running underneath exactly as it always has.
+
+- `src/js/MultiTrackApp.js` — the tab's orchestrator: a `TrackManager` + a
+  `MultiTrackScrubber` + the `↑ Add track` file input. No managers, no
+  recording, no audio.
+- `src/js/ui/Track.js` — one loaded recording: a `SessionStore` plus the
+  `MultiTrackDisplay` that draws it, plus its own header (label, an
+  in-place "↑ Replace" button, link/offset, graph-select menu) and timeline
+  strip (quality ribbon + event ticks).
+- `src/js/ui/TrackManager.js` — owns the track stack: mounting, `maxDuration()`,
+  focus (for keyboard routing to an unlinked track).
+- `src/js/ui/MultiTrackDisplay.js` — sibling of `AnalysisDisplay`, scoped to a
+  cloned `#mt-track-lane-template` instance per track (rather than the
+  original's page-global `an-*` ids) so N tracks can each own an independent
+  set of canvases/readouts.
+- `src/js/ui/MultiTrackScrubber.js` — sibling of `Scrubber`, the master
+  transport; its own `mt-scrub-*` ids so nothing collides with the original
+  tab's `#scrub-*` ids.
+- `src/js/ui/timelineDecor.js` — quality-ribbon/event-tick painters shared by
+  every track's timeline strip (not tab-specific; a plain, stateless module).
+- `src/scss/includes/_multitrack.scss` — every rule is `mt-`-prefixed (aside
+  from the `an-*` canvas/readout classes `MultiTrackDisplay` queries and pure
+  color-utility classes like `.glyph-*`/`.quality-dot`/`.scrub-*`, none of
+  which carry any override in `base.scss` that could leak either direction).
+  `main[hidden] { display: none }` also lives here: `reset.scss`'s
+  `main { display: block }` is an author rule that beats the `[hidden]`
+  attribute's UA default regardless of specificity — harmless with the
+  original single `<main>` (never toggled), but would otherwise leave whichever
+  tab's `<main>` is "hidden" still rendered full-size underneath the visible one.
+
+### Multi-track model
+
+Each `Track` pairs one `SessionStore` with one `MultiTrackDisplay`. A track's
+rendered time is its **effective cursor**:
+
+```
+effectiveCursor = track.linked
+  ? clamp(masterCursor + track.offsetSeconds, 0, track.duration())
+  : track.ownCursor
+```
+
+`offsetSeconds` lets recordings started at different real times line up on one
+shared timeline. Unlinking a track (the 🔗/⛓️‍💥 button in its header) freely
+scrubs it via `ownCursor`, ignoring the master entirely until re-linked — its
+timeline strip still shares the master's coordinate frame, so the offset stays
+visible even while unlinked.
+
+**Per-track timeline strip**: `timelineDecor.js` paints each track's own
+ribbon+ticks in the strip's shared `[0, masterDuration]` coordinate frame — a
+track's local time `t` lands at position `t − offsetSeconds`, the inverse of
+the `effectiveCursor` formula above — so a track's data visibly shifts
+left/right as its offset changes. Clicking a track's own strip seeks the
+**master** cursor if linked, or the track's own `ownCursor` if unlinked
+(`frac × masterDuration + offsetSeconds`, inverting the same transform).
+A `TrackManager.focusedTrack` (set by clicking anywhere in a track's row, or
+cleared by clicking outside any track) lets the master's ←/→ keyboard
+shortcuts redirect to an unlinked track's own cursor; the focused track is
+visibly marked with an accent-colored edge + ring (`.mt-track.focused` in
+`_multitrack.scss`).
+
+### Graph-select menu — per-track panel cap
+
+Each track's header has a "☰ graphs" pop-out (a native `<details>`/`<summary>`,
+needing no hand-rolled outside-click JS) listing all 8 panels as checkboxes,
+capped at **4 enabled per track** (`Track.js: MAX_PANELS`) — enforced in the
+change handler, not just visually; past the cap, the remaining checkboxes
+disable themselves until one is unchecked.
+
+The cap exists because each *line-plot* panel (EEG, bands, MSE, PPG, IMU — the
+3 spectrograms are 2D canvases and don't count) holds its own **WebGL
+context**, and browsers cap live contexts at roughly 8–16 total; several
+tracks each showing all 5 line panels would blow past that.
+`MultiTrackDisplay` allocates a panel's context **lazily**, only the first
+time it's enabled (`_ensurePanel(key)`), and frees it the moment it's
+disabled — deleting the `WebglLineRoll`'s GPU buffers/program and calling
+`gl.getExtension('WEBGL_lose_context').loseContext()` (`_disposePanel(key)`).
+`renderAt`/`resize` skip any panel key absent from the enabled set. New tracks
+default to `{eeg, bands, spec}` (`Track.js: DEFAULT_PANELS`), leaving one slot
+free for the user to fill.
+
+### Master transport
+
+`MultiTrackScrubber` owns exactly one piece of view state: the master
+playhead cursor. Duration is supplied by a `setDurationSource` callback
+(`TrackManager.maxDuration()` — the longest track), and there is no live-edge
+concept in this tab (`setLiveDurationSource` always resolves to `null`, so
+"● LIVE" stays hidden — this tab has no live track to follow). A
+`requestAnimationFrame` loop advances the cursor at `speed × realtime` while
+playing and otherwise renders only when dirty (seek, or a track's own
+`ownCursor`/`offsetSeconds`/`linked` changing — those call `markDirty()` since
+they don't move the master cursor but still need a redraw). Each render calls
+one `onFrame(cursor)` callback, fanning out to every track's
+`renderAt`/`renderTimeline`.
