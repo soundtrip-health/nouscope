@@ -50,7 +50,7 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/ui/AnalysisDisplay.js` | The only renderer: `renderAt(store, cursor)` redraws every panel from a `SessionStore`, each over its own fixed window ending at `cursor` (min/max-decimated line plots, time-mapped spectrogram blits); readouts show the instant value at `cursor` plus the average over that panel's window |
 | `src/js/ui/Scrubber.js` | Transport: playhead cursor, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track; hover-time preview pill |
 | `src/js/ui/bioRender.js` | Shared render constants + primitives (viridis LUT, EEG/IMU scales, `PANEL_WINDOWS`, color tokens, `paintSpecColumn`) |
-| `src/js/ui/HelixView.js` | Optional 3D view (three.js): last 60 s of raw EEG as 4 braided ribbon strands along a helix, driven from `SessionStore` at the scrubber cursor; complexity sets spiral tightness, accel drives pose, HR drives a traveling pulse; swaps with the panel grid via `◉ Helix`; themed 4-color strand palettes (cycled by the palette button, persisted in localStorage) |
+| `src/js/ui/HelixView.js` | Optional 3D view (three.js): last 60 s of raw EEG as 4 braided ribbon strands along a helix, driven from `SessionStore` at the scrubber cursor; faces the viewer by default (newest data as a front-facing circle), head tilt swings to the side view, sharp head turns/nods send it spinning; complexity sets spiral tightness, HR drives a traveling pulse; swaps with the panel grid via `◉ Helix`; themed 4-color strand palettes (cycled by the palette button, persisted in localStorage) |
 
 ### Update Loop
 

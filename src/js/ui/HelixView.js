@@ -2,9 +2,12 @@
  * HelixView — the artistic 3D rendering of the session timeline.
  *
  * The last `PANEL_WINDOWS.helix` seconds of raw EEG are laid along a helical
- * form, one strand per electrode, braided 90° apart around a vertical axis.
- * Newest data is at the top; time extrudes downward at constant vertical
- * speed. Every visual quantity is derived from the SessionStore at an
+ * form, one strand per electrode, braided 90° apart around the helix axis.
+ * Newest data is at the head; time extrudes away at constant speed. By default
+ * the form faces the viewer — the axis points at the camera, so the newest
+ * samples read as a circle of raw waveform up front; tilting the head swings
+ * it toward the side (profile) view. Every visual quantity is derived from the
+ * SessionStore at an
  * absolute time, never from live manager state, so the view is scrub-correct:
  * it works following the ● LIVE edge, dragged back through history, and on
  * loaded .jsonl files identically.
@@ -48,11 +51,18 @@ const EEG_GAIN        = 0.70   // world units per EEG_SCALE µV of deflection
 const HALF_WIDTH      = 0.03   // ribbon half-width, world units
 const BASE_OPACITY    = 0.85
 // Motion
-const POSE_GAIN       = 0.6    // head pitch/roll → form rotation
+const FACE_TILT_X     = Math.PI / 2  // base tilt: axis toward the viewer (face-on default)
+const POSE_GAIN       = 2.0    // head pitch/roll → form rotation (~45° tilt = side view)
 const POSE_TAU        = 0.25   // s, easing time constant toward target pose
-const IDLE_SPIN_RAD_S = 0.05   // slow presentational spin, always on
-const GYRO_GAIN       = 0.002  // dps → rad/s² spin impulse
-const GYRO_DAMP_TAU   = 1.5    // s, spin velocity decay
+const IDLE_SPIN_RAD_S = 0.05   // slow presentational spin about the helix axis, always on
+// Sharp head rotations (gyro above SPIN_THRESH_DPS) impart screen-space spin:
+// a rapid head turn (gyro z) spins the form left/right, a quick nod (gyro y)
+// tumbles it up/down. SPIN_GAIN is rad/s of spin per degree of sharp rotation,
+// sized with SPIN_DAMP_TAU so a brisk ~60–90° movement (velocity · tau ≥ 2π)
+// carries the form through at least one full revolution before winding down.
+const SPIN_THRESH_DPS = 100    // below this, head motion imparts no spin
+const SPIN_GAIN       = 0.05   // deg of sharp rotation → rad/s of spin velocity
+const SPIN_DAMP_TAU   = 2.0    // s, spin velocity decay
 // Pulse
 const PULSE_VEL       = 20.0   // seconds-of-helix-arc traversed per second
 const PULSE_AMP       = 0.5    // brightness modulation depth
@@ -138,8 +148,11 @@ export default class HelixView {
     this._store  = null
     this._cursor = 0
     this._builtCursor = -Infinity
-    // Motion state
-    this._spinVel = 0
+    // Motion state — gyro-impulse spin velocities (screen-space x/y) and the
+    // cursor position spin impulses were last integrated up to.
+    this._spinVelX = 0
+    this._spinVelY = 0
+    this._spinCursor = null
     // Per-second quality-weight cache (60 s × 4 ch), stamped by floor(cursor·2)
     this._qw      = new Float32Array(WINDOW_S * 4)
     this._qwStamp = -1
@@ -174,8 +187,13 @@ export default class HelixView {
     this._camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50)
     this._camera.position.set(0, 0.6, 9)
     this._camera.lookAt(0, 0, 0)
+    // Outer group: accumulated screen-space spin from gyro impulses.
+    // Inner group: face-on base tilt + eased head pose + idle spin.
+    this._spinGroup = new THREE.Group()
+    this._scene.add(this._spinGroup)
     this._group = new THREE.Group()
-    this._scene.add(this._group)
+    this._group.rotation.x = FACE_TILT_X
+    this._spinGroup.add(this._group)
     const palette = PALETTES[this._paletteIdx]
     this._strands = palette.colors.map((hex) => {
       const mesh = this._makeStrand(new THREE.Color(hex))
@@ -229,7 +247,7 @@ export default class HelixView {
     this._renderer.forceContextLoss()
     const canvas = this._renderer.domElement
     canvas.replaceWith(canvas.cloneNode(true))
-    this._renderer = this._scene = this._camera = this._group = null
+    this._renderer = this._scene = this._camera = this._group = this._spinGroup = null
     this._strands = null
     this._inited = false
     this._suspended = true
@@ -287,29 +305,51 @@ export default class HelixView {
         u.uPulseAmp.value   = phase !== null && bpm > 0 ? PULSE_AMP : 0
       }
 
-      // Head pose (from stored accel, not live EEGManager state) eased toward.
+      // Head pose (from stored accel, not live EEGManager state) eased toward,
+      // as an offset from the face-on base tilt: neutral head = face-on view,
+      // ~45° of pitch swings the form all the way to the side (profile) view.
       const pose = store.headPoseAt(cursor)
-      const tx = pose ? pose.pitch * POSE_GAIN : 0
-      const tz = pose ? pose.roll  * POSE_GAIN : 0
+      const tx = FACE_TILT_X + (pose ? pose.pitch * POSE_GAIN : 0)
+      const tz = pose ? pose.roll * POSE_GAIN : 0
       const k = 1 - Math.exp(-dt / POSE_TAU)
       this._group.rotation.x += (tx - this._group.rotation.x) * k
       this._group.rotation.z += (tz - this._group.rotation.z) * k
 
-      // Idle spin + damped gyro-z impulses (a head shake sets it spinning).
-      const gz = this._gyroZ(store, cursor)
-      this._spinVel = (this._spinVel + gz * GYRO_GAIN * dt) * Math.exp(-dt / GYRO_DAMP_TAU)
-      this._group.rotation.y += (IDLE_SPIN_RAD_S + this._spinVel) * dt
+      // Idle spin about the helix's own axis (in-plane rotation when face-on).
+      this._group.rotation.y += IDLE_SPIN_RAD_S * dt
+
+      // Damped spin impulses from sharp head rotations, on the outer group in
+      // screen space: a rapid head turn (gyro z) spins the form left/right, a
+      // quick nod (gyro y) tumbles it up/down. Impulses integrate over
+      // *session* time traversed (dCur), so a paused playhead parked on a
+      // sharp movement can't wind the spin up forever and replay reproduces
+      // the same kick; the wind-down runs on wall-clock time like idle spin.
+      const dCur = this._spinCursor === null
+        ? 0 : Math.min(0.1, Math.max(0, cursor - this._spinCursor))
+      this._spinCursor = cursor
+      const gy = this._gyroMean(store, cursor, 1)
+      const gz = this._gyroMean(store, cursor, 2)
+      const decay = Math.exp(-dt / SPIN_DAMP_TAU)
+      this._spinVelY = (this._spinVelY + this._sharp(gz) * SPIN_GAIN * dCur) * decay
+      this._spinVelX = (this._spinVelX + this._sharp(gy) * SPIN_GAIN * dCur) * decay
+      this._spinGroup.rotation.y += this._spinVelY * dt
+      this._spinGroup.rotation.x += this._spinVelX * dt
     }
 
     this._renderer.render(this._scene, this._camera)
   }
 
-  /** Mean gyro-z (dps) over the 0.25 s before the cursor; 0 if none. */
-  _gyroZ(store, cursor) {
+  /** Gate for spin impulses — only sharp rotations count. */
+  _sharp(dps) {
+    return Math.abs(dps) > SPIN_THRESH_DPS ? dps : 0
+  }
+
+  /** Mean gyro (dps) of one channel over the 0.25 s before the cursor; 0 if none. */
+  _gyroMean(store, cursor, ch) {
     const g = store.gyro
     if (!g || !g.length) return 0
     const s1 = Math.min(g.length, Math.floor(cursor * g.fs))
-    const slice = g.channelSlice(2, s1 - Math.round(g.fs * 0.25), s1)
+    const slice = g.channelSlice(ch, s1 - Math.round(g.fs * 0.25), s1)
     let sum = 0, cnt = 0
     for (let i = 0; i < slice.length; i++) {
       const v = slice[i]

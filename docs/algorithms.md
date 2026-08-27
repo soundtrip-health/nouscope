@@ -1028,8 +1028,11 @@ one `index` and `timestamp`, which is what `zipSamples` groups on.
 An artistic, scrub-correct 3D rendering of the same session timeline the panel
 grid draws — not a second data source. The last `PANEL_WINDOWS.helix` seconds
 of raw EEG are laid along a helical form, one ribbon strand per electrode,
-braided 90° apart around a vertical axis; newest data sits at the top and time
-extrudes downward. Toggled by the `◉ Helix` button in `#eeg-controls`; it
+braided 90° apart around the helix axis; newest data sits at the head and time
+extrudes away at constant speed. By default the form **faces the viewer** —
+the axis points at the camera (`FACE_TILT_X = π/2` base tilt), so the newest
+samples read as a circle of raw waveform up front; tilting the head swings it
+toward the side (profile) view. Toggled by the `◉ Helix` button in `#eeg-controls`; it
 replaces the `AnalysisDisplay` panel grid but shares the same `SessionStore`,
 `Scrubber`, and cursor, so it works identically at ● LIVE, scrubbed back, and
 on loaded `.jsonl` files.
@@ -1136,27 +1139,44 @@ plays the same "reject vibration/jerk, keep slow head movement" role §5's
 `ACC_ALPHA = 0.08` EMA does live. Returns `null` when the window has no
 samples of any axis.
 
-`HelixView` eases the whole group's rotation toward this target every frame
-rather than snapping to it:
+`HelixView` eases the inner group's rotation toward this target every frame
+rather than snapping to it. The target is an **offset from the face-on base
+tilt**, so a neutral head shows the circle end-on and tilting swings toward
+the profile view — with `POSE_GAIN = 2.0`, ~45° of head pitch
+(`π/2 / POSE_GAIN`) reaches the full side view:
 
 ```
-target = { rotX: pitch · POSE_GAIN, rotZ: roll · POSE_GAIN }   // POSE_GAIN = 0.6
+target = { rotX: FACE_TILT_X + pitch · POSE_GAIN, rotZ: roll · POSE_GAIN }
 rotation += (target - rotation) · (1 - exp(-dt / POSE_TAU))     // POSE_TAU = 0.25 s
 ```
 
-A `null` pose (no accel data) eases the rotation back toward neutral rather
-than special-cased. On top of pose, an always-on **idle spin**
-(`IDLE_SPIN_RAD_S = 0.05` rad/s) keeps the form presentationally alive even
-with a static head, and a **damped gyro-z impulse** — a head shake sets the
-form spinning and lets it wind down — accumulates and decays each frame:
+A `null` pose (no accel data) eases the rotation back toward the face-on
+neutral rather than special-cased. On top of pose, an always-on **idle spin**
+(`IDLE_SPIN_RAD_S = 0.05` rad/s, about the helix's own axis — in-plane
+rotation when face-on) keeps the form presentationally alive even with a
+static head.
+
+**Sharp head rotations send the form spinning.** Two damped spin velocities
+live on an *outer* group in screen space: a rapid head turn (gyro **z**, the
+yaw axis when upright) spins it left/right about screen-y, and a quick nod
+(gyro **y**) tumbles it up/down about screen-x. Only sharp movement counts —
+a gyro mean below `SPIN_THRESH_DPS = 100` dps imparts nothing, so slow head
+motion never drifts the form. Impulses integrate over **session time
+traversed** (`dCur = clamp(Δcursor, 0, 0.1)`), not wall-clock time, so a
+paused playhead parked on a sharp movement can't wind the spin up without
+bound and replay reproduces the same kick; the wind-down runs on wall-clock
+`dt` like the idle spin:
 
 ```
-spinVel = (spinVel + gyroZ · GYRO_GAIN · dt) · exp(-dt / GYRO_DAMP_TAU)
-rotation.y += (IDLE_SPIN_RAD_S + spinVel) · dt
+spinVel = (spinVel + gate(gyro) · SPIN_GAIN · dCur) · exp(-dt / SPIN_DAMP_TAU)
+rotation += spinVel · dt        // per axis: gyro-z → screen-y, gyro-y → screen-x
 ```
 
-`GYRO_GAIN = 0.002`, `GYRO_DAMP_TAU = 1.5` s; `gyroZ` is the mean of
-`store.gyro`'s z-channel over the 0.25 s before the cursor (0 if none).
+`SPIN_GAIN = 0.05` rad/s per degree of sharp rotation, `SPIN_DAMP_TAU = 2.0` s.
+Since an exponentially damped velocity `v₀` sweeps a total angle of `v₀ · τ`,
+a brisk ~60–90° head movement (`v₀ ≈ 3–4.5` rad/s) carries the form through at
+least one full revolution before winding down. Each gyro channel is the mean
+over the 0.25 s before the cursor (0 if none).
 
 ### Stage 5 — Heartbeat pulse propagation
 
