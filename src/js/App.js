@@ -7,6 +7,7 @@ import RecordingManager from './managers/RecordingManager'
 import SessionStore from './managers/SessionStore'
 import AnalysisDisplay from './ui/AnalysisDisplay'
 import HelixView from './ui/HelixView'
+import InfoPanel from './ui/InfoPanel'
 import Scrubber from './ui/Scrubber'
 
 /**
@@ -50,6 +51,10 @@ export default class App {
     this._setupEEG()
     this._setupRecording()
     this._setupAnalysis()
+
+    // Landing/about content — open until a session comes up (_showPanel closes
+    // it; the "i" toggle reopens it as an overlay on the data/helix view).
+    this._infoPanel = new InfoPanel()
 
     // Start the update loop immediately so EEG/bio plots work before (or without) audio.
     this.update()
@@ -223,6 +228,7 @@ export default class App {
 
   /** Bring up the data panel and start the scrubber over the current store. */
   _showPanel({ follow = false } = {}) {
+    this._infoPanel?.close()
     document.body.classList.add('analysis-mode')
     this._helixToggle.hidden = false
     this._helixPaletteBtn.hidden = !this._helixMode
@@ -246,6 +252,8 @@ export default class App {
     this._helixToggle.hidden = true
     this._helixPaletteBtn.hidden = true
     this._scrubber.setActive(false)
+    // Back to an empty page — bring the landing content back up.
+    this._infoPanel?.open()
   }
 
   /**

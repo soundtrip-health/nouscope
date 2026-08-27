@@ -42,6 +42,73 @@
     <main id="session-view">
       <span class="session-label" id="scrub-session-label"></span>
 
+      <!-- Landing / about panel (see InfoPanel.js). Shown on first load as the
+           landing content; auto-dismissed when a session comes up; reopened by
+           the "i" toggle as a semi-transparent overlay on the data/helix view.
+           The wrapper is pointer-transparent so the controls bar and scrubber
+           stay clickable underneath — only the card itself catches clicks. -->
+      <button type="button" class="info-toggle" id="info-toggle" title="About Nouscope" aria-label="About Nouscope">i</button>
+      <div class="info-overlay" id="info-overlay">
+        <div class="info-card" role="dialog" aria-label="About Nouscope">
+          <div class="info-header">
+            <span class="info-title">Nouscope</span>
+            <!-- Inline onclick: last-resort fallback so the card can always be
+                 dismissed even if the app JS fails to load or attach listeners
+                 (the overlay is visible by default in markup). InfoPanel.js
+                 adds the real listener; both just set hidden, so double-firing
+                 is harmless. -->
+            <button type="button" class="info-close-btn" id="info-close-btn" aria-label="Close"
+                    onclick="document.getElementById('info-overlay').hidden = true">✕</button>
+          </div>
+          <p class="info-lede">
+            A real-time biometric visualizer for the Muse headband — raw EEG
+            brainwaves, heart rate, and head motion streamed over Bluetooth
+            straight into your browser. Free and open source; your data never
+            leaves your machine.
+          </p>
+          <ul class="info-usage">
+            <li>
+              <strong>Connect</strong> — press <span class="info-chip">Connect EEG</span>
+              and pair your headset. Muse (Muse 2 / Muse S) is currently the only
+              supported EEG device, and Web Bluetooth requires Chrome or Edge.
+            </li>
+            <li>
+              <strong>Music is optional</strong> — upload a track
+              (<span class="info-chip">↑ Music</span>) or switch on the
+              <span class="info-chip">Microphone</span> to add a real-time
+              EEG–music entrainment analysis. Everything else works in silence.
+            </li>
+            <li>
+              <strong>Scrub freely</strong> — the session records itself as you
+              go. Drag the timeline to replay any moment, or stay parked on
+              <span class="info-chip">● LIVE</span>.
+            </li>
+            <li>
+              <strong>Save &amp; reload</strong> — <span class="info-chip">⏺</span>
+              downloads the session as a <code>.jsonl</code> file, and
+              <span class="info-chip">↑ Recording</span> loads one back in for
+              review — no headset needed.
+            </li>
+          </ul>
+          <p class="info-helix">
+            <strong>◉ Helix</strong> — an experimental 3D view of the same
+            session: the last minute of EEG braided into four glowing strands,
+            your heartbeat as a pulse traveling along the coil, signal complexity
+            winding it tighter, and head movement swinging and spinning the view.
+            Toggle it once a session is running.
+          </p>
+          <p class="info-footer">
+            A project by
+            <a href="https://soundtrip.health" target="_blank" rel="noopener">Soundtrip Labs</a>
+            &middot;
+            <a href="https://soundtrip.health/nouscope.html" target="_blank" rel="noopener">Learn more</a>
+            &middot;
+            <a href="https://github.com/soundtrip-health/nouscope" target="_blank" rel="noopener">GitHub</a>
+            &middot; MIT licensed
+          </p>
+        </div>
+      </div>
+
       <!-- The one data panel: every graph is rendered from the stored session
            timeline (SessionStore) at the scrubber's playhead. Parked at the
            leading edge it reads as a live monitor; dragged back, it replays. -->

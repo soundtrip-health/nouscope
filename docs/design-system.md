@@ -254,6 +254,15 @@ No rounded corners, no drop shadows — flat, instrument-panel switches.
 | Record `⏺` | `0.25` white | 0.75rem | active → `#EF5350` + pulse |
 | Battery (SVG) | stroke `0.30` | — | good/warn/low semantic |
 | Quality dots | — | 7px circle | good/marginal/poor + glow |
+| Info toggle `i` | `0.25` white, circle | 0.8rem italic serif | open/hover → brightens |
+| Info card | `0.12` hairline, 6px radius | 0.95rem body, 1.35rem title | translucent black (`0.78`) + blur |
+
+**Info card** (landing/about, `_info.scss`): the one long-form text surface.
+Body copy at `0.95rem`/`1.55` in `--text-muted`, `<strong>` in `--text-strong`;
+UI-control references rendered as key-cap chips (`.info-chip`, same recipe as
+the shortcuts modal's `<dt>`); the Helix callout carries a 2px `--band-delta`
+left border. Its full-viewport wrapper is pointer-transparent so the controls
+bar and scrubber stay usable beneath it.
 
 **Record pulse:** `@keyframes record-pulse` — expanding `box-shadow` ring in
 `rgba(239,83,80,·)` over 1.4s, ease-in-out, infinite.

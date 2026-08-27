@@ -41,6 +41,17 @@ npm run dev
 
 Open `http://localhost:5173` (any modern browser; use Chrome or Edge to develop or test Web Bluetooth / EEG).
 
+### Deploy
+
+```bash
+npm run build   # outputs dist/
+npm start       # serves dist/ on 127.0.0.1:8080 (override with PORT / HOST)
+```
+
+`npm start` runs `server.js`, a dependency-free static server meant to sit behind a reverse proxy or Cloudflare tunnel. It serves the hashed `dist/assets/*` files with immutable year-long cache headers and everything else (`index.html`) with `no-cache`, so CDN/edge caching is safe and deploys take effect on the next page load.
+
+**Do not tunnel the Vite dev server to a public domain.** Cloudflare's edge caches by file extension, and `npm run dev` serves raw source modules at stable `.js` URLs — browsers end up running stale edge-cached modules against fresh HTML.
+
 ## Usage
 
 1. Click **Connect EEG** to pair a Muse headset via Bluetooth.

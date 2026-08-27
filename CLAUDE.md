@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev       # Start Vite dev server (http://localhost:5173)
 npm run build     # Production build (outputs to dist/)
 npm run preview   # Preview production build
+npm start         # Production static server for dist/ (server.js; PORT/HOST env, default 127.0.0.1:8080)
 ```
 
 No test suite is configured.
@@ -25,14 +26,15 @@ No test suite is configured.
 2. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires connect/disconnect (and reads the `?sim` developer flag)
 3. `_setupRecording()` — instantiates `RecordingManager`, wires the `⏺` record button
 4. `_setupAnalysis()` — instantiates `SessionStore`, `AnalysisDisplay`, `Scrubber`; wires the `↑ Recording` file input
-5. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
+5. Instantiates `InfoPanel` — the landing/about content, open by default until a session starts
+6. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
 
 Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
 
 - **`↑ Music` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
 - **`Microphone` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
-There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.
+On a fresh page the `InfoPanel` landing card (project description, usage, Helix blurb, Soundtrip Labs credit + links) sits over the otherwise-empty viewport; its wrapper is pointer-transparent so the controls bar stays clickable beneath it. `App._showPanel` closes it when a session comes up; the top-right `i` toggle reopens it as a semi-transparent overlay on the data/helix view, and `App._hidePanel` reopens it when the page empties again. There is no demo track. EEG can connect before, after, or without any audio.
 
 ### Key Modules
 
@@ -50,6 +52,7 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/ui/AnalysisDisplay.js` | The only renderer: `renderAt(store, cursor)` redraws every panel from a `SessionStore`, each over its own fixed window ending at `cursor` (min/max-decimated line plots, time-mapped spectrogram blits); readouts show the instant value at `cursor` plus the average over that panel's window |
 | `src/js/ui/Scrubber.js` | Transport: playhead cursor, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track; hover-time preview pill |
 | `src/js/ui/bioRender.js` | Shared render constants + primitives (viridis LUT, EEG/IMU scales, `PANEL_WINDOWS`, color tokens, `paintSpecColumn`) |
+| `src/js/ui/InfoPanel.js` | Landing/about card (`#info-overlay` + top-right `i` toggle): open on load, auto-closed by `App._showPanel`, reopenable mid-session as a translucent overlay; pointer-transparent wrapper keeps controls/scrubber usable under it |
 | `src/js/ui/HelixView.js` | Optional 3D view (three.js): last 60 s of raw EEG as 4 braided ribbon strands along a helix, driven from `SessionStore` at the scrubber cursor; faces the viewer by default (newest data as a front-facing circle), head tilt swings to the side view, sharp head turns/nods send it spinning; complexity sets spiral tightness, HR drives a traveling pulse; swaps with the panel grid via `◉ Helix`; themed 4-color strand palettes (cycled by the palette button, persisted in localStorage) |
 
 ### Update Loop
