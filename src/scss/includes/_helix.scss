@@ -1,0 +1,24 @@
+// Helix view — full-viewport 3D canvas layered like the analysis panel:
+// below the scrubber (z 1006) and #eeg-controls (z 1007).
+// NOTE: strands use additive blending, which assumes a near-black --color-bg.
+
+#helix-view {
+  position: fixed;
+  inset: 0;
+  bottom: 4.5rem;
+  z-index: 1004;
+  background: var(--color-bg);
+
+  &[hidden] { display: none; }
+
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+}
+
+#helix-toggle.active {
+  color: var(--status-record);
+  border-color: var(--status-record);
+}

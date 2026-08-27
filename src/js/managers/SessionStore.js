@@ -348,6 +348,9 @@ export default class SessionStore {
     // Recording-gap scan state (see `gaps()`/`_scanGaps()`) — incremental like above.
     this._gapList = []; this._gapScanned = 0; this._gapRunStart = null
 
+    // Cumulative heartbeat-phase cache for `heartPhaseAt` — incremental like above.
+    this._hrPhase = []
+
     this._empty = true
   }
 
@@ -741,6 +744,95 @@ export default class SessionStore {
       q.push(rms < 50 ? 'good' : rms < 100 ? 'marginal' : 'poor')
     }
     return q
+  }
+
+  /**
+   * Head tilt angles (radians) derived from a 0.5 s mean of the stored
+   * accelerometer, at time t. Stands in for the live EMA (`ACC_ALPHA = 0.08`
+   * in EEGManager) — a short trailing mean plays the same "reject vibration/
+   * jerk, keep slow head movement" role for scrub playback, where there is no
+   * running filter state to carry forward. Formulas match EEGManager.js
+   * `_processAccel` (:1059-1063) exactly.
+   * @returns {{pitch:number, roll:number}|null} null if no accel samples in range
+   */
+  headPoseAt(t) {
+    const s1 = Math.min(this.accel.length, Math.floor(t * IMU_FS))
+    const s0 = s1 - 26   // 0.5 s at IMU_FS=52
+    let x = 0, y = 0, z = 0
+    let cx = 0, cy = 0, cz = 0
+    const xs = this.accel.channelSlice(0, s0, s1)
+    const ys = this.accel.channelSlice(1, s0, s1)
+    const zs = this.accel.channelSlice(2, s0, s1)
+    for (let i = 0; i < xs.length; i++) if (!Number.isNaN(xs[i])) { x += xs[i]; cx++ }
+    for (let i = 0; i < ys.length; i++) if (!Number.isNaN(ys[i])) { y += ys[i]; cy++ }
+    for (let i = 0; i < zs.length; i++) if (!Number.isNaN(zs[i])) { z += zs[i]; cz++ }
+    if (!cx || !cy || !cz) return null
+    x /= cx; y /= cy; z /= cz
+    return {
+      pitch: Math.atan2(-x, Math.sqrt(y * y + z * z)),
+      roll:  Math.atan2(y, z),
+    }
+  }
+
+  /**
+   * Extend the cumulative heartbeat-phase cache (`_hrPhase`, parallel to
+   * `this.hr`) up to the current length of `this.hr` — incremental/append-only,
+   * same pattern as `bandsScale()`. `bpm <= 0` records are placeholders (see
+   * `windowMean`'s doc comment) and must advance no phase.
+   */
+  _syncHrPhase() {
+    const hr = this.hr
+    for (let i = this._hrPhase.length; i < hr.length; i++) {
+      if (i === 0) { this._hrPhase.push(0); continue }
+      const prev = hr[i - 1]
+      const dt = hr[i].t - prev.t
+      const hz = Math.max(prev.bpm, 0) / 60
+      this._hrPhase.push(this._hrPhase[i - 1] + 2 * Math.PI * hz * dt)
+    }
+  }
+
+  /**
+   * Cumulative heartbeat phase (radians) at time t, integrated by step/hold
+   * bpm over `this.hr` (`bpm <= 0` placeholder records advance no phase).
+   * Cursor-derived, so it freezes when playback is paused. Returns 0 for t
+   * before the first record; null if `this.hr` is empty.
+   * @returns {number|null}
+   */
+  heartPhaseAt(t) {
+    const hr = this.hr
+    if (!hr.length) return null
+    this._syncHrPhase()
+    // Binary search for the last entry with entry.t <= t (same shape as `sampleAt`).
+    let lo = 0, hi = hr.length - 1, ans = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (hr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+    }
+    if (ans < 0) return 0
+    const hz = Math.max(hr[ans].bpm, 0) / 60
+    return this._hrPhase[ans] + 2 * Math.PI * hz * (t - hr[ans].t)
+  }
+
+  /**
+   * MSE `complexity` scalar at time t, linearly interpolated between the two
+   * neighboring `this.mse` records straddling t; clamp-held at the nearest
+   * edge value outside the recorded range. Null if `this.mse` is empty.
+   * @returns {number|null}
+   */
+  complexityAt(t) {
+    const arr = this.mse
+    if (!arr.length) return null
+    // Binary search for the last entry with entry.t <= t (same shape as `sampleAt`).
+    let lo = 0, hi = arr.length - 1, ans = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (arr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+    }
+    if (ans < 0) return arr[0].complexity
+    if (ans === arr.length - 1) return arr[ans].complexity
+    const a = arr[ans], b = arr[ans + 1]
+    const frac = (t - a.t) / (b.t - a.t)
+    return a.complexity + (b.complexity - a.complexity) * frac
   }
 
   /**

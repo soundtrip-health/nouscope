@@ -47,6 +47,7 @@ export const PANEL_WINDOWS = {
   mse:      30,
   ppg:       6,
   imu:       4,
+  helix:    60,   // ~12 five-second MSE records → several distinct tightness bands
 }
 
 // The live band chart lerped toward the ~2 Hz band-power updates at 0.08 per

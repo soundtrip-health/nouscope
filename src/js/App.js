@@ -6,6 +6,7 @@ import ComplexityManager from './managers/ComplexityManager'
 import RecordingManager from './managers/RecordingManager'
 import SessionStore from './managers/SessionStore'
 import AnalysisDisplay from './ui/AnalysisDisplay'
+import HelixView from './ui/HelixView'
 import Scrubber from './ui/Scrubber'
 
 /**
@@ -223,9 +224,16 @@ export default class App {
   /** Bring up the data panel and start the scrubber over the current store. */
   _showPanel({ follow = false } = {}) {
     document.body.classList.add('analysis-mode')
-    this._analysisPanel.hidden = false
-    if (!this._analysisDisplay._inited) this._analysisDisplay.init()
-    this._analysisDisplay.resize()
+    this._helixToggle.hidden = false
+    this._helixPaletteBtn.hidden = !this._helixMode
+    if (this._helixMode) {
+      // Helix stays the selected mode across sessions; route straight to it.
+      this._helixView.setVisible(true)
+    } else {
+      this._analysisPanel.hidden = false
+      if (!this._analysisDisplay._inited) this._analysisDisplay.init()
+      this._analysisDisplay.resize()
+    }
     this._scrubber.setStore(App.sessionStore)
     this._scrubber.setActive(true, follow ? { follow: true } : { atStart: true })
     this._scrubber.resize()   // #scrubber just became visible; size the ribbon canvas now
@@ -234,7 +242,37 @@ export default class App {
   _hidePanel() {
     document.body.classList.remove('analysis-mode')
     this._analysisPanel.hidden = true
+    this._helixView.setVisible(false)
+    this._helixToggle.hidden = true
+    this._helixPaletteBtn.hidden = true
     this._scrubber.setActive(false)
+  }
+
+  /**
+   * Swap between the panel grid and the 3D helix view. Both render the same
+   * SessionStore at the same Scrubber cursor — only the renderer changes. The
+   * hidden renderer's WebGL contexts are released (browsers cap live contexts
+   * at ~16, and the panel grid alone holds 5) and recreated on the way back.
+   */
+  _setHelixMode(on) {
+    if (on === this._helixMode) return
+    this._helixMode = on
+    this._helixToggle.classList.toggle('active', on)
+    this._helixPaletteBtn.hidden = !on
+    if (on) {
+      this._analysisDisplay.suspend()   // free its contexts before THREE's comes up
+      this._analysisPanel.hidden = true
+      this._helixView.setVisible(true)
+    } else {
+      this._helixView.setVisible(false)
+      this._analysisDisplay.resume()
+      // resume() is gated on a real suspend — cover the path where helix mode
+      // was active before the panel grid ever created its contexts.
+      if (!this._analysisDisplay._inited) this._analysisDisplay.init()
+      this._analysisPanel.hidden = false
+      this._analysisDisplay.resize()
+    }
+    this._scrubber.refresh()
   }
   /** Free this view's WebGL contexts and stop its transport loop so the Multi-Track tab can use them (see index.js). */
   suspendAnalysis() {
@@ -248,12 +286,16 @@ export default class App {
     this._scrubberWasActive = this._scrubber.isActive()
     if (this._scrubberWasActive) this._scrubber.setActive(false)
     this._analysisDisplay.suspend()
+    this._helixView.suspend()
   }
 
   /** Recreate this view's WebGL contexts and restart its transport after the Multi-Track tab is hidden (see index.js). */
   resumeAnalysis() {
     if (!this._analysisDisplay) return
-    this._analysisDisplay.resume()   // recreate GL first so the loop's first renderAt has live contexts
+    // Recreate GL first so the loop's first renderAt has live contexts. Only
+    // the active mode's renderer comes back — the other stays suspended.
+    if (this._helixMode) this._helixView.resume()
+    else this._analysisDisplay.resume()
     if (this._scrubberWasActive) {
       // No opts: preserve cursor + follow-state. If it was following the live
       // edge, the loop's first frame re-snaps to the grown edge on its own.
@@ -315,7 +357,14 @@ export default class App {
     App.recordingManager.onRecord = (obj) => App.sessionStore.ingest(obj)
 
     this._analysisDisplay = new AnalysisDisplay()
-    this._scrubber = new Scrubber((store, cursor) => this._analysisDisplay.renderAt(store, cursor))
+    this._helixView = new HelixView()
+    this._helixMode = false
+    // Fan out to both renderers: AnalysisDisplay no-ops while suspended, and
+    // HelixView only caches (store, cursor) — its own rAF loop draws.
+    this._scrubber = new Scrubber((store, cursor) => {
+      this._analysisDisplay.renderAt(store, cursor)
+      this._helixView.renderAt(store, cursor)
+    })
     this._scrubber.attach()
     this._scrubber.setStore(App.sessionStore)
     this._scrubberWasActive = false   // set by suspendAnalysis() to restore the loop on return
@@ -323,6 +372,14 @@ export default class App {
 
 
     this._analysisPanel = document.getElementById('analysis-panel')
+    this._helixToggle = document.getElementById('helix-toggle')
+    this._helixToggle.addEventListener('click', () => this._setHelixMode(!this._helixMode))
+    // Palette cycler — only shown while the helix is up; label = active palette.
+    this._helixPaletteBtn = document.getElementById('helix-palette')
+    this._helixPaletteBtn.textContent = this._helixView.paletteName
+    this._helixPaletteBtn.addEventListener('click', () => {
+      this._helixPaletteBtn.textContent = this._helixView.cyclePalette()
+    })
 
     const recInput = document.getElementById('recording-upload')
     recInput.addEventListener('change', (e) => {
@@ -336,8 +393,9 @@ export default class App {
 
     // Keep canvas drawing buffers matched to their on-screen size (crisp graphs).
     window.addEventListener('resize', () => {
-      if (this._analysisPanel.hidden) return
-      this._analysisDisplay.resize()
+      if (!document.body.classList.contains('analysis-mode')) return
+      if (this._helixMode) this._helixView.resize()
+      else this._analysisDisplay.resize()
       this._scrubber.resize()
       this._scrubber.refresh()
     })

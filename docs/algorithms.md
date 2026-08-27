@@ -2,7 +2,7 @@
 
 This document explains the key algorithms that drive Nouscope: how raw biometric signals (and an optional audio track) are processed into the numbers rendered in the bio-data panel — which is itself the visualization. There is one data view: `AnalysisDisplay` renders a stored session timeline at the scrubber's playhead, so the same panels serve as a live monitor (playhead at the leading edge) and as a post-hoc review surface (playhead anywhere else). Intended for developers (human or AI) modifying the internals.
 
-A second, independent tab — Multi-Track (§11) — reviews several loaded `.jsonl` recordings side by side; it is file-review only (no live EEG) and shares no code, DOM, or CSS with the view described in §1–§10, which remains exactly the original single-session app.
+A second, independent tab — Multi-Track (§12) — reviews several loaded `.jsonl` recordings side by side; it is file-review only (no live EEG) and shares no code, DOM, or CSS with the view described in §1–§11, which remains exactly the original single-session app.
 
 ---
 
@@ -19,7 +19,8 @@ A second, independent tab — Multi-Track (§11) — reviews several loaded `.js
 9. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
 10. [The Data View — Timeline Reconstruction & Scrubbing](#9--the-data-view--timeline-reconstruction--scrubbing)
 11. [Muse Data Simulator](#10--muse-data-simulator)
-12. [The Multi-Track Tab — Independent File Review](#11--the-multi-track-tab--independent-file-review)
+12. [Helix View](#11--helix-view)
+13. [The Multi-Track Tab — Independent File Review](#12--the-multi-track-tab--independent-file-review)
 
 ---
 
@@ -1020,7 +1021,276 @@ one `index` and `timestamp`, which is what `zipSamples` groups on.
 
 ---
 
-## §11 — The Multi-Track Tab — Independent File Review
+## §11 — Helix View
+
+**Files:** `src/js/ui/HelixView.js`; three query methods on `src/js/managers/SessionStore.js` (`headPoseAt`, `heartPhaseAt`, `complexityAt`)
+
+An artistic, scrub-correct 3D rendering of the same session timeline the panel
+grid draws — not a second data source. The last `PANEL_WINDOWS.helix` seconds
+of raw EEG are laid along a helical form, one ribbon strand per electrode,
+braided 90° apart around a vertical axis; newest data sits at the top and time
+extrudes downward. Toggled by the `◉ Helix` button in `#eeg-controls`; it
+replaces the `AnalysisDisplay` panel grid but shares the same `SessionStore`,
+`Scrubber`, and cursor, so it works identically at ● LIVE, scrubbed back, and
+on loaded `.jsonl` files.
+
+**Frozen-history principle**: every visual quantity — spiral tightness, EEG
+displacement, pose, pulse phase — is a pure function of an absolute time `t`,
+never of live manager state or of "how much has been drawn so far." Because a
+segment's shape depends only on `t`, a segment drawn once during live capture
+never re-shapes as later data arrives; scrubbing back re-evaluates the same
+functions at earlier `t` and gets the same picture the live view showed at the
+time. This is also why `headPose` and `heartPulse` — live-only fields on
+`EEGManager` — can't be reused here: replaying history needs their value *at
+each past t*, so `SessionStore` gained `headPoseAt(t)`, `heartPhaseAt(t)`, and
+reuses `complexityAt(t)` (§7) to re-derive them from the stored `accel`/`hr`
+streams instead.
+
+### Stage 1 — Sampling window
+
+`WINDOW_S = PANEL_WINDOWS.helix = 60` s of history per strand, decimated by
+`HELIX_STRIDE = 4` (256 Hz → `HELIX_FS = 64` Hz effective) for
+`N = WINDOW_S · HELIX_FS = 3840` points per strand (plain stride-4 pick, not
+min/max decimation — a spike-fidelity tweak noted as future work). The window
+end is `t1 = min(cursor, store.eeg.durationS())`, the same clamp-to-written-data
+reasoning as the envelope tail clamp (§9): without it, the helix head would be
+a blank stub while following live, since `cursor` can run slightly ahead of
+the counter-reconstructed EEG grid.
+
+### Stage 2 — Tightness mapping (frozen history)
+
+Each point's spiral tightness is set by MSE complexity *at that point's own
+time*, so history never re-shapes:
+
+```
+n(t) = clamp(complexityAt(t) / MSE_Y_MAX, 0, 1)
+```
+
+`complexityAt(t)` (new `SessionStore` method) linearly interpolates
+`complexity` between the two `store.mse` records straddling `t` and
+clamp-holds at the nearest edge value outside the recorded range; before any
+MSE has arrived, `n = DEFAULT_N = 0.4` (mid-tightness).
+
+From `n`, three quantities follow, computed per-sample for `i = 0…N-1` at
+`t_i = t1 - (N-1-i)/HELIX_FS`:
+
+- **Vertical position** — constant speed regardless of `n`; only the turning
+  rate below varies:
+  ```
+  y(a) = HELIX_HEIGHT/2 - a · (HELIX_HEIGHT / WINDOW_S)     // a = age = t1 - t
+  ```
+  `HELIX_HEIGHT = 6.0` world units spans the full 60 s window.
+- **Turn rate** — turns/second, higher complexity opens the coil:
+  ```
+  f(n) = TURNS_CALM - n · (TURNS_CALM - TURNS_OPEN)
+  ```
+  `TURNS_CALM = 0.28`, `TURNS_OPEN = 0.12` turns/s — 16.8 turns across the
+  window at `n=0` down to 7.2 turns at `n=1`.
+- **Radius**:
+  ```
+  r(n) = R_MIN + n · (R_MAX - R_MIN)          // R_MIN = 0.6, R_MAX = 1.6
+  ```
+
+**θ is integrated anchored at the head**, not the tail: `θ_head = 0` at the
+newest sample (`i = N-1`), walking backward through age with
+`θ_{i-1} = θ_i - 2π·f(n(t_i))·dt` (`dt = 1/HELIX_FS`). Anchoring at the head
+rather than integrating forward from the tail is what makes the newest point
+angularly stable while scrubbing or following live — a tail-anchored
+integration would rotate the entire visible coil every time the window
+advanced. Per-sample `n(t)` is computed with a single O(N) merge-walk over the
+time-sorted `store.mse` array (points are generated in time order, so this
+avoids a per-sample binary search). Strand `k` (TP9/AF7/AF8/TP10) adds a fixed
+phase offset `k·π/2`, producing the 90°-braided appearance.
+
+### Stage 3 — EEG radial displacement & quality ghosting
+
+Each strand's raw EEG (`store.eeg.channelSlice`, stride-4 decimated) displaces
+its centerline radially:
+
+```
+eegNorm = clamp(µV / EEG_SCALE, -1.5, 1.5)     // EEG_SCALE = 200 µV, from §3/§6
+displaced = center + aRadial · eegNorm · EEG_GAIN      // EEG_GAIN = 0.70
+```
+
+A `NaN` sample (pre-session, a gap, or disconnect) forces `eegNorm = 0` and
+alpha to 0 — the strand is simply invisible over that stretch rather than
+snapping to a spike, so a session "grows" visibly from nothing and fades
+across a dropout instead of spiking.
+
+Per-channel signal quality (`store.qualityAt(t)`, §9) maps to an opacity
+weight — `good = 1.0`, `marginal = 0.5`, `poor = 0` (same convention as
+`EntrainmentManager`/`ComplexityManager`) — multiplied into the fragment
+alpha. Quality is cached at one value per second per channel
+(`_qualityWeights`), recomputed only when `floor(cursor·2)` changes, since
+`qualityAt` costs a 1 s RMS scan and would otherwise run `N` times per
+rebuild.
+
+### Stage 4 — Head pose (from stored accelerometer)
+
+`headPoseAt(t)` re-derives the same tilt angles as §5's live pipeline —
+`pitch = atan2(-x, √(y²+z²))`, `roll = atan2(y, z)` — but from a **0.5 s
+trailing mean** of the stored accelerometer (`store.accel`, last 26 samples at
+`IMU_FS = 52`) rather than a running EMA, since scrub playback has no filter
+state to carry forward from one query to the next; the short trailing window
+plays the same "reject vibration/jerk, keep slow head movement" role §5's
+`ACC_ALPHA = 0.08` EMA does live. Returns `null` when the window has no
+samples of any axis.
+
+`HelixView` eases the whole group's rotation toward this target every frame
+rather than snapping to it:
+
+```
+target = { rotX: pitch · POSE_GAIN, rotZ: roll · POSE_GAIN }   // POSE_GAIN = 0.6
+rotation += (target - rotation) · (1 - exp(-dt / POSE_TAU))     // POSE_TAU = 0.25 s
+```
+
+A `null` pose (no accel data) eases the rotation back toward neutral rather
+than special-cased. On top of pose, an always-on **idle spin**
+(`IDLE_SPIN_RAD_S = 0.05` rad/s) keeps the form presentationally alive even
+with a static head, and a **damped gyro-z impulse** — a head shake sets the
+form spinning and lets it wind down — accumulates and decays each frame:
+
+```
+spinVel = (spinVel + gyroZ · GYRO_GAIN · dt) · exp(-dt / GYRO_DAMP_TAU)
+rotation.y += (IDLE_SPIN_RAD_S + spinVel) · dt
+```
+
+`GYRO_GAIN = 0.002`, `GYRO_DAMP_TAU = 1.5` s; `gyroZ` is the mean of
+`store.gyro`'s z-channel over the 0.25 s before the cursor (0 if none).
+
+### Stage 5 — Heartbeat pulse propagation
+
+`heartPhaseAt(t)` (new `SessionStore` method) integrates cumulative heartbeat
+phase over the stored `hr` timeline by step/hold, mirroring §4's live phase
+oscillator but over recorded history instead of real time:
+
+```
+φ[i] = φ[i-1] + 2π · (max(bpm[i-1], 0) / 60) · (t[i] - t[i-1])
+```
+
+`bpm ≤ 0` placeholder records (§9's `windowMean` note) advance no phase — a
+gap in HR detection freezes the phase rather than jittering it. Querying at
+`t` binary-searches the last record with `t_rec ≤ t` and linearly extrapolates
+phase forward using that record's `bpm`. Because `heartPhaseAt` is
+cursor-derived, the pulse **freezes when playback pauses** — scrub-correct,
+same as everything else in this view.
+
+The fragment shader shapes the pulse with the **same cubed-sine waveform** as
+§4's live oscillator (`s³`, sharp systolic rise / slow diastolic decay), but
+traveling down the helix from the newest point rather than pulsing uniformly:
+
+```
+ph    = uPulsePhase - (age / PULSE_VEL) · uOmega     // age = seconds since the head
+s     = (sin(ph) + 1) / 2
+pulse = s³ · PULSE_AMP
+```
+
+`uOmega = 2π · bpm/60` from `sampleAt('hr', cursor)`; `PULSE_VEL = 20.0`
+seconds-of-helix-age traversed per second of phase — at a resting 60 bpm
+(1 Hz) that puts one full wavelength every 20 s of age, so roughly 3 bands are
+visible across the 60 s window at once. `PULSE_AMP = 0.5` sets the brightness
+modulation depth; it (and the phase term) is forced to 0 whenever there's no
+current HR (`bpm ≤ 0` or `heartPhaseAt` returns `null`), so the strands render
+at flat brightness rather than pulsing on stale data.
+
+### Stage 6 — Rendering split & rebuild throttle
+
+Work is split between an infrequent CPU pass and a per-frame GPU pass:
+
+- **CPU, throttled to cursor movement** (`_rebuild`): integrates the
+  centerline (θ/y/r per Stage 2), radial and finite-difference tangent
+  vectors, normalized EEG value and quality weight (Stage 3) into the dynamic
+  `BufferAttributes` (`position`, `aRadial`, `aTangent`, `aData`). It reruns
+  only when `|cursor - _builtCursor| > REBUILD_EPS_S = 0.08` s — about 12 Hz
+  while following live, instantly on any seek, and never while paused. A full
+  rebuild of all 4 strands (3840 points each) measures ≈0.5–1.5 ms, so no
+  incremental/ring-shift update is needed for v1 (noted as the escape hatch if
+  a slower device needs it). The static `aStatic` attribute (`side`, `age`)
+  is written once at strand creation — index `i` always means the same age in
+  this right-anchored window, so it never changes.
+- **GPU, every frame**: the vertex shader applies the EEG radial displacement
+  and expands the centerline into a camera-facing ribbon
+  (`± HALF_WIDTH · normalize(cross(tangent, viewDir))`, `HALF_WIDTH = 0.03`,
+  tapered thinner toward the tail); the fragment shader draws the traveling
+  pulse (Stage 5), softens the ribbon edges, and modulates brightness by EEG
+  magnitude and quality (Stage 3).
+
+Blending is additive (`THREE.AdditiveBlending`, `depthWrite: false` — no
+sorting needed) and assumes the near-black `--color-bg` (`#000000`): strands
+and pulses brighten where they overlap instead of occluding each other.
+
+Strand colors come from a themed palette rather than the panel grid's
+per-channel `EEG_TOKENS`: each palette (`PALETTES` in `HelixView.js` —
+Aurora, Ember, Violet, Ocean, Moon) is a family of four close-hue colors, one
+per electrode in TP9/AF7/AF8/TP10 order, related enough to read as one form
+under additive blending but varied enough to follow a single strand. The
+palette button next to `◉ Helix` cycles them live (uniform update only, no
+rebuild); the choice persists per browser in `localStorage`
+(`nouscope-helix-palette`).
+
+`HelixView` owns its own `requestAnimationFrame` loop, started by
+`setVisible(true)` and stopped when hidden — the `Scrubber`'s own loop skips
+frames when nothing is dirty (e.g. while paused), which would freeze the pose
+easing and idle spin along with it. `renderAt(store, cursor)`, called from the
+same scrubber fan-out that feeds `AnalysisDisplay`, only caches the store and
+cursor; all per-frame work happens inside `_frame`.
+
+### View toggle & context budget
+
+`◉ Helix` swaps the panel grid for the helix view in place — same store,
+scrubber, and cursor throughout. Because `AnalysisDisplay` alone holds 5 WebGL2
+contexts and browsers cap live contexts at roughly 8–16 total (§12's per-track
+panel cap hits the same ceiling from a different direction), the hidden
+renderer's contexts are suspended while the other is shown: `suspend()`
+disposes the renderer, forces context loss, and replaces the canvas with a
+clone (a lost WebGL context can never be revived on the same canvas) — the
+same pattern `AnalysisDisplay.suspend()`/`resume()` already used. `resume()`
+recreates the GL state lazily the next time that view is shown.
+
+### Constants
+
+| Constant | Value | Role |
+|---|---|---|
+| `HELIX_STRIDE` | 4 | EEG decimation, 256 → 64 Hz |
+| `HELIX_HEIGHT` | 6.0 | World units spanned by the 60 s window |
+| `R_MIN` / `R_MAX` | 0.6 / 1.6 | Radius at `n=0` / `n=1` |
+| `TURNS_CALM` / `TURNS_OPEN` | 0.28 / 0.12 turns/s | Turn rate at `n=0` / `n=1` |
+| `DEFAULT_N` | 0.4 | Normalized complexity before any MSE exists |
+| `EEG_GAIN` | 0.70 | World units of radial deflection per `EEG_SCALE` µV |
+| `HALF_WIDTH` | 0.03 | Ribbon half-width, world units |
+| `BASE_OPACITY` | 0.85 | Base fragment alpha before quality/pulse |
+| `POSE_GAIN` | 0.6 | Head pitch/roll → form rotation |
+| `POSE_TAU` | 0.25 s | Easing time constant toward target pose |
+| `IDLE_SPIN_RAD_S` | 0.05 rad/s | Always-on presentational spin |
+| `GYRO_GAIN` | 0.002 | dps → rad/s² spin impulse |
+| `GYRO_DAMP_TAU` | 1.5 s | Spin velocity decay |
+| `PULSE_VEL` | 20.0 | Seconds-of-helix-age traversed per second of phase |
+| `PULSE_AMP` | 0.5 | Brightness modulation depth |
+| `REBUILD_EPS_S` | 0.08 s | Cursor movement that triggers a CPU rebuild |
+
+These are isolated aesthetic knobs — tuning them never touches the structural
+formulas above.
+
+### Graceful degradation
+
+All fall out of the design above rather than being special-cased: no MSE yet
+→ `DEFAULT_N` mid-tightness; `NaN` EEG (pre-session, a gap, or disconnect) →
+invisible, so a strand visibly grows as the session lengthens and fades across
+a dropout rather than spiking; no HR → `uPulseAmp = 0`, flat brightness; no
+accel → rotation eases toward neutral instead of a stale pose; loaded `.jsonl`
+files take the identical path, since every quantity is derived from
+store + cursor with no live-manager dependency.
+
+### Cross-references
+
+- §4 (PPG/heart rate) for the cubed-sine pulse shape this view's fragment
+  shader reproduces, and the `bpm ≤ 0` convention `heartPhaseAt` respects.
+- §5 (IMU/head pose) for the atan2 tilt formulas `headPoseAt` re-derives from
+  stored accelerometer data.
+
+---
+
+## §12 — The Multi-Track Tab — Independent File Review
 
 A second tab (`Session` / `Multi-Track` switcher at the top of the page) for
 reviewing several loaded `.jsonl` recordings side by side, GarageBand-style: a
@@ -1029,7 +1299,7 @@ one shared master transport. It is a **separate, independent feature** from
 the single-session view documented above — **file-review only, no live EEG
 connection** (an explicit product decision: this tab never touches
 `EEGManager`/`RecordingManager`/`AudioManager`), and shares no DOM ids, no
-CSS classes, and no runtime state with §1–§10's view. Switching tabs only
+CSS classes, and no runtime state with §1–§11's view. Switching tabs only
 toggles which `<main>` is visible; the original tab's live connection (if any)
 keeps running underneath exactly as it always has.
 
