@@ -19,6 +19,7 @@ export default defineConfig({
     // host: true exposes the dev server on the local network (0.0.0.0),
     // required for testing on mobile devices and the Muse headset BT workflow.
     host: true,
+    allowedHosts: ["nouscope.org"],
   },
   resolve: {
     alias: {
