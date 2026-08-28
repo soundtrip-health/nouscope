@@ -6,8 +6,12 @@
  * Newest data is at the head; time extrudes away at constant speed. By default
  * the form faces the viewer — the axis points at the camera, so the newest
  * samples read as a circle of raw waveform up front; tilting the head swings
- * it toward the side (profile) view. Every visual quantity is derived from the
- * SessionStore at an
+ * it toward the side (profile) view, and both the pose offset and any gyro
+ * spin always settle back to that face-on default. Recency is emphasized:
+ * older coils fade, thin, and recede with perspective while the newest few
+ * seconds glow. A palette-tinted particle field drifts slowly toward the
+ * viewer behind the form, breathing with the heartbeat. Every visual quantity
+ * is derived from the SessionStore at an
  * absolute time, never from live manager state, so the view is scrub-correct:
  * it works following the ● LIVE edge, dragged back through history, and on
  * loaded .jsonl files identically.
@@ -63,9 +67,37 @@ const IDLE_SPIN_RAD_S = 0.05   // slow presentational spin about the helix axis,
 const SPIN_THRESH_DPS = 100    // below this, head motion imparts no spin
 const SPIN_GAIN       = 0.05   // deg of sharp rotation → rad/s of spin velocity
 const SPIN_DAMP_TAU   = 2.0    // s, spin velocity decay
+// Once the spin has wound down, the outer group eases back to the nearest full
+// revolution (identity, shortest way round) so the form always settles face-on
+// again instead of being left stranded at whatever angle the spin ended on.
+const SPIN_SETTLE_VEL = 0.3    // rad/s of remaining spin below which the return engages
+const SPIN_RETURN_TAU = 1.2    // s, easing back to face-on after a spin
+// The pose target is the *offset* from a slowly-adapting baseline, not from
+// absolute gravity — so a headset worn at an angle, or a tilt the user holds,
+// relaxes back to the face-on view over ~POSE_REF_TAU instead of parking the
+// form off-axis forever. Transient tilts still swing the view immediately.
+const POSE_REF_TAU    = 6.0    // s, neutral-pose baseline adaptation
 // Pulse
 const PULSE_VEL       = 20.0   // seconds-of-helix-arc traversed per second
 const PULSE_AMP       = 0.5    // brightness modulation depth
+// Recency emphasis: the newest data is the subject — older coils fade toward
+// FADE_MIN alpha, thin toward TAIL_TAPER width, and the head few seconds get
+// an extra brightness lift. Combined with the perspective camera (old data is
+// farther away in the face-on view) history recedes but is still there,
+// regaining prominence when the form swings to the side.
+const FADE_MIN        = 0.15   // alpha multiplier at the oldest sample
+const TAIL_TAPER      = 0.3    // ribbon width multiplier at the oldest sample
+const HEAD_GLOW_S     = 4.0    // seconds of extra brightness at the head
+const HEAD_GLOW       = 0.35   // brightness lift at age 0
+// Background particle field: palette-tinted motes drifting slowly toward the
+// viewer (the same direction time flows along the helix), twinkling, and
+// breathing brighter on the heartbeat pulse. Entirely shader-animated — the
+// CPU only advances uTime.
+const PARTICLE_COUNT  = 1400
+const PARTICLE_SPREAD = 9      // x/y half-extent of the field, world units
+const PARTICLE_NEAR   = 5.0    // wrap plane nearest the camera (world z)
+const PARTICLE_FAR    = -24.0  // wrap plane farthest from the camera (world z)
+const PARTICLE_DRIFT  = 0.3    // world units/s toward the viewer
 // Rebuild throttle: geometry only rebuilds when the cursor has moved this far
 // (~12 Hz while following live; any seek exceeds it instantly; paused → none).
 const REBUILD_EPS_S   = 0.08
@@ -105,7 +137,7 @@ const VERT_SHADER = /* glsl */ `
     vec3 viewDir  = normalize(cameraPosition - world.xyz);
     vec3 tangentW = normalize(mat3(modelMatrix) * aTangent);
     vec3 side     = normalize(cross(tangentW, viewDir));
-    float taper   = mix(0.6, 1.0, 1.0 - aStatic.y / ${WINDOW_S.toFixed(1)});
+    float taper   = mix(${TAIL_TAPER.toFixed(2)}, 1.0, 1.0 - aStatic.y / ${WINDOW_S.toFixed(1)});
     world.xyz += side * (aStatic.x * uHalfWidth * taper);
     gl_Position = projectionMatrix * viewMatrix * world;
     vAge = aStatic.y; vQuality = aData.y; vSide = aStatic.x; vEegMag = abs(aData.x);
@@ -130,10 +162,58 @@ const FRAG_SHADER = /* glsl */ `
     float ph    = uPulsePhase - (vAge / uPulseVel) * uOmega;
     float s     = (sin(ph) + 1.0) * 0.5;
     float pulse = s * s * s * uPulseAmp;
-    vec3  rgb   = uColor * (1.0 + pulse + 0.4 * vEegMag);
+    // Recency: newest few seconds glow, old coils fade toward FADE_MIN.
+    float head  = ${HEAD_GLOW.toFixed(2)} * smoothstep(${HEAD_GLOW_S.toFixed(1)}, 0.0, vAge);
+    float fade  = mix(1.0, ${FADE_MIN.toFixed(2)}, smoothstep(0.0, 0.9, vAge / ${WINDOW_S.toFixed(1)}));
+    vec3  rgb   = uColor * (1.0 + pulse + 0.4 * vEegMag + head);
     float edge  = smoothstep(1.0, 0.6, abs(vSide));   // soft ribbon edges
-    float alpha = (uOpacity * edge + 0.3 * pulse) * vQuality;
+    float alpha = (uOpacity * edge + 0.3 * pulse) * vQuality * fade;
     gl_FragColor = vec4(rgb, alpha);
+  }
+`
+
+// Background particle field. Each mote's motion is a pure function of its
+// static seed/position attributes and uTime, so the whole field animates on
+// the GPU: a slow constant drift toward the viewer (wrapping between the far
+// and near planes), a gentle per-mote sideways sway, and a seeded twinkle.
+// Motes fade in at the far plane and out before reaching the camera.
+const PARTICLE_VERT = /* glsl */ `
+  uniform float uTime;
+  uniform float uPixelRatio;
+  attribute float aSeed;
+  varying float vFade;
+  varying float vMix;
+
+  void main() {
+    vec3 p = position;
+    float span = ${(PARTICLE_NEAR - PARTICLE_FAR).toFixed(1)};
+    p.z  = ${PARTICLE_FAR.toFixed(1)} + mod(p.z - ${PARTICLE_FAR.toFixed(1)} + uTime * ${PARTICLE_DRIFT.toFixed(2)}, span);
+    p.x += sin(uTime * 0.05 + aSeed * 6.2832)  * 0.5;
+    p.y += cos(uTime * 0.04 + aSeed * 12.566)  * 0.4;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_Position  = projectionMatrix * mv;
+    gl_PointSize = mix(1.5, 4.0, fract(aSeed * 5.1)) * uPixelRatio
+                 * clamp(9.0 / -mv.z, 0.2, 2.2);
+    float tw   = 0.55 + 0.45 * sin(uTime * mix(0.3, 1.5, fract(aSeed * 7.31)) + aSeed * 40.0);
+    float far  = smoothstep(${PARTICLE_FAR.toFixed(1)}, ${(PARTICLE_FAR + 6).toFixed(1)}, p.z);
+    float near = 1.0 - smoothstep(${(PARTICLE_NEAR - 4).toFixed(1)}, ${PARTICLE_NEAR.toFixed(1)}, p.z);
+    vFade = tw * far * near;
+    vMix  = fract(aSeed * 3.7);
+  }
+`
+
+const PARTICLE_FRAG = /* glsl */ `
+  uniform vec3  uColorA;
+  uniform vec3  uColorB;
+  uniform float uPulse;    // heartbeat pulse at the cursor (0–1), 0 without HR
+  varying float vFade;
+  varying float vMix;
+
+  void main() {
+    float d    = length(gl_PointCoord - 0.5);
+    float disc = smoothstep(0.5, 0.08, d);      // soft round sprite
+    vec3  col  = mix(uColorA, uColorB, vMix) * (0.85 + 0.5 * uPulse);
+    gl_FragColor = vec4(col, disc * vFade * (0.35 + 0.3 * uPulse));
   }
 `
 
@@ -153,6 +233,10 @@ export default class HelixView {
     this._spinVelX = 0
     this._spinVelY = 0
     this._spinCursor = null
+    // Slow-adapting neutral-pose baseline (pose offsets are measured from it)
+    this._poseRef = null
+    // Wall-clock seconds driving the particle field's shader animation
+    this._timeS = 0
     // Per-second quality-weight cache (60 s × 4 ch), stamped by floor(cursor·2)
     this._qw      = new Float32Array(WINDOW_S * 4)
     this._qwStamp = -1
@@ -184,8 +268,10 @@ export default class HelixView {
     this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
     this._renderer.setClearColor(0x000000, 1)
     this._scene  = new THREE.Scene()
-    this._camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50)
-    this._camera.position.set(0, 0.6, 9)
+    // Wide FOV + close camera exaggerate depth: in the face-on view the oldest
+    // coils (farthest away) shrink markedly, emphasizing the newest data.
+    this._camera = new THREE.PerspectiveCamera(60, 1, 0.1, 50)
+    this._camera.position.set(0, 0.6, 7.2)
     this._camera.lookAt(0, 0, 0)
     // Outer group: accumulated screen-space spin from gyro impulses.
     // Inner group: face-on base tilt + eased head pose + idle spin.
@@ -200,6 +286,10 @@ export default class HelixView {
       this._group.add(mesh)
       return mesh
     })
+    // Particle backdrop sits directly on the scene — a fixed field the helix
+    // rotates within, not something that swings with head pose.
+    this._particles = this._makeParticles(palette)
+    this._scene.add(this._particles)
     this._builtCursor = -Infinity
     this._qwStamp = -1
     this._inited = true
@@ -233,6 +323,7 @@ export default class HelixView {
     this._renderer.setSize(rect.width, rect.height, false)
     this._camera.aspect = rect.width / Math.max(1, rect.height)
     this._camera.updateProjectionMatrix()
+    if (this._particles) this._particles.material.uniforms.uPixelRatio.value = dpr
   }
 
   /**
@@ -249,6 +340,7 @@ export default class HelixView {
     canvas.replaceWith(canvas.cloneNode(true))
     this._renderer = this._scene = this._camera = this._group = this._spinGroup = null
     this._strands = null
+    this._particles = null
     this._inited = false
     this._suspended = true
   }
@@ -275,6 +367,11 @@ export default class HelixView {
         mesh.material.uniforms.uColor.value.set(palette.colors[ch])
       })
     }
+    if (this._particles) {
+      const u = this._particles.material.uniforms
+      u.uColorA.value.set(palette.colors[0])
+      u.uColorB.value.set(palette.colors[3])
+    }
     return palette.name
   }
 
@@ -285,6 +382,8 @@ export default class HelixView {
     if (!this._inited || !this._visible) return
     const dt = Math.min(0.1, (nowMs - this._lastMs) / 1000) || 0.016
     this._lastMs = nowMs
+    this._timeS += dt
+    let pulseNow = 0   // heartbeat pulse at the cursor, fed to the particles
 
     const store = this._store
     if (store) {
@@ -304,13 +403,27 @@ export default class HelixView {
         u.uOmega.value      = (bpm / 60) * 2 * Math.PI
         u.uPulseAmp.value   = phase !== null && bpm > 0 ? PULSE_AMP : 0
       }
+      if (phase !== null && bpm > 0) {
+        const s = (Math.sin(phase) + 1) * 0.5
+        pulseNow = s * s * s   // same cubed-sine shape as the strand pulse
+      }
 
       // Head pose (from stored accel, not live EEGManager state) eased toward,
       // as an offset from the face-on base tilt: neutral head = face-on view,
       // ~45° of pitch swings the form all the way to the side (profile) view.
+      // The offset is measured from a slowly-adapting baseline rather than
+      // absolute gravity, so a held tilt (or a headset worn at an angle)
+      // relaxes back to face-on over ~POSE_REF_TAU while transient movement
+      // still swings the view immediately.
       const pose = store.headPoseAt(cursor)
-      const tx = FACE_TILT_X + (pose ? pose.pitch * POSE_GAIN : 0)
-      const tz = pose ? pose.roll * POSE_GAIN : 0
+      if (pose) {
+        if (!this._poseRef) this._poseRef = { pitch: pose.pitch, roll: pose.roll }
+        const kb = 1 - Math.exp(-dt / POSE_REF_TAU)
+        this._poseRef.pitch += (pose.pitch - this._poseRef.pitch) * kb
+        this._poseRef.roll  += (pose.roll  - this._poseRef.roll)  * kb
+      }
+      const tx = FACE_TILT_X + (pose ? (pose.pitch - this._poseRef.pitch) * POSE_GAIN : 0)
+      const tz = pose ? (pose.roll - this._poseRef.roll) * POSE_GAIN : 0
       const k = 1 - Math.exp(-dt / POSE_TAU)
       this._group.rotation.x += (tx - this._group.rotation.x) * k
       this._group.rotation.z += (tz - this._group.rotation.z) * k
@@ -334,7 +447,24 @@ export default class HelixView {
       this._spinVelX = (this._spinVelX + this._sharp(gy) * SPIN_GAIN * dCur) * decay
       this._spinGroup.rotation.y += this._spinVelY * dt
       this._spinGroup.rotation.x += this._spinVelX * dt
+
+      // Once the spin has wound down, ease the accumulated rotation back to
+      // the nearest full revolution (shortest way to identity) so the form
+      // always settles into the face-on default instead of staying stranded
+      // wherever the spin happened to stop.
+      if (Math.abs(this._spinVelX) + Math.abs(this._spinVelY) < SPIN_SETTLE_VEL) {
+        const kr = 1 - Math.exp(-dt / SPIN_RETURN_TAU)
+        const TWO_PI = 2 * Math.PI
+        const rx = this._spinGroup.rotation.x
+        const ry = this._spinGroup.rotation.y
+        this._spinGroup.rotation.x += (Math.round(rx / TWO_PI) * TWO_PI - rx) * kr
+        this._spinGroup.rotation.y += (Math.round(ry / TWO_PI) * TWO_PI - ry) * kr
+      }
     }
+
+    const pu = this._particles.material.uniforms
+    pu.uTime.value  = this._timeS
+    pu.uPulse.value = pulseNow
 
     this._renderer.render(this._scene, this._camera)
   }
@@ -466,6 +596,38 @@ export default class HelixView {
       }
     }
     return this._qw
+  }
+
+  _makeParticles(palette) {
+    const geo  = new THREE.BufferGeometry()
+    const pos  = new Float32Array(PARTICLE_COUNT * 3)
+    const seed = new Float32Array(PARTICLE_COUNT)
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      pos[i * 3]     = (Math.random() * 2 - 1) * PARTICLE_SPREAD
+      pos[i * 3 + 1] = (Math.random() * 2 - 1) * PARTICLE_SPREAD
+      pos[i * 3 + 2] = PARTICLE_FAR + Math.random() * (PARTICLE_NEAR - PARTICLE_FAR)
+      seed[i] = Math.random()
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    geo.setAttribute('aSeed',    new THREE.BufferAttribute(seed, 1))
+    const mat = new THREE.ShaderMaterial({
+      vertexShader:   PARTICLE_VERT,
+      fragmentShader: PARTICLE_FRAG,
+      uniforms: {
+        uTime:       { value: 0 },
+        uPulse:      { value: 0 },
+        uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
+        uColorA:     { value: new THREE.Color(palette.colors[0]) },
+        uColorB:     { value: new THREE.Color(palette.colors[3]) },
+      },
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+    const points = new THREE.Points(geo, mat)
+    // The shader wraps z past the static positions' bounds — skip culling.
+    points.frustumCulled = false
+    return points
   }
 
   _makeStrand(color) {

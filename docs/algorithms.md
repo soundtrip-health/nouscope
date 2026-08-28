@@ -1032,7 +1032,11 @@ braided 90° apart around the helix axis; newest data sits at the head and time
 extrudes away at constant speed. By default the form **faces the viewer** —
 the axis points at the camera (`FACE_TILT_X = π/2` base tilt), so the newest
 samples read as a circle of raw waveform up front; tilting the head swings it
-toward the side (profile) view. Toggled by the `◉ Helix` button in `#eeg-controls`; it
+toward the side (profile) view, and both the pose offset and any accumulated
+gyro spin always settle back to that face-on default (Stage 4). Recency is
+emphasized — older coils fade, thin, and recede with perspective while the
+newest few seconds glow (Stage 6) — and a palette-tinted particle field
+drifts behind the form (Stage 7). Toggled by the `◉ Helix` button in `#eeg-controls`; it
 replaces the `AnalysisDisplay` panel grid but shares the same `SessionStore`,
 `Scrubber`, and cursor, so it works identically at ● LIVE, scrubbed back, and
 on loaded `.jsonl` files.
@@ -1143,10 +1147,17 @@ samples of any axis.
 rather than snapping to it. The target is an **offset from the face-on base
 tilt**, so a neutral head shows the circle end-on and tilting swings toward
 the profile view — with `POSE_GAIN = 2.0`, ~45° of head pitch
-(`π/2 / POSE_GAIN`) reaches the full side view:
+(`π/2 / POSE_GAIN`) reaches the full side view. The offset is measured not
+from absolute gravity but from a **slowly-adapting neutral-pose baseline**
+(`poseRef`, EMA with `POSE_REF_TAU = 6 s`): a headset worn at an angle, or a
+tilt the user holds, relaxes back to the face-on view over ~6 s instead of
+parking the form off-axis indefinitely, while transient head movement still
+swings the view immediately (the baseline barely moves within `POSE_TAU`):
 
 ```
-target = { rotX: FACE_TILT_X + pitch · POSE_GAIN, rotZ: roll · POSE_GAIN }
+poseRef += (pose - poseRef) · (1 - exp(-dt / POSE_REF_TAU))
+target   = { rotX: FACE_TILT_X + (pitch - poseRef.pitch) · POSE_GAIN,
+             rotZ: (roll - poseRef.roll) · POSE_GAIN }
 rotation += (target - rotation) · (1 - exp(-dt / POSE_TAU))     // POSE_TAU = 0.25 s
 ```
 
@@ -1177,6 +1188,21 @@ Since an exponentially damped velocity `v₀` sweeps a total angle of `v₀ · �
 a brisk ~60–90° head movement (`v₀ ≈ 3–4.5` rad/s) carries the form through at
 least one full revolution before winding down. Each gyro channel is the mean
 over the 0.25 s before the cursor (0 if none).
+
+**Settling back after a spin.** Only the spin *velocity* decays above — the
+accumulated rotation would otherwise leave the form stranded at whatever
+angle the spin ended on. Once the remaining spin speed
+(`|velX| + |velY|`) drops below `SPIN_SETTLE_VEL = 0.3` rad/s, a return
+spring eases each outer-group axis toward its **nearest multiple of 2π**
+(identity orientation via the shortest arc, ≤ π):
+
+```
+rotation += (round(rotation / 2π) · 2π - rotation) · (1 - exp(-dt / SPIN_RETURN_TAU))
+```
+
+`SPIN_RETURN_TAU = 1.2` s. Together with the pose baseline above, this
+guarantees the view always comes back to the face-on default a few seconds
+after any amount of head movement.
 
 ### Stage 5 — Heartbeat pulse propagation
 
@@ -1235,6 +1261,20 @@ Work is split between an infrequent CPU pass and a per-frame GPU pass:
   pulse (Stage 5), softens the ribbon edges, and modulates brightness by EEG
   magnitude and quality (Stage 3).
 
+**Recency emphasis** — the newest data is the subject; history recedes but
+stays legible, and regains prominence when the form swings to the profile
+view:
+
+- *Age fade*: fragment alpha × `mix(1, FADE_MIN, smoothstep(0, 0.9, age/60))`
+  (`FADE_MIN = 0.15`) — the oldest coils sit at 15 % opacity.
+- *Head glow*: brightness + `HEAD_GLOW · smoothstep(HEAD_GLOW_S, 0, age)`
+  (`HEAD_GLOW = 0.35`, `HEAD_GLOW_S = 4 s`) lifts the newest few seconds.
+- *Width taper*: the ribbon taper runs `TAIL_TAPER = 0.3` → 1.0 over age
+  (was 0.6 → 1.0).
+- *Perspective*: the camera is wide and close (FOV 60°, `z = 7.2` vs the
+  original 45°/`z = 9`), so in the face-on view the oldest coils — farthest
+  from the camera along the axis — render ~2.4× smaller than the head.
+
 Blending is additive (`THREE.AdditiveBlending`, `depthWrite: false` — no
 sorting needed) and assumes the near-black `--color-bg` (`#000000`): strands
 and pulses brighten where they overlap instead of occluding each other.
@@ -1254,6 +1294,34 @@ frames when nothing is dirty (e.g. while paused), which would freeze the pose
 easing and idle spin along with it. `renderAt(store, cursor)`, called from the
 same scrubber fan-out that feeds `AnalysisDisplay`, only caches the store and
 cursor; all per-frame work happens inside `_frame`.
+
+### Stage 7 — Particle backdrop
+
+A field of `PARTICLE_COUNT = 1400` soft additive motes (`THREE.Points`, one
+draw call) fills the space behind and around the helix. It sits directly on
+the scene — a fixed field the helix rotates *within*, not something that
+swings with head pose. The entire animation is a pure function of each
+mote's static attributes (`position`, `aSeed`) and a `uTime` uniform, so the
+CPU cost per frame is one uniform write:
+
+- **Drift**: constant `PARTICLE_DRIFT = 0.3` world-units/s toward the viewer
+  — the same direction time flows along the helix — wrapping in the vertex
+  shader between `PARTICLE_FAR = −24` and `PARTICLE_NEAR = +5` (world z),
+  with a gentle seeded per-mote x/y sway. Alpha fades in over the 6 units
+  after the far plane and out over the 4 units before the near plane, so
+  motes never pop.
+- **Twinkle**: seeded sinusoidal brightness (0.1–1.0) at 0.3–1.5 rad/s.
+- **Heartbeat breathing**: the same cubed-sine pulse value the strands use at
+  the cursor (Stage 5) is passed as `uPulse` — motes brighten ~50 % at each
+  systole, and sit at their base level when there's no HR. This is the one
+  data-driven quantity in the field; drift and twinkle run on wall-clock time
+  like the idle spin (presentational, not scrub-tied).
+- **Color**: each mote mixes between the first and last colors of the active
+  strand palette (`uColorA`/`uColorB`, updated live by the palette button).
+
+Point size attenuates with view depth (clamped), scaled by the device pixel
+ratio; the sprite is a radial `smoothstep` disc. `frustumCulled = false`
+(the shader wraps z past the static positions' bounds).
 
 ### View toggle & context budget
 
@@ -1279,13 +1347,24 @@ recreates the GL state lazily the next time that view is shown.
 | `EEG_GAIN` | 0.70 | World units of radial deflection per `EEG_SCALE` µV |
 | `HALF_WIDTH` | 0.03 | Ribbon half-width, world units |
 | `BASE_OPACITY` | 0.85 | Base fragment alpha before quality/pulse |
-| `POSE_GAIN` | 0.6 | Head pitch/roll → form rotation |
+| `POSE_GAIN` | 2.0 | Head pitch/roll offset → form rotation |
 | `POSE_TAU` | 0.25 s | Easing time constant toward target pose |
+| `POSE_REF_TAU` | 6.0 s | Neutral-pose baseline adaptation |
 | `IDLE_SPIN_RAD_S` | 0.05 rad/s | Always-on presentational spin |
-| `GYRO_GAIN` | 0.002 | dps → rad/s² spin impulse |
-| `GYRO_DAMP_TAU` | 1.5 s | Spin velocity decay |
+| `SPIN_THRESH_DPS` | 100 dps | Gyro gate below which head motion imparts no spin |
+| `SPIN_GAIN` | 0.05 | Degrees of sharp rotation → rad/s of spin velocity |
+| `SPIN_DAMP_TAU` | 2.0 s | Spin velocity decay |
+| `SPIN_SETTLE_VEL` | 0.3 rad/s | Remaining spin below which the return spring engages |
+| `SPIN_RETURN_TAU` | 1.2 s | Easing back to face-on after a spin |
 | `PULSE_VEL` | 20.0 | Seconds-of-helix-age traversed per second of phase |
 | `PULSE_AMP` | 0.5 | Brightness modulation depth |
+| `FADE_MIN` | 0.15 | Strand alpha multiplier at the oldest sample |
+| `TAIL_TAPER` | 0.3 | Ribbon width multiplier at the oldest sample |
+| `HEAD_GLOW` / `HEAD_GLOW_S` | 0.35 / 4 s | Brightness lift at the head and its span |
+| `PARTICLE_COUNT` | 1400 | Backdrop motes |
+| `PARTICLE_SPREAD` | 9 | x/y half-extent of the particle field |
+| `PARTICLE_NEAR` / `PARTICLE_FAR` | +5 / −24 | z wrap planes of the drift |
+| `PARTICLE_DRIFT` | 0.3 | World units/s toward the viewer |
 | `REBUILD_EPS_S` | 0.08 s | Cursor movement that triggers a CPU rebuild |
 
 These are isolated aesthetic knobs — tuning them never touches the structural
@@ -1296,7 +1375,9 @@ formulas above.
 All fall out of the design above rather than being special-cased: no MSE yet
 → `DEFAULT_N` mid-tightness; `NaN` EEG (pre-session, a gap, or disconnect) →
 invisible, so a strand visibly grows as the session lengthens and fades across
-a dropout rather than spiking; no HR → `uPulseAmp = 0`, flat brightness; no
+a dropout rather than spiking; no HR → `uPulseAmp = 0`, flat strand
+brightness, and the particle field stops breathing (`uPulse = 0`) but keeps
+drifting and twinkling; no
 accel → rotation eases toward neutral instead of a stale pose; loaded `.jsonl`
 files take the identical path, since every quantity is derived from
 store + cursor with no live-manager dependency.
