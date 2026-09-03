@@ -9,9 +9,14 @@
  * it toward the side (profile) view, and both the pose offset and any gyro
  * spin always settle back to that face-on default. Recency is emphasized:
  * older coils fade, thin, and recede with perspective while the newest few
- * seconds glow. A palette-tinted particle field drifts slowly toward the
- * viewer behind the form, breathing with the heartbeat. Every visual quantity
- * is derived from the SessionStore at an
+ * seconds glow. Behind the form, slowly swirling palette-tinted clouds fill
+ * the frame — their swirl loosely follows the EEG's multiscale entropy (calm
+ * → long laminar bands, complex → tight turbulent curls) — and a
+ * palette-tinted particle field drifts through them toward the viewer.
+ * Clouds, motes and strands all breathe on the heartbeat, whose phase comes
+ * from `SessionStore.pulseAt` (a beat-locked, accelerometer-conditioned
+ * harmonic fit of the stored PPG — §4b) rather than a free-running rate
+ * oscillator. Every visual quantity is derived from the SessionStore at an
  * absolute time, never from live manager state, so the view is scrub-correct:
  * it works following the ● LIVE edge, dragged back through history, and on
  * loaded .jsonl files identically.
@@ -27,7 +32,8 @@
  *    centerline (θ anchored at the head so the newest point is angularly
  *    stable), radial/tangent vectors, normalized EEG values, quality weights.
  *  - GPU, every frame: radial EEG displacement, camera-facing ribbon
- *    expansion, traveling heartbeat brightness pulse, quality ghosting.
+ *    expansion, traveling heartbeat brightness pulse, quality ghosting; the
+ *    cloud backdrop (a reduced-resolution render target) and particle field.
  *
  * Owns its own rAF loop (the Scrubber's loop skips idle frames, which would
  * freeze the pose easing and idle spin while paused). `renderAt` — called
@@ -77,9 +83,20 @@ const SPIN_RETURN_TAU = 1.2    // s, easing back to face-on after a spin
 // relaxes back to the face-on view over ~POSE_REF_TAU instead of parking the
 // form off-axis forever. Transient tilts still swing the view immediately.
 const POSE_REF_TAU    = 6.0    // s, neutral-pose baseline adaptation
-// Pulse
+// Pulse — phase/rate/reliability from SessionStore.pulseAt (beat-locked)
 const PULSE_VEL       = 20.0   // seconds-of-helix-arc traversed per second
 const PULSE_AMP       = 0.5    // brightness modulation depth
+// Pulse amplitude follows fit reliability: fully on above PULSE_W_HI, off
+// below PULSE_W_LO (motion artifact / no PPG), eased over PULSE_GAIN_TAU so the
+// pulse fades rather than cutting out. PULSE_JUMP_TAU: while playing
+// continuously, any discontinuity in the phase source (the live edge's next
+// fit landing) is absorbed into an offset that decays away, so the visible
+// pulse never skips; a seek resets the offset so the phase snaps instead.
+const PULSE_W_LO      = 0.25
+const PULSE_W_HI      = 0.55
+const PULSE_GAIN_TAU  = 1.0    // s
+const PULSE_JUMP_TAU  = 1.5    // s
+const PULSE_SEEK_S    = 0.25   // cursor jump beyond this counts as a seek
 // Recency emphasis: the newest data is the subject — older coils fade toward
 // FADE_MIN alpha, thin toward TAIL_TAPER width, and the head few seconds get
 // an extra brightness lift. Combined with the perspective camera (old data is
@@ -98,11 +115,37 @@ const PARTICLE_SPREAD = 9      // x/y half-extent of the field, world units
 const PARTICLE_NEAR   = 5.0    // wrap plane nearest the camera (world z)
 const PARTICLE_FAR    = -24.0  // wrap plane farthest from the camera (world z)
 const PARTICLE_DRIFT  = 0.3    // world units/s toward the viewer
+// Cloud backdrop: domain-warped value-noise clouds on a fullscreen quad,
+// rendered at CLOUD_RES × the canvas's CSS size (clouds are smooth, so the
+// upsample is invisible and the fill cost stays small). Swirl shape follows
+// the normalized MSE complexity at the cursor, eased over CLOUD_SWIRL_TAU
+// ("loosely coupled"): low entropy stretches the field into long laminar
+// bands with gentle warping; high entropy tightens it into turbulent curls
+// with stronger rotation and rougher detail. Cloud time runs on the wall
+// clock (presentational, like idle spin), paced slightly faster with entropy.
+const CLOUD_RES         = 0.4
+const CLOUD_SWIRL_TAU   = 5.0  // s, entropy → swirl easing
+const CLOUD_PACE_CALM   = 0.7  // cloud-seconds per wall second at n = 0
+const CLOUD_PACE_OPEN   = 1.4  // at n = 1
+const CLOUD_PULSE_LIFT  = 0.22 // brightness lift at systole
+const CLOUD_PULSE_DILATE= 0.03 // radial dilation of the field at systole
 // Rebuild throttle: geometry only rebuilds when the cursor has moved this far
 // (~12 Hz while following live; any seek exceeds it instantly; paused → none).
 const REBUILD_EPS_S   = 0.08
 
 const Q_WEIGHT = { good: 1.0, marginal: 0.5, poor: 0.0 }
+
+function smoothstep(e0, e1, x) {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
+  return t * t * (3 - 2 * t)
+}
+/** Wrap an angle to (−π, π]. */
+function wrapPi(x) {
+  const TWO_PI = 2 * Math.PI
+  x %= TWO_PI
+  if (x < 0) x += TWO_PI
+  return x > Math.PI ? x - TWO_PI : x
+}
 
 // ── Strand palettes ─────────────────────────────────────────────────────────
 // One themed family per palette, four close-hue colors (TP9, AF7, AF8, TP10 in
@@ -157,10 +200,11 @@ const FRAG_SHADER = /* glsl */ `
   varying float vEegMag;
 
   void main() {
-    // Cubed-sine pulse traveling down the helix from the newest point — the
-    // same waveform shape as EEGManager's live heartPulse oscillator.
+    // Cubed-cosine pulse traveling down the helix from the newest point:
+    // phase 0 ≡ systolic peak (SessionStore.pulseAt convention), sharp rise
+    // and slow decay like the systolic/diastolic shape of a PPG cycle.
     float ph    = uPulsePhase - (vAge / uPulseVel) * uOmega;
-    float s     = (sin(ph) + 1.0) * 0.5;
+    float s     = (cos(ph) + 1.0) * 0.5;
     float pulse = s * s * s * uPulseAmp;
     // Recency: newest few seconds glow, old coils fade toward FADE_MIN.
     float head  = ${HEAD_GLOW.toFixed(2)} * smoothstep(${HEAD_GLOW_S.toFixed(1)}, 0.0, vAge);
@@ -217,6 +261,112 @@ const PARTICLE_FRAG = /* glsl */ `
   }
 `
 
+// Cloud backdrop. Rendered off-screen at reduced resolution into a render
+// target, then blitted as the first thing in the main scene. Domain-warped
+// fbm (Quilez-style p → fbm(p + warp·rot(q)) → fbm(p + warp·rot(r))) with a
+// large-scale rotation field: the per-point warp direction is rotated by an
+// angle drawn from a slowly-evolving low-frequency noise, scaled by uSwirl —
+// that rotation is what turns drifting bands into eddies. Every shape
+// parameter (anisotropic stretch, warp amplitude, swirl angle, octave gain)
+// is a mix on uSwirl, so the coupling to entropy is continuous.
+const CLOUD_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`
+
+const CLOUD_FRAG = /* glsl */ `
+  precision highp float;
+  uniform float uTime;     // cloud time (entropy-paced seconds)
+  uniform vec2  uAspect;   // (width/height, 1)
+  uniform float uSwirl;    // eased normalized entropy, 0–1
+  uniform float uPulse;    // heartbeat pulse 0–1, already reliability-gated
+  uniform vec3  uColorA;   // body tint
+  uniform vec3  uColorB;   // bright tint
+  uniform vec3  uColorC;   // highlight tint in turbulent regions
+  varying vec2 vUv;
+
+  float hash(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+  }
+  float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);   // quintic — no visible cells
+    float n000 = hash(i),                   n100 = hash(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash(i + vec3(0.0, 1.0, 0.0)), n110 = hash(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash(i + vec3(0.0, 0.0, 1.0)), n101 = hash(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash(i + vec3(0.0, 1.0, 1.0)), n111 = hash(i + vec3(1.0, 1.0, 1.0));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+  }
+  float fbm(vec3 p, float gain) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; i++) {
+      v += a * vnoise(p);
+      p = p * 2.03 + vec3(1.7, 9.2, 3.1);
+      a *= gain;
+    }
+    return v;
+  }
+
+  void main() {
+    vec2 uv = (vUv - 0.5) * 2.0 * uAspect;    // centered, aspect-correct
+    float n = uSwirl;
+    // Heartbeat breath: the whole field dilates from the center at systole.
+    vec2 p = uv / (1.0 + ${CLOUD_PULSE_DILATE.toFixed(3)} * uPulse);
+    // Entropy → form: calm = long horizontal bands, complex = isotropic curls.
+    p.x *= mix(0.55, 1.0, n);
+    p *= 1.5;
+    float gain = mix(0.46, 0.58, n);         // roughness of fine detail
+    float t = uTime;
+    // Large-scale rotation field — the swirl. Its angle range grows with n.
+    float ang = mix(0.5, 3.4, n) * (fbm(vec3(p * 0.3, t * 0.02), 0.5) - 0.5) * 2.0;
+    mat2 R = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+    float warp = mix(1.0, 2.8, n);
+    vec2 q = vec2(fbm(vec3(p, t * 0.05), gain),
+                  fbm(vec3(p + vec2(5.2, 1.3), t * 0.05 + 3.0), gain)) - 0.5;
+    q = R * q;
+    vec2 pq = p + warp * q;
+    vec2 r = vec2(fbm(vec3(pq + vec2(1.7, 9.2), t * 0.04), gain),
+                  fbm(vec3(pq + vec2(8.3, 2.8), t * 0.04 + 7.0), gain)) - 0.5;
+    r = R * r;
+    float f = fbm(vec3(p + warp * r, t * 0.03), gain);
+    // Density and tinting
+    float body   = smoothstep(0.28, 0.80, f);
+    float bright = smoothstep(0.55, 0.95, f);
+    float eddy   = clamp(length(r) * 2.2, 0.0, 1.0) * body;   // highlights where the warp is strongest
+    vec3 col = uColorA * 0.42 * body;
+    col = mix(col, uColorB * 0.55, bright * 0.75);
+    col += uColorC * 0.22 * eddy;
+    // Keep the center darker so the helix stays the subject; soft vignette.
+    float rad = length(uv);
+    col *= mix(0.35, 1.0, smoothstep(0.0, 1.25, rad));
+    col *= 1.0 - 0.45 * smoothstep(1.1, 2.0, rad);
+    col *= 1.0 + ${CLOUD_PULSE_LIFT.toFixed(3)} * uPulse;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`
+
+// Blit of the cloud render target as the main scene's backdrop (drawn first,
+// no depth), so the additive strands and motes composite over it.
+const BACKDROP_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 1.0, 1.0);
+  }
+`
+const BACKDROP_FRAG = /* glsl */ `
+  uniform sampler2D uMap;
+  varying vec2 vUv;
+  void main() { gl_FragColor = vec4(texture2D(uMap, vUv).rgb, 1.0); }
+`
+
 export default class HelixView {
   constructor() {
     this._inited    = false
@@ -237,6 +387,14 @@ export default class HelixView {
     this._poseRef = null
     // Wall-clock seconds driving the particle field's shader animation
     this._timeS = 0
+    // Cloud backdrop state: eased normalized entropy and entropy-paced time
+    this._swirl  = DEFAULT_N
+    this._cloudT = 0
+    // Pulse state: eased reliability gain, jump-absorbing phase offset, and
+    // the (phase, cursor) the previous frame showed
+    this._pulseGain   = 0
+    this._pulseOffset = 0
+    this._pulsePrev   = null   // { phase, cursor }
     // Per-second quality-weight cache (60 s × 4 ch), stamped by floor(cursor·2)
     this._qw      = new Float32Array(WINDOW_S * 4)
     this._qwStamp = -1
@@ -286,8 +444,10 @@ export default class HelixView {
       this._group.add(mesh)
       return mesh
     })
-    // Particle backdrop sits directly on the scene — a fixed field the helix
+    // Cloud backdrop (off-screen pass) and its blit quad, then the particle
+    // field — both sit directly on the scene as fixed fields the helix
     // rotates within, not something that swings with head pose.
+    this._makeClouds(palette)
     this._particles = this._makeParticles(palette)
     this._scene.add(this._particles)
     this._builtCursor = -Infinity
@@ -324,6 +484,11 @@ export default class HelixView {
     this._camera.aspect = rect.width / Math.max(1, rect.height)
     this._camera.updateProjectionMatrix()
     if (this._particles) this._particles.material.uniforms.uPixelRatio.value = dpr
+    if (this._cloudRT) {
+      this._cloudRT.setSize(Math.max(1, Math.round(rect.width * CLOUD_RES)),
+                            Math.max(1, Math.round(rect.height * CLOUD_RES)))
+      this._cloudMat.uniforms.uAspect.value.set(rect.width / Math.max(1, rect.height), 1)
+    }
   }
 
   /**
@@ -334,6 +499,8 @@ export default class HelixView {
   suspend() {
     if (!this._inited) return
     if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0 }
+    if (this._cloudRT) { this._cloudRT.dispose(); this._cloudRT = null }
+    this._cloudScene = this._cloudCamera = this._cloudMat = null
     this._renderer.dispose()
     this._renderer.forceContextLoss()
     const canvas = this._renderer.domElement
@@ -372,6 +539,7 @@ export default class HelixView {
       u.uColorA.value.set(palette.colors[0])
       u.uColorB.value.set(palette.colors[3])
     }
+    if (this._cloudMat) this._setCloudColors(palette)
     return palette.name
   }
 
@@ -393,20 +561,50 @@ export default class HelixView {
         this._builtCursor = cursor
       }
 
-      // Pulse: phase is cursor-derived, so it freezes when playback pauses.
-      const phase = store.heartPhaseAt(cursor)
-      const hr    = store.sampleAt('hr', cursor)
-      const bpm   = hr && hr.bpm > 0 ? hr.bpm : 0
+      // Pulse: beat-locked phase from the stored PPG (cursor-derived, so it
+      // freezes when playback pauses). Amplitude follows the fit's
+      // reliability, eased; a phase discontinuity during continuous playback
+      // is absorbed into a decaying offset rather than shown as a skip.
+      const pulse = store.pulseAt(cursor)
+      const gainTarget = pulse ? smoothstep(PULSE_W_LO, PULSE_W_HI, pulse.w) : 0
+      this._pulseGain += (gainTarget - this._pulseGain) * (1 - Math.exp(-dt / PULSE_GAIN_TAU))
+      let phase = 0, omega = 0
+      if (pulse) {
+        omega = pulse.hz * 2 * Math.PI
+        const prev = this._pulsePrev
+        if (prev && Math.abs(cursor - prev.cursor) < PULSE_SEEK_S) {
+          // Continuous playback: any jump beyond what the rate predicts over
+          // the cursor step goes into the offset (which then decays away).
+          const predicted = prev.phase + omega * (cursor - prev.cursor)
+          const jump = wrapPi(pulse.phase + this._pulseOffset - predicted)
+          this._pulseOffset -= jump
+          this._pulseOffset *= Math.exp(-dt / PULSE_JUMP_TAU)
+        } else {
+          this._pulseOffset = 0   // seek (or first frame): snap
+        }
+        phase = pulse.phase + this._pulseOffset
+        this._pulsePrev = { phase, cursor }
+      } else {
+        this._pulsePrev = null
+        this._pulseOffset = 0
+      }
       for (const mesh of this._strands) {
         const u = mesh.material.uniforms
-        u.uPulsePhase.value = phase ?? 0
-        u.uOmega.value      = (bpm / 60) * 2 * Math.PI
-        u.uPulseAmp.value   = phase !== null && bpm > 0 ? PULSE_AMP : 0
+        u.uPulsePhase.value = phase
+        u.uOmega.value      = omega
+        u.uPulseAmp.value   = PULSE_AMP * this._pulseGain
       }
-      if (phase !== null && bpm > 0) {
-        const s = (Math.sin(phase) + 1) * 0.5
-        pulseNow = s * s * s   // same cubed-sine shape as the strand pulse
+      {
+        const s = (Math.cos(phase) + 1) * 0.5
+        pulseNow = s * s * s * this._pulseGain   // same cubed-cosine shape as the strands
       }
+
+      // Clouds: swirl follows the normalized MSE complexity at the cursor,
+      // eased over CLOUD_SWIRL_TAU (loose coupling — the form drifts toward
+      // the new regime rather than snapping with each 5 s MSE update).
+      const c = store.complexityAt(cursor)
+      const nTarget = c === null ? DEFAULT_N : Math.min(1, Math.max(0, c / MSE_Y_MAX))
+      this._swirl += (nTarget - this._swirl) * (1 - Math.exp(-dt / CLOUD_SWIRL_TAU))
 
       // Head pose (from stored accel, not live EEGManager state) eased toward,
       // as an offset from the face-on base tilt: neutral head = face-on view,
@@ -466,6 +664,15 @@ export default class HelixView {
     pu.uTime.value  = this._timeS
     pu.uPulse.value = pulseNow
 
+    // Cloud pass (reduced-resolution render target), then the main scene.
+    this._cloudT += dt * (CLOUD_PACE_CALM + this._swirl * (CLOUD_PACE_OPEN - CLOUD_PACE_CALM))
+    const cu = this._cloudMat.uniforms
+    cu.uTime.value  = this._cloudT
+    cu.uSwirl.value = this._swirl
+    cu.uPulse.value = pulseNow
+    this._renderer.setRenderTarget(this._cloudRT)
+    this._renderer.render(this._cloudScene, this._cloudCamera)
+    this._renderer.setRenderTarget(null)
     this._renderer.render(this._scene, this._camera)
   }
 
@@ -596,6 +803,53 @@ export default class HelixView {
       }
     }
     return this._qw
+  }
+
+  /** Cloud render target + off-screen scene, and the backdrop quad that blits it. */
+  _makeClouds(palette) {
+    this._cloudRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false, stencilBuffer: false })
+    this._cloudMat = new THREE.ShaderMaterial({
+      vertexShader:   CLOUD_VERT,
+      fragmentShader: CLOUD_FRAG,
+      uniforms: {
+        uTime:   { value: 0 },
+        uAspect: { value: new THREE.Vector2(1, 1) },
+        uSwirl:  { value: DEFAULT_N },
+        uPulse:  { value: 0 },
+        uColorA: { value: new THREE.Color() },
+        uColorB: { value: new THREE.Color() },
+        uColorC: { value: new THREE.Color() },
+      },
+      depthTest: false,
+      depthWrite: false,
+    })
+    this._setCloudColors(palette)
+    this._cloudScene  = new THREE.Scene()
+    this._cloudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    const cloudQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._cloudMat)
+    cloudQuad.frustumCulled = false
+    this._cloudScene.add(cloudQuad)
+
+    const blit = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.ShaderMaterial({
+        vertexShader:   BACKDROP_VERT,
+        fragmentShader: BACKDROP_FRAG,
+        uniforms: { uMap: { value: this._cloudRT.texture } },
+        depthTest: false,
+        depthWrite: false,
+      }),
+    )
+    blit.frustumCulled = false
+    blit.renderOrder = -1
+    this._scene.add(blit)
+  }
+
+  _setCloudColors(palette) {
+    const u = this._cloudMat.uniforms
+    u.uColorA.value.set(palette.colors[1])
+    u.uColorB.value.set(palette.colors[0])
+    u.uColorC.value.set(palette.colors[3])
   }
 
   _makeParticles(palette) {

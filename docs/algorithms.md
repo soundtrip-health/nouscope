@@ -12,6 +12,7 @@ A second, independent tab — Multi-Track (§12) — reviews several loaded `.js
 2. [BPM Detection](#2-bpm-detection)
 3. [EEG Spectral Band Powers](#3-eeg-spectral-band-powers)
 4. [PPG Heart Rate Detection](#4-ppg-heart-rate-detection)
+4b. [Beat-Locked Pulse Phase — Harmonic Separation](#4b-beat-locked-pulse-phase--accelerometer-conditioned-harmonic-separation)
 5. [IMU Head Pose Estimation](#5-imu-head-pose-estimation)
 6. [EEG Spectrogram Display](#6-eeg-spectrogram-display)
 7. [EEG–Music Entrainment Index](#6--eegmusic-entrainment-index)
@@ -244,7 +245,12 @@ by ~1 bpm at rest, more as beat-to-beat variability grows.
 > Butterworth 0.7–3.5 Hz roughly doubles the tolerable artifact amplitude but
 > does not fix the strong-motion case; a real fix needs accelerometer-referenced
 > adaptive filtering (the IMU is already subscribed) or an explicit
-> motion-gated reject.
+> motion-gated reject. §4b's `PulseTracker` is exactly that fix for the
+> *stored* stream (the helix's pulse): its joint fit with lagged accelerometer
+> regressors keeps the fundamental on the true rate through the same 0.8 Hz /
+> 2.5× artifact (synthetic check: 0.19 rad mean phase error with the
+> accelerometer vs 1.4 rad and a collapse to 0.8 Hz without it). The live
+> `heartRate` readout still comes from MSPTD.
 
 ### Stage 4 — Heartbeat oscillator
 
@@ -256,6 +262,227 @@ heartPulse = s³                         // cubing sharpens the systolic peak
 ```
 
 The cube transform produces a waveform that spikes sharply (simulating the fast systolic peak) and decays slowly (diastolic phase), matching the physiological shape of a PPG waveform.
+
+This oscillator free-runs at the last detected *rate*; it is never re-aligned
+to the beats themselves, so its phase drifts off the real pulse between
+detections. It is used only for the live `heartPulse` field. The helix view's
+pulse comes from §4b instead, which locks phase to the observed cycles.
+
+---
+
+## 4b. Beat-Locked Pulse Phase — Accelerometer-Conditioned Harmonic Separation
+
+**File:** `src/js/managers/PulseTracker.js` — owned by `SessionStore`, exposed
+as `SessionStore.pulseAt(t) → { phase, hz, w } | null`. Consumer: §11 Stage 5.
+
+A closed-form, training-free take on *Physically-Constrained Harmonic
+Separation* (PCHS — Fraihi, Karrakchou & Ghogho, arXiv:2606.30156, 2026),
+which formulates HR estimation from wrist PPG as analysis-by-synthesis: the
+signal is explained by a physics-guided harmonic generator (fundamental f₀
+with K harmonics) plus a motion residual, with the accelerometer *conditioning*
+the artifact separation rather than regressing vital signs, and a per-window
+reliability weight. The paper learns its conditioning with a three-stream CNN
++ FiLM and its residual with a convolutional head; here both are replaced by a
+linear ridge regression on lagged accelerometer channels, fitted **jointly**
+with the harmonics by weighted least squares. That keeps a whole window's fit
+at ~2 ms of plain JS, needs no model, and preserves the properties that
+matter for a visual pulse: the cardiac component is forced into the physical
+band, the motion model can only explain what the accelerometer predicts, and
+the two are orthogonalized by the joint solve (the paper's `L_orth`).
+
+What it outputs is a **phase**, not a rate: `phase` is the cardiac phase at
+`t` with `0 ≡ systolic peak` (cumulative within the local spline segment, so
+callers wrap it), `hz` the instantaneous rate, `w ∈ [0, 1]` the fit
+reliability. Everything is a pure function of the stored `ppg`/`accel`
+streams at absolute times — scrub-correct at ● LIVE, dragged back, and on
+loaded `.jsonl` files — and per-slot results are cached lazily, so seeking
+anywhere costs at most a handful of fits.
+
+### Stage 1 — Window and preprocessing
+
+Fits live on a `HOP_S = 1` s grid; slot `i` fits the window ending at
+`t_i = i·HOP_S`, `WIN_S = 8` s long (shorter down to `MIN_WIN_S = 4` s at the
+session start; nothing before 4 s). A slot is computed only once the PPG grid
+holds one packet past `t_i`, so it is never cached against a half-arrived
+tail. The PPG (raw infrared, 64 Hz) is decimated 2:1 to `FIT_FS = 32` Hz
+(pair averages; a pair with a NaN is missing). More than `MAX_NAN_FRAC = 25 %`
+missing → the slot is invalid (`w = 0`). Otherwise:
+
+```
+x  ← forward-fill NaNs
+x  ← x − movingAverage(x, ±BASELINE_HALF = 24 samples ≈ ±0.75 s)   // baseline b(t): drift + respiration
+w_n = missing ? 0 : RAMP_W0 + (1 − RAMP_W0)·n/(N−1)                // RAMP_W0 = 0.25: recent cycles dominate
+x  ← x / weightedRMS(x)                                             // unit variance, as in the paper
+```
+
+Every column of the regression below (and `x`) is multiplied by `√w_n`, so
+the normal equations solve a weighted LS. The ramp matters because the phase
+is read out at the window's *end*: a rate drifting across the window biases
+an end-phase far less when the last few cycles carry most of the weight.
+
+### Stage 2 — Motion regressors (the accelerometer conditioning)
+
+The 52 Hz accelerometer is linearly resampled onto the fit grid; channels
+`x, y, z` and the rotation-invariant magnitude `|a|` (`ACC_CHANNELS = 4`)
+are each baseline-removed like `x` and scaled to unit RMS, then lagged by
+`ACC_LAGS = {−4, −2, 0, +2, +4}` samples (±125 ms, edge-clamped) → `M = 20`
+regressors `G` (N×M). Fewer than `MIN_ACC_FRAC = 75 %` valid accel samples
+(or no accel stream) → `M = 0` and the fit runs on the harmonic model alone.
+A ridge `RIDGE·N = 0.02·N` on the `G` block keeps the system well posed
+(lags of one axis are highly collinear).
+
+### Stage 3 — Harmonic model and f₀ search (analysis-by-synthesis)
+
+The cardiac component is `K = 3` harmonics with free amplitude and phase:
+
+```
+h(n) = Σ_{k=1..K}  a_k cos(k·θ_n) + b_k sin(k·θ_n),   θ_n = 2π·f₀·τ_n,  τ_n = (2n + 0.5)/64 s
+```
+
+(the paper's `A_k/k · sin(kθ)` with a shared phase is relaxed to per-harmonic
+phases — real PPG harmonics are not phase-aligned; the *frequencies* stay
+locked to integer multiples of f₀, which is the physical constraint that
+matters). `f₀ ∈ [F_MIN, F_MAX] = [0.5, 3.0]` Hz (30–180 bpm).
+
+**Stage A — search.** The motion model is projected out once
+(`x_r = x − G·(GᵀG + λI)⁻¹Gᵀx`), then for every candidate f₀ on a
+`F_COARSE = 0.02` Hz grid the six harmonic columns `H(f₀)` are fitted to `x_r`
+(a 6×6 solve; columns are generated by a rotation recurrence, no per-sample
+trig) and the weighted residual energy `E(f₀) = |x_r|² − βᵀHᵀx_r` recorded;
+the minimum is refined on a `F_FINE = 0.002` Hz grid over `±F_FINE_SPAN =
+0.03` Hz. The harmonic structure disambiguates octaves by itself: a
+candidate at f₀/2 captures only the true fundamental, one at 2f₀ only the
+second harmonic, so the true f₀ has the lowest residual whenever any harmonic
+energy exists.
+
+**Stage B — joint solve.** At the chosen f₀, `[H | G]` (6 + M columns) is
+fitted to `x` in one system, ridge on the `G` block only. The final
+amplitudes, phase and reliability all come from this joint fit — this is
+where the separation is orthogonal rather than sequential (motion regressors
+cannot keep cardiac energy the harmonics explain better, and vice versa).
+
+### Stage 4 — Reliability
+
+With `P_h = |Hβ_H|²`, `P_g = |Gβ_G|²`, `P_r = |x − Hβ_H − Gβ_G|²`:
+
+```
+w = P_h / (P_h + P_r + MOTION_PENALTY·P_g),   MOTION_PENALTY = 0.3
+```
+
+— the cardiac model's share of the window, with the power the accelerometer
+had to explain counting partly against it (a window that needed a large
+motion model is one whose cardiac phase is less certain). Clean simulated
+PPG scores ≈ 0.9; a 2.5× 0.8 Hz sway artifact ≈ 0.35–0.45; the paper's
+learned log-variance head plays the same role.
+
+### Stage 5 — Systolic phase readout
+
+**End-phase refinement.** f₀ is a whole-window estimate, but the phase is
+needed at the window's *end*, and a rate drifting across the window
+(respiratory sinus arrhythmia) makes a single-f₀ fit lag there. So with the
+joint fit's motion part removed (`x − Gβ_G`), the harmonic amplitudes/phases
+are re-fitted at the same f₀ over only the last `PHASE_WIN_S = 3` s (a 6×6
+solve); the read-out below uses those coefficients, so it follows the most
+recent cycles. (In-app check against the simulator, whose rate swings ±4 bpm
+with a 20 s period: worst-case error at true peaks 0.8 → 0.6 rad.)
+
+The synthesized cycle `y(φ) = PPG_SIGN · Σ_k a_k cos kφ + b_k sin kφ` is
+scanned over 128 points for its maximum `φ*` (`PPG_SIGN = +1`: raw infrared
+rises at systole, the same peak convention §4's MSPTD detects on). The slot's
+phase is the model phase at the window end relative to that peak:
+
+```
+phase_i = wrap2π( 2π·f₀·(t_i − t_start) − φ* )
+```
+
+so `phase ≡ 0 (mod 2π)` exactly at systolic peaks.
+
+### Stage 6 — Soft lock and inter-slot spline
+
+A slot with `w ≥ W_ANCHOR = 0.5` is an **anchor**: its own fitted phase and
+rate stand. A weaker slot starts from the last anchor within `LOOKBACK = 6`
+slots integrated forward at the anchor's rate, and moves toward its own fit
+by `gain = smoothstep(W_FLOOR = 0.2, W_ANCHOR, w)`:
+
+```
+held   = wrap2π( phase_r + 2π·f₀_r·(t_i − t_r) )
+phase  = wrap2π( held + gain · wrapπ(phase_i − held) )
+hz     = f₀_r + gain·(f₀_i − f₀_r)
+```
+
+— a confidence-weighted phase-locked loop. An artifact stretch holds its
+course instead of jumping, and the hand-back to clean fits is gradual; a
+hard threshold would flip between two disagreeing phase bases as `w` wavers
+around it (which is what it did before the soft lock: 1.4 rad live-edge
+corrections vs 0.5 rad after). With no anchor in reach the slot's own values
+are used as they are (an invalid slot gives `w = 0`), and amplitude is gated
+on `w` downstream.
+
+Between slots `i` and `i+1` the phase is a cubic Hermite spline: end values
+are the two slot phases, `phase_{i+1}` unwrapped to the 2π multiple nearest
+the rate prediction `phase_i + π·(hz_i + hz_{i+1})·HOP_S`; end slopes are
+`2π·hz_i`, `2π·hz_{i+1}`. `hz` and `w` interpolate linearly. This is C¹
+smooth everywhere and locked to the observed beats — versus §4's oscillator,
+which is only ever rate-correct. At the live edge (slot `i+1` not yet
+computable — the newest fit trails the cursor by up to `EDGE_LOOKBACK = 3`
+slots) the phase is extrapolated from slot `i` at its rate; when the next fit
+lands, the spline replaces the extrapolation, a correction the helix absorbs
+(§11 Stage 5).
+
+Synthetic check (HR ramping 60→78 bpm with respiratory sinus arrhythmia,
+20 s of 0.8 Hz sway at 2.5× pulse amplitude coupled into the PPG): mean
+|phase error| at true peaks 0.20 rad clean / 0.19 rad in motion (1.38 rad in
+motion with the accelerometer withheld — the fundamental then locks to the
+0.8 Hz sway, §4's known failure); max spline rate deviation 0.12 Hz; ~1.7 ms
+per fit.
+
+### Constants
+
+| Constant | Value | Role |
+|---|---|---|
+| `HOP_S` / `WIN_S` / `MIN_WIN_S` | 1 / 8 / 4 s | Fit grid, window, shortest start-up window |
+| `FIT_FS` | 32 Hz | PPG analysis rate (2:1 decimation) |
+| `F_MIN` / `F_MAX` | 0.5 / 3.0 Hz | Physical band for f₀ |
+| `F_COARSE` / `F_FINE` / `F_FINE_SPAN` | 0.02 / 0.002 / ±0.03 Hz | Two-stage f₀ grid |
+| `K` | 3 | Harmonics |
+| `BASELINE_HALF` | 24 samples | ±0.75 s moving-average baseline |
+| `ACC_LAGS` / `ACC_CHANNELS` | {−4,−2,0,2,4} / 4 | Motion regressors: 5 lags × (x, y, z, \|a\|) |
+| `RIDGE` | 0.02·N | Ridge on the motion block |
+| `RAMP_W0` | 0.25 | Row weight at window start |
+| `PHASE_WIN_S` | 3 s | End-phase refinement span (f₀ fixed) |
+| `MAX_NAN_FRAC` / `MIN_ACC_FRAC` | 0.25 / 0.75 | Coverage gates |
+| `MOTION_PENALTY` | 0.3 | Motion power counted against reliability |
+| `W_ANCHOR` / `W_FLOOR` | 0.5 / 0.2 | Soft-lock anchor threshold and correction-gain floor |
+| `LOOKBACK` / `EDGE_LOOKBACK` | 6 / 3 slots | Anchor search; live-edge lag tolerance |
+| `PPG_SIGN` | +1 | Systole = raw-infrared maximum |
+
+### Deviations from the paper
+
+Kept: harmonic generator with bounded f₀ and K = 3; 8 s windows; accelerometer
+as artifact conditioner (not a vitals regressor); joint/orthogonal separation;
+reliability-weighted readout. Replaced: the learned CNN/FiLM conditioning and
+residual head → linear lagged-accelerometer regression; the correlation +
+multi-resolution STFT loss → weighted least squares; the temporal
+total-variation prior on f₀ → the soft lock across slots (per-slot fits are
+kept order-independent so any slot can be computed in isolation, which is
+what makes lazy per-slot caching and scrub-correctness possible). Not
+implemented: respiratory-rate readout; the time-varying `f₀(t)`, `g(t)` within
+a window (the ramp weighting stands in for it at the readout point).
+
+### Graceful degradation
+
+No PPG → `pulseAt` null; PPG but no accel → harmonic model only (the §4
+artifact limitation returns, but reliability still drops on artifacts);
+gaps → missing rows carry zero weight, >25 % missing invalidates the slot
+(`w = 0`, phase held from the last anchor); first 4 s of a session → null.
+
+### References
+
+- Fraihi N., Karrakchou O., Ghogho M. (2026). *Physically-Constrained Harmonic
+  Separation for Robust Heart and Respiratory Rate Estimation from Wrist
+  Photoplethysmography.* arXiv:2606.30156.
+- Reiss A. et al. (2019). *Deep PPG: Large-Scale Heart Rate Estimation with
+  Convolutional Neural Networks* (PPG-DaLiA), Sensors 19(14).
 
 ---
 
@@ -1023,7 +1250,7 @@ one `index` and `timestamp`, which is what `zipSamples` groups on.
 
 ## §11 — Helix View
 
-**Files:** `src/js/ui/HelixView.js`; three query methods on `src/js/managers/SessionStore.js` (`headPoseAt`, `heartPhaseAt`, `complexityAt`)
+**Files:** `src/js/ui/HelixView.js`; three query methods on `src/js/managers/SessionStore.js` (`headPoseAt`, `pulseAt` — §4b's `PulseTracker` — and `complexityAt`)
 
 An artistic, scrub-correct 3D rendering of the same session timeline the panel
 grid draws — not a second data source. The last `PANEL_WINDOWS.helix` seconds
@@ -1035,8 +1262,11 @@ samples read as a circle of raw waveform up front; tilting the head swings it
 toward the side (profile) view, and both the pose offset and any accumulated
 gyro spin always settle back to that face-on default (Stage 4). Recency is
 emphasized — older coils fade, thin, and recede with perspective while the
-newest few seconds glow (Stage 6) — and a palette-tinted particle field
-drifts behind the form (Stage 7). Toggled by the `◉ Helix` button in `#eeg-controls`; it
+newest few seconds glow (Stage 6). Behind the form, slowly swirling
+palette-tinted clouds fill the frame, their swirl loosely following the EEG's
+multiscale entropy (Stage 8), with a palette-tinted particle field drifting
+through them (Stage 7); clouds, motes and strands all breathe on a
+beat-locked heartbeat (Stage 5). Toggled by the `◉ Helix` button in `#eeg-controls`; it
 replaces the `AnalysisDisplay` panel grid but shares the same `SessionStore`,
 `Scrubber`, and cursor, so it works identically at ● LIVE, scrubbed back, and
 on loaded `.jsonl` files.
@@ -1049,8 +1279,8 @@ never re-shapes as later data arrives; scrubbing back re-evaluates the same
 functions at earlier `t` and gets the same picture the live view showed at the
 time. This is also why `headPose` and `heartPulse` — live-only fields on
 `EEGManager` — can't be reused here: replaying history needs their value *at
-each past t*, so `SessionStore` gained `headPoseAt(t)`, `heartPhaseAt(t)`, and
-reuses `complexityAt(t)` (§7) to re-derive them from the stored `accel`/`hr`
+each past t*, so `SessionStore` gained `headPoseAt(t)` and `pulseAt(t)`, and
+reuses `complexityAt(t)` (§7) to re-derive them from the stored `accel`/`ppg`
 streams instead.
 
 ### Stage 1 — Sampling window
@@ -1206,38 +1436,41 @@ after any amount of head movement.
 
 ### Stage 5 — Heartbeat pulse propagation
 
-`heartPhaseAt(t)` (new `SessionStore` method) integrates cumulative heartbeat
-phase over the stored `hr` timeline by step/hold, mirroring §4's live phase
-oscillator but over recorded history instead of real time:
+The pulse phase comes from `SessionStore.pulseAt(cursor)` — §4b's
+accelerometer-conditioned harmonic fit of the stored PPG, which returns
+`{ phase, hz, w }` with `phase ≡ 0 (mod 2π)` at systolic peaks, C¹-smooth
+between fits and locked to the observed beats. It is cursor-derived, so the
+pulse **freezes when playback pauses** — scrub-correct, same as everything
+else in this view. Three view-side steps make it read as one clean beat:
+
+- **Reliability gate.** Pulse amplitude is `PULSE_AMP · gain`, with `gain`
+  eased over `PULSE_GAIN_TAU = 1 s` toward `smoothstep(PULSE_W_LO = 0.25,
+  PULSE_W_HI = 0.55, w)`: a clean fit pulses at full depth, a motion-artifact
+  stretch fades the pulse out rather than letting it jitter, and no PPG at
+  all (`pulseAt` null) fades it to zero.
+- **Jump absorber.** During continuous playback (cursor step <
+  `PULSE_SEEK_S = 0.25` s) any discontinuity in the phase source beyond what
+  the rate predicts over the step — in practice the live edge, when the next
+  fit lands and replaces the extrapolation — is folded into an offset that
+  decays with `PULSE_JUMP_TAU = 1.5 s`, so the visible pulse bends rather than
+  skips. A seek resets the offset: the phase snaps to the new position.
+- **One waveform everywhere.** Strands, motes and clouds all use the same
+  cubed-cosine shape, `s = (cos φ + 1)/2`, `pulse = s³` (sharp systolic rise,
+  slow diastolic decay), so the whole scene breathes together.
+
+The strand fragment shader propagates it down the helix from the newest
+point:
 
 ```
-φ[i] = φ[i-1] + 2π · (max(bpm[i-1], 0) / 60) · (t[i] - t[i-1])
+ph    = uPulsePhase − (age / PULSE_VEL) · uOmega     // age = seconds since the head
+s     = (cos(ph) + 1) / 2
+pulse = s³ · uPulseAmp
 ```
 
-`bpm ≤ 0` placeholder records (§9's `windowMean` note) advance no phase — a
-gap in HR detection freezes the phase rather than jittering it. Querying at
-`t` binary-searches the last record with `t_rec ≤ t` and linearly extrapolates
-phase forward using that record's `bpm`. Because `heartPhaseAt` is
-cursor-derived, the pulse **freezes when playback pauses** — scrub-correct,
-same as everything else in this view.
-
-The fragment shader shapes the pulse with the **same cubed-sine waveform** as
-§4's live oscillator (`s³`, sharp systolic rise / slow diastolic decay), but
-traveling down the helix from the newest point rather than pulsing uniformly:
-
-```
-ph    = uPulsePhase - (age / PULSE_VEL) · uOmega     // age = seconds since the head
-s     = (sin(ph) + 1) / 2
-pulse = s³ · PULSE_AMP
-```
-
-`uOmega = 2π · bpm/60` from `sampleAt('hr', cursor)`; `PULSE_VEL = 20.0`
-seconds-of-helix-age traversed per second of phase — at a resting 60 bpm
-(1 Hz) that puts one full wavelength every 20 s of age, so roughly 3 bands are
-visible across the 60 s window at once. `PULSE_AMP = 0.5` sets the brightness
-modulation depth; it (and the phase term) is forced to 0 whenever there's no
-current HR (`bpm ≤ 0` or `heartPhaseAt` returns `null`), so the strands render
-at flat brightness rather than pulsing on stale data.
+`uOmega = 2π · hz`; `PULSE_VEL = 20.0` seconds-of-helix-age traversed per
+second of phase — at a resting 60 bpm (1 Hz) that puts one full wavelength
+every 20 s of age, so roughly 3 bands are visible across the 60 s window at
+once.
 
 ### Stage 6 — Rendering split & rebuild throttle
 
@@ -1311,17 +1544,74 @@ CPU cost per frame is one uniform write:
   after the far plane and out over the 4 units before the near plane, so
   motes never pop.
 - **Twinkle**: seeded sinusoidal brightness (0.1–1.0) at 0.3–1.5 rad/s.
-- **Heartbeat breathing**: the same cubed-sine pulse value the strands use at
-  the cursor (Stage 5) is passed as `uPulse` — motes brighten ~50 % at each
-  systole, and sit at their base level when there's no HR. This is the one
-  data-driven quantity in the field; drift and twinkle run on wall-clock time
-  like the idle spin (presentational, not scrub-tied).
+- **Heartbeat breathing**: the same reliability-gated cubed-cosine pulse
+  value the strands use at the cursor (Stage 5) is passed as `uPulse` — motes
+  brighten ~50 % at each systole, and sit at their base level when there's no
+  reliable pulse. This is the one data-driven quantity in the field; drift and
+  twinkle run on wall-clock time like the idle spin (presentational, not
+  scrub-tied).
 - **Color**: each mote mixes between the first and last colors of the active
   strand palette (`uColorA`/`uColorB`, updated live by the palette button).
 
 Point size attenuates with view depth (clamped), scaled by the device pixel
 ratio; the sprite is a radial `smoothstep` disc. `frustumCulled = false`
 (the shader wraps z past the static positions' bounds).
+
+### Stage 8 — Cloud backdrop
+
+Behind everything, a fullscreen field of slowly swirling clouds — the
+backdrop the motes drift through. It is rendered off-screen into a
+`WebGLRenderTarget` at `CLOUD_RES = 0.4` × the canvas's CSS size (clouds are
+smooth, so the linear upsample is invisible and the fill cost stays small on
+integrated GPUs) and blitted as the first draw of the main scene (no depth),
+with the additive strands and motes composited over it.
+
+**Form.** Quilez-style domain-warped fbm over 3-D value noise (quintic
+interpolation, 5 octaves, time as the third axis so the field evolves rather
+than scrolls, keeping coordinates bounded):
+
+```
+q = R · (fbm(p, t) , fbm(p + o₁, t))            − 0.5
+r = R · (fbm(p + warp·q + o₂, t), fbm(p + warp·q + o₃, t)) − 0.5
+f = fbm(p + warp·r, t)
+```
+
+where `R` is a rotation by `ang = swirlRange · 2·(fbm_low(p·0.3, t·0.02) − 0.5)`
+— a large-scale, slowly evolving rotation field applied to the warp
+direction. That rotation is what turns drifting bands into eddies: with
+`ang ≈ 0` the warp merely stretches the field; as the angle range grows the
+warp curls around the low-frequency noise's extrema.
+
+**Entropy coupling.** `n = clamp(complexityAt(cursor) / MSE_Y_MAX, 0, 1)`
+(the same normalization Stage 2 uses), eased over `CLOUD_SWIRL_TAU = 5 s` —
+"loosely coupled": the form drifts toward a new regime instead of snapping
+with each 5 s MSE update. Every shape parameter is a `mix` on the eased `n`,
+so the coupling is continuous:
+
+| Parameter | calm (n = 0) | complex (n = 1) | Effect |
+|---|---|---|---|
+| horizontal stretch `p.x ×` | 0.55 | 1.0 | long laminar bands → isotropic curls |
+| warp amplitude | 1.0 | 2.8 | gentle drift → strong folding |
+| swirl angle range | ±0.5 rad | ±3.4 rad | bands → tight eddies |
+| octave gain | 0.46 | 0.58 | soft → rough fine detail |
+| pace (cloud-s per wall-s) | `CLOUD_PACE_CALM = 0.7` | `CLOUD_PACE_OPEN = 1.4` | slower → livelier |
+
+Cloud time is accumulated on the CPU (`cloudT += dt·pace(n)`) so a changing
+pace never jumps the field. It runs on the wall clock like the idle spin —
+presentational; only its *shape* is data-tied.
+
+**Heartbeat.** The Stage 5 pulse is applied twice: a brightness lift of
+`CLOUD_PULSE_LIFT = 0.22` at systole, and a radial dilation of the sampling
+coordinates by `CLOUD_PULSE_DILATE = 0.03` from the screen center — the whole
+field breathes outward on each beat. Because the pulse source is beat-locked
+and reliability-gated, this reads as a clean breath rather than a flicker.
+
+**Tone.** Density `body = smoothstep(0.28, 0.80, f)` tinted with the
+palette's second color (×0.42), `bright = smoothstep(0.55, 0.95, f)` blending
+toward the first (×0.55), plus a highlight in the fourth color where the warp
+is strongest (`|r|`, ×0.22). A radial darkening (×0.35 at the center) keeps
+the helix the subject, and a soft vignette fades the corners. Colors follow
+the palette button live.
 
 ### View toggle & context budget
 
@@ -1365,6 +1655,13 @@ recreates the GL state lazily the next time that view is shown.
 | `PARTICLE_SPREAD` | 9 | x/y half-extent of the particle field |
 | `PARTICLE_NEAR` / `PARTICLE_FAR` | +5 / −24 | z wrap planes of the drift |
 | `PARTICLE_DRIFT` | 0.3 | World units/s toward the viewer |
+| `PULSE_W_LO` / `PULSE_W_HI` | 0.25 / 0.55 | Reliability range over which pulse amplitude ramps 0 → 1 |
+| `PULSE_GAIN_TAU` | 1.0 s | Pulse amplitude easing |
+| `PULSE_JUMP_TAU` / `PULSE_SEEK_S` | 1.5 s / 0.25 s | Phase-jump absorber decay; cursor step that counts as a seek |
+| `CLOUD_RES` | 0.4 | Cloud render-target scale vs CSS size |
+| `CLOUD_SWIRL_TAU` | 5.0 s | Entropy → swirl easing |
+| `CLOUD_PACE_CALM` / `CLOUD_PACE_OPEN` | 0.7 / 1.4 | Cloud time rate at n = 0 / 1 |
+| `CLOUD_PULSE_LIFT` / `CLOUD_PULSE_DILATE` | 0.22 / 0.03 | Cloud brightness lift / radial dilation at systole |
 | `REBUILD_EPS_S` | 0.08 s | Cursor movement that triggers a CPU rebuild |
 
 These are isolated aesthetic knobs — tuning them never touches the structural
@@ -1375,17 +1672,22 @@ formulas above.
 All fall out of the design above rather than being special-cased: no MSE yet
 → `DEFAULT_N` mid-tightness; `NaN` EEG (pre-session, a gap, or disconnect) →
 invisible, so a strand visibly grows as the session lengthens and fades across
-a dropout rather than spiking; no HR → `uPulseAmp = 0`, flat strand
-brightness, and the particle field stops breathing (`uPulse = 0`) but keeps
-drifting and twinkling; no
-accel → rotation eases toward neutral instead of a stale pose; loaded `.jsonl`
+a dropout rather than spiking; no PPG, or a fit too unreliable (motion
+artifact) → the pulse gain eases to 0: flat strand brightness, and clouds and
+motes stop breathing but keep swirling, drifting and twinkling; no MSE yet →
+clouds sit at the `DEFAULT_N` mid-swirl; no
+accel → rotation eases toward neutral instead of a stale pose (and the pulse
+fit runs without its motion model); loaded `.jsonl`
 files take the identical path, since every quantity is derived from
 store + cursor with no live-manager dependency.
 
 ### Cross-references
 
-- §4 (PPG/heart rate) for the cubed-sine pulse shape this view's fragment
-  shader reproduces, and the `bpm ≤ 0` convention `heartPhaseAt` respects.
+- §4b (`PulseTracker`) for the beat-locked phase, rate and reliability
+  `pulseAt` supplies to Stage 5; §4 for the live oscillator's cubed pulse
+  shape this view's shaders share (cosine form, peak at phase 0).
+- §7 (MSE) for the `complexity` scalar Stage 2 and Stage 8 both normalize by
+  `MSE_Y_MAX`.
 - §5 (IMU/head pose) for the atan2 tilt formulas `headPoseAt` re-derives from
   stored accelerometer data.
 

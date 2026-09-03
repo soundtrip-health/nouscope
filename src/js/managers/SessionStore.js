@@ -25,6 +25,7 @@
 // Spectrogram bin counts are shared with the renderers (bioRender) so the
 // file-path recompute and the analysis blit can never disagree on column length.
 import { SPEC_BINS as SPEC_MAIN_BINS, SPEC_LO_BINS } from '../ui/bioRender'
+import PulseTracker from './PulseTracker'
 
 const COUNTER_MODULUS = 1 << 16   // muse-js index/sequenceId counters are 16-bit
 
@@ -309,6 +310,9 @@ class GriddedStream {
 
 export default class SessionStore {
   constructor() {
+    // Beat-locked cardiac phase from the stored ppg/accel streams (§4b);
+    // lazily fits and caches per-second windows, so it is reset with the data.
+    this._pulse = new PulseTracker(this)
     this.reset()
   }
 
@@ -348,8 +352,7 @@ export default class SessionStore {
     // Recording-gap scan state (see `gaps()`/`_scanGaps()`) — incremental like above.
     this._gapList = []; this._gapScanned = 0; this._gapRunStart = null
 
-    // Cumulative heartbeat-phase cache for `heartPhaseAt` — incremental like above.
-    this._hrPhase = []
+    this._pulse.reset()
 
     this._empty = true
   }
@@ -775,42 +778,17 @@ export default class SessionStore {
   }
 
   /**
-   * Extend the cumulative heartbeat-phase cache (`_hrPhase`, parallel to
-   * `this.hr`) up to the current length of `this.hr` — incremental/append-only,
-   * same pattern as `bandsScale()`. `bpm <= 0` records are placeholders (see
-   * `windowMean`'s doc comment) and must advance no phase.
+   * Beat-locked cardiac phase at time t, derived from the stored PPG with the
+   * stored accelerometer conditioning the motion split (`PulseTracker`, §4b):
+   * `{ phase, hz, w }` — phase in radians with 0 ≡ systolic peak (cumulative
+   * within the local spline segment, so consumers wrap it themselves), the
+   * instantaneous rate in Hz, and the fit reliability 0–1 (gate pulse
+   * amplitude on it). Cursor-derived, so it freezes when playback pauses.
+   * Null before the first fit is possible (~4 s in) or with no PPG at all.
+   * @returns {{phase:number, hz:number, w:number}|null}
    */
-  _syncHrPhase() {
-    const hr = this.hr
-    for (let i = this._hrPhase.length; i < hr.length; i++) {
-      if (i === 0) { this._hrPhase.push(0); continue }
-      const prev = hr[i - 1]
-      const dt = hr[i].t - prev.t
-      const hz = Math.max(prev.bpm, 0) / 60
-      this._hrPhase.push(this._hrPhase[i - 1] + 2 * Math.PI * hz * dt)
-    }
-  }
-
-  /**
-   * Cumulative heartbeat phase (radians) at time t, integrated by step/hold
-   * bpm over `this.hr` (`bpm <= 0` placeholder records advance no phase).
-   * Cursor-derived, so it freezes when playback is paused. Returns 0 for t
-   * before the first record; null if `this.hr` is empty.
-   * @returns {number|null}
-   */
-  heartPhaseAt(t) {
-    const hr = this.hr
-    if (!hr.length) return null
-    this._syncHrPhase()
-    // Binary search for the last entry with entry.t <= t (same shape as `sampleAt`).
-    let lo = 0, hi = hr.length - 1, ans = -1
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      if (hr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
-    }
-    if (ans < 0) return 0
-    const hz = Math.max(hr[ans].bpm, 0) / 60
-    return this._hrPhase[ans] + 2 * Math.PI * hz * (t - hr[ans].t)
+  pulseAt(t) {
+    return this._pulse.at(t)
   }
 
   /**
