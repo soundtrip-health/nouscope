@@ -1,0 +1,151 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Landing / about panel — see src/js/ui/InfoPanel.js.
+//
+// One panel, two roles: the landing content on a fresh page (the page ground
+// is already black, so it simply reads as the site), and a semi-transparent
+// overlay over the data / helix view when reopened from the "i" toggle
+// mid-session. The wrapper is pointer-transparent so the controls bar and
+// scrubber stay clickable underneath; only the card itself catches clicks.
+// ─────────────────────────────────────────────────────────────────────────────
+
+.info-toggle {
+  position: fixed;
+  top: 1.55rem;
+  // Top-right, just left of the view-select dropdown (top-left belongs to the
+  // data panel's EEG label + quality dots in analysis mode).
+  right: 9.5rem;
+  z-index: 2001;   // above the overlay so it can toggle it closed
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  background: none;
+  border: 1px solid var(--border-button);
+  color: var(--text-muted);
+  font-family: georgia, serif;   // classic italic-serif "i" info glyph
+  font-style: italic;
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.2s, color 0.2s, border-color 0.2s, background 0.2s;
+
+  &:hover,
+  &.active {
+    opacity: 1;
+    color: var(--color-text);
+    border-color: var(--border-control);
+    background: var(--wash-hover);
+  }
+}
+
+.info-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;   // above the analysis panels (≤1006), below shortcuts (3000)
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  // Clear of the bottom controls bar / scrubber so the card never covers them.
+  padding: 3.5rem 1rem 6rem;
+  background: rgba(0, 0, 0, 0.35);   // dims the data view; clicks pass through
+  pointer-events: none;
+
+  &[hidden] { display: none; }
+}
+
+.info-card {
+  pointer-events: auto;
+  width: min(36rem, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 1.25rem 1.5rem 1.35rem;
+  backdrop-filter: blur(3px);
+}
+
+.info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.info-title {
+  font-size: 1.35rem;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: var(--color-text);
+}
+
+.info-close-btn {
+  background: none;
+  border: 1px solid var(--border-button);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+
+  &:hover { color: var(--color-text); border-color: var(--color-text); }
+}
+
+.info-card p,
+.info-card li {
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--text-muted);
+
+  strong { color: var(--text-strong); font-weight: 600; }
+  code { font-size: 0.9rem; color: var(--text-strong); }
+}
+
+.info-lede {
+  margin: 0 0 0.85rem;
+}
+
+.info-usage {
+  margin: 0 0 0.85rem;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+
+  li::marker { color: var(--text-axis); }
+}
+
+// Inline chip echoing an actual UI control's label (↑ Music, ● LIVE, ⏺ …) —
+// same treatment as the shortcuts modal's key caps.
+.info-chip {
+  display: inline-block;
+  font-size: 0.82rem;
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 0 0.35rem;
+  white-space: nowrap;
+}
+
+.info-helix {
+  margin: 0 0 0.85rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border-hairline);
+  border-left: 2px solid var(--band-delta);
+  border-radius: 4px;
+}
+
+.info-footer {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text-label);
+
+  a {
+    color: var(--text-strong);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+
+    &:hover { color: var(--color-text); }
+  }
+}

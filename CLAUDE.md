@@ -8,13 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev       # Start Vite dev server (http://localhost:5173)
 npm run build     # Production build (outputs to dist/)
 npm run preview   # Preview production build
+npm start         # Production static server for dist/ (server.js; PORT/HOST env, default 127.0.0.1:8080)
 ```
 
 No test suite is configured.
 
 ## Architecture
 
-**Nouscope** — a Muse EEG/PPG/IMU biometric visualizer. The bio-data panel (webgl-plot line traces + 2D canvas heatmaps) IS the visualization; there is no 3D scene. Audio playback is optional and its only purpose is to drive the EEG–music entrainment analysis.
+**Nouscope** — a Muse EEG/PPG/IMU biometric visualizer. The bio-data panel (webgl-plot line traces + 2D canvas heatmaps) is the primary visualization. An optional artistic `◉ Helix` view (`src/js/ui/HelixView.js`, three.js) renders the same session as a 3D braided helix in place of the panel grid — the one 3D scene in the app. Audio playback is optional and its only purpose is to drive the EEG–music entrainment analysis.
 
 **One data view.** There is no live-vs-analysis split. Connecting a headset starts an always-on capture into `SessionStore`; `AnalysisDisplay` renders that store at the `Scrubber`'s playhead. Parked at the leading edge (● LIVE) the panels behave as a live monitor; dragged back, they replay the session. A loaded `.jsonl` fills the same store and drives the same panels.
 
@@ -25,14 +26,15 @@ No test suite is configured.
 2. `_setupEEG()` — instantiates `EEGManager` and `ComplexityManager`, wires connect/disconnect (and reads the `?sim` developer flag)
 3. `_setupRecording()` — instantiates `RecordingManager`, wires the `⏺` record button
 4. `_setupAnalysis()` — instantiates `SessionStore`, `AnalysisDisplay`, `Scrubber`; wires the `↑ Recording` file input
-5. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
+5. Instantiates `InfoPanel` — the landing/about content, open by default until a session starts
+6. Starts the `update()` loop immediately (requestAnimationFrame) so EEG/bio plots run before — or entirely without — audio
 
 Audio is optional and drives only the entrainment analysis. There are two mutually-exclusive sources, both lazily creating `AudioManager` + `EntrainmentManager` via `_ensureAudioInfra()`:
 
 - **`↑ Music` (file)** → `_loadAudioFile(file)`: `AudioManager.loadAudioBuffer(file)` → `BPMManager.detectBPM()` (exposes `bpmValue` for recording metadata) → `AudioManager.play()`; the `⏸` pause button appears.
 - **`Microphone` (live mic)** → `_toggleMic()`: `AudioManager.startMic()` captures muted microphone input as the novelty source (no playback, no BPM). Starting one source stops the other; the pause button is hidden in mic mode.
 
-There is no landing overlay and no demo track — the app opens straight to the controls bar. EEG can connect before, after, or without any audio.
+On a fresh page the `InfoPanel` landing card (project description, usage, Helix blurb, Soundtrip Labs credit + links) sits over the otherwise-empty viewport; its wrapper is pointer-transparent so the controls bar stays clickable beneath it. `App._showPanel` closes it when a session comes up; the top-right `i` toggle reopens it as a semi-transparent overlay on the data/helix view, and `App._hidePanel` reopens it when the page empties again. There is no demo track. EEG can connect before, after, or without any audio.
 
 ### Key Modules
 
@@ -45,11 +47,14 @@ There is no landing overlay and no demo track — the app opens straight to the 
 | `src/js/managers/ComplexityManager.js` | Multiscale entropy (MSE) on quality-weighted 4-channel EEG average; SampEn at 6 scales, updated ~0.2 Hz; exposes `mseCurve` + `complexity` scalar |
 | `src/js/managers/RecordingManager.js` | In-memory JSONL recorder: raw EEG/PPG/IMU + bands/HR/entrainment/MSE. Start/stop toggle; downloads timestamped `nouscope-*.jsonl` file. `onRecord` sink fans every record to `SessionStore` too. |
 | `src/js/managers/EEGManager.js` | Muse BT connection (Web Bluetooth), EEG band powers, PPG heart rate, IMU head pose; exposes raw display buffers + sample counters |
-| `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. |
+| `src/js/managers/SessionStore.js` | Stored, seekable session timeline for the Analysis tab. Ingests the JSONL record types (from live capture or a loaded file), reconstructs raw streams on a per-stream grid (JS port of `analysis/utils.py`), recomputes spectrograms from EEG; answers windowed range queries. Also re-derives, at an arbitrary past time `t` (for `HelixView`, scrub-correctly): `headPoseAt(t)`, `pulseAt(t)` (via `PulseTracker`), `complexityAt(t)` — the live `EEGManager.headPose`/`heartPulse` fields are not stored, so history must be recomputed from the stored `accel`/`ppg` streams instead. |
+| `src/js/managers/PulseTracker.js` | Beat-locked cardiac phase from the stored PPG + accelerometer (owned by `SessionStore`, `pulseAt(t) → { phase, hz, w }`). A training-free linear take on PCHS (arXiv:2606.30156): per 8 s window, a 3-harmonic cardiac model is fitted jointly with lagged accelerometer regressors by weighted least squares, f₀ grid-searched in 0.5–3 Hz, systolic phase read at the window end, reliability `w` from the cardiac/residual/motion power split; a confidence-weighted soft lock across 1 s slots and a C¹ Hermite spline between them. Lazily cached per slot, scrub-correct. See `docs/algorithms.md` §4b. |
 | `src/js/managers/SimulatedMuse.js` | Drop-in `MuseClient` replacement emitting synthetic EEG/PPG/IMU/telemetry packets in native muse-js shape, so the whole pipeline runs with no hardware. Developer-only, no UI: `?sim` makes `Connect EEG` use it; `?sim=auto` connects on load |
 | `src/js/ui/AnalysisDisplay.js` | The only renderer: `renderAt(store, cursor)` redraws every panel from a `SessionStore`, each over its own fixed window ending at `cursor` (min/max-decimated line plots, time-mapped spectrogram blits); readouts show the instant value at `cursor` plus the average over that panel's window |
 | `src/js/ui/Scrubber.js` | Transport: playhead cursor, play/pause at speed×realtime, ● LIVE follow, keyboard shortcuts; per-channel quality ribbon + BPM-change/gap event ticks under the track; hover-time preview pill |
 | `src/js/ui/bioRender.js` | Shared render constants + primitives (viridis LUT, EEG/IMU scales, `PANEL_WINDOWS`, color tokens, `paintSpecColumn`) |
+| `src/js/ui/InfoPanel.js` | Landing/about card (`#info-overlay` + top-right `i` toggle): open on load, auto-closed by `App._showPanel`, reopenable mid-session as a translucent overlay; pointer-transparent wrapper keeps controls/scrubber usable under it |
+| `src/js/ui/HelixView.js` | Optional 3D view (three.js): last 60 s of raw EEG as 4 braided ribbon strands along a helix, driven from `SessionStore` at the scrubber cursor; faces the viewer by default (newest data as a front-facing circle), head tilt swings to the side view, sharp head turns/nods send it spinning — and both always settle back to face-on (slow-adapting pose baseline + post-spin return spring); recency emphasized (age fade/taper, head glow, perspective shrink of old coils); complexity sets spiral tightness and the swirl shape of a domain-warped cloud backdrop (calm → laminar bands, complex → tight eddies; eased, rendered at reduced resolution to a render target); the beat-locked pulse from `SessionStore.pulseAt` drives a traveling strand pulse and a breathing of clouds + palette-tinted particle field (reliability-gated, with a jump absorber for the live edge); swaps with the panel grid via `◉ Helix`; themed 4-color strand palettes (cycled by the palette button, persisted in localStorage) |
 
 ### Update Loop
 
@@ -60,13 +65,13 @@ Each frame in `App.update()`:
 4. `ComplexityManager.update(now)` — rate-limited to ~0.2 Hz; computes 6-scale MSE on the EEG long buffer
 5. `_tapLiveColumns()` — copies new spectrogram/tempogram columns from the managers into `SessionStore` (the JSONL stream carries no columns)
 
-Panel drawing is **not** in this loop: `Scrubber` runs its own rAF loop and calls `AnalysisDisplay.renderAt(store, cursor)`. There is no 3D render step.
+Panel drawing is **not** in this loop: `Scrubber` runs its own rAF loop and calls `AnalysisDisplay.renderAt(store, cursor)` (and `HelixView.renderAt(store, cursor)`, which only caches the store/cursor — `HelixView` owns its own rAF for continuous animation since the Scrubber's loop skips idle frames, which would freeze the helix's pose easing and idle spin while paused).
 
 ### EEGManager — Signal Processing
 
 - **EEG bands** (see `docs/algorithms.md` §3): rolling 256-sample buffers per channel; delta (1–4 Hz) via sparse Hann-weighted DFT bins 1–3; theta–gamma via Morlet wavelet mean power; quality-weighted channel aggregation with optional drops; aperiodic (1/f) background normalization; relative `bandPower { delta, theta, alpha, beta, gamma }`. `normalizeBands` (a fixed `Set`, default `theta/alpha/beta/gamma`) selects which bands participate in the normalization sum; delta is excluded by default so its movement-prone power cannot swamp the higher bands. Temporal smoothing: source EMA (`BAND_SMOOTH=0.35`), plus a display-side one-pole filter across pixels in `AnalysisDisplay._renderBands` (`BAND_SMOOTH_TAU=0.21 s`).
 - **Spectrogram** (display only): separate Hann-DFT pipelines — main panel: bins 1–50 Hz at 1 Hz from the 256-sample window; low-frequency panel: 0.5–8.0 Hz at 0.1 Hz from a 2560-sample (10 s) buffer. Quality-weighted channel average; log₁₀(power) columns in rolling buffers (`spectrumSampleCount`, `spectrumLoSampleCount`). Columns are tapped into `SessionStore` each frame by `App._tapLiveColumns`; robust auto-scaling (percentile + cap) lives in `bioRender.specColumnsScale`.
-- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape). **Known limitation**: the first-order bandpass barely discriminates inside its passband, so an ~0.8 Hz motion artifact above ~2× pulse amplitude captures the estimate and HR collapses toward the artifact rate — see `docs/algorithms.md` §4.
+- **PPG / heart rate**: IIR bandpass (HP 0.5 Hz → LP 3.5 Hz), MSPTDfast v2 batch detector (6 s window, re-run every 1 s). Median IBI → `heartRate` BPM. Phase oscillator → `heartPulse` (0–1, cubed-sine shape). **Known limitation**: the first-order bandpass barely discriminates inside its passband, so an ~0.8 Hz motion artifact above ~2× pulse amplitude captures the estimate and HR collapses toward the artifact rate — see `docs/algorithms.md` §4. The helix's pulse does not use this: `PulseTracker` (§4b) fits the stored PPG with accelerometer conditioning and stays on the true rate through such artifacts.
 - **IMU / head pose**: exponential low-pass (α=0.08) on accelerometer → `headPose { pitch, roll }` in radians. Gyroscope also subscribed.
 - `enablePpg = true` must be set on `MuseClient` before `connect()` — already handled in `EEGManager.connect()`.
 - **Display buffers**: `eegChannels[4]` (1024-sample rolling), `ppgDisplay` getter (384-sample rolling), `accelDisplay`/`gyroDisplay` ({x,y,z} rolling). Monotonic counters `eegSampleCount`, `ppgSampleCount`, `imuSampleCount` allow consumers to detect new samples even after buffers reach capacity.
@@ -116,9 +121,10 @@ One panel (`#analysis-panel`, `an-`-prefixed IDs), rendered by `AnalysisDisplay.
 
 - **Shown** whenever there's a session: EEG connect brings it up following the live edge; `↑ Recording` loads a `.jsonl` and opens at its start. `body.analysis-mode` grids it into a 2-column full-viewport layout above the scrubber. Disconnect leaves it up (still scrubbable) and stops following.
 - **Two data sources, one store**: while EEG is connected an always-on capture (`RecordingManager.captureActive` → `onRecord` → `SessionStore.ingest`) feeds the timeline — no explicit recording needed. Live spectrogram/tempogram columns are tapped from the managers each frame (`App._tapLiveColumns`); for loaded files spectrograms are recomputed from EEG (audio tempogram can't be — no audio stored).
-- **Per-panel time windows** (`PANEL_WINDOWS` in `bioRender.js`), each ending at the playhead: EEG 2 s, PPG 6 s, IMU 4 s, bands 5 s, MSE 30 s, all three spectrograms 70 s. These reproduce the spans the old live scrolling panel had. A single shared window across all panels is wrong in both directions — do not reintroduce one.
+- **Per-panel time windows** (`PANEL_WINDOWS` in `bioRender.js`), each ending at the playhead: EEG 2 s, PPG 6 s, IMU 4 s, bands 5 s, MSE 30 s, all three spectrograms 70 s, helix 60 s. These reproduce the spans the old live scrolling panel had. A single shared window across all panels is wrong in both directions — do not reintroduce one.
 - **Plots**: `WebglLineRoll` for EEG (4ch stacked), PPG (detrended + robust-peak scaled), IMU (accel+gyro, 6 lines), bands (5 lines), MSE (5 lines). Three 2D `<canvas>` viridis heatmaps: `#an-spec-canvas` (8–50 Hz), `#an-spec-lo-canvas` (0.5–8 Hz @ 0.1 Hz), `#an-spec-audio-canvas` (0.5–5 Hz tempogram). Entrainment meter bar; per-channel quality dots. Readouts show the value at the playhead plus the average over that panel's own window.
 - **Scrubber** (`#scrubber`, fixed bottom bar): play/pause, click/drag timeline, ● LIVE (follow the growing edge), speed (1×/2×/4×). Keyboard: Space, ←/→, Home/End. It owns only the playhead — window widths belong to the renderer. The timeline (`#scrub-timeline`) also carries a per-channel signal-quality ribbon and event ticks (music BPM changes, recording gaps).
+- **Helix mode**: the `◉ Helix` button swaps the panel grid for `HelixView`'s full-viewport 3D helix in place, sharing the same store/scrubber/cursor — only the renderer changes. Whichever of the two is hidden has its WebGL contexts suspended (cloneNode-replace, since a lost context can't revive on the same canvas) to stay within the browser's context budget. `HelixView` runs its own rAF loop rather than the Scrubber's, since that loop skips idle frames.
 
 ### Data Simulator
 
@@ -133,5 +139,5 @@ One panel (`#analysis-panel`, `an-`-prefixed IDs), rendered by `AnalysisDisplay.
 - Vite config; `@` alias resolves to `src/`
 - SCSS compiled by Vite's built-in Sass support
 - `muse-js` is installed from `github:soundtrip-health/muse-js#muse3` (not npm registry)
-- `three` is retained only for its Web Audio helpers (`AudioListener` / `AudioAnalyser`) in AudioManager — there is no 3D scene
+- `three` provides Web Audio helpers (`AudioListener` / `AudioAnalyser`) in `AudioManager`, and the `WebGLRenderer`/`Scene`/`ShaderMaterial` scene in `HelixView` — the app's one 3D scene, optional and separate from the bio-data panel
 - Web Bluetooth (EEG) requires Chrome or Edge; HTTPS required in production

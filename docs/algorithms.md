@@ -2,7 +2,7 @@
 
 This document explains the key algorithms that drive Nouscope: how raw biometric signals (and an optional audio track) are processed into the numbers rendered in the bio-data panel — which is itself the visualization. There is one data view: `AnalysisDisplay` renders a stored session timeline at the scrubber's playhead, so the same panels serve as a live monitor (playhead at the leading edge) and as a post-hoc review surface (playhead anywhere else). Intended for developers (human or AI) modifying the internals.
 
-A second, independent tab — Multi-Track (§11) — reviews several loaded `.jsonl` recordings side by side; it is file-review only (no live EEG) and shares no code, DOM, or CSS with the view described in §1–§10, which remains exactly the original single-session app.
+A second, independent tab — Multi-Track (§12) — reviews several loaded `.jsonl` recordings side by side; it is file-review only (no live EEG) and shares no code, DOM, or CSS with the view described in §1–§11, which remains exactly the original single-session app.
 
 ---
 
@@ -12,6 +12,7 @@ A second, independent tab — Multi-Track (§11) — reviews several loaded `.js
 2. [BPM Detection](#2-bpm-detection)
 3. [EEG Spectral Band Powers](#3-eeg-spectral-band-powers)
 4. [PPG Heart Rate Detection](#4-ppg-heart-rate-detection)
+4b. [Beat-Locked Pulse Phase — Harmonic Separation](#4b-beat-locked-pulse-phase--accelerometer-conditioned-harmonic-separation)
 5. [IMU Head Pose Estimation](#5-imu-head-pose-estimation)
 6. [EEG Spectrogram Display](#6-eeg-spectrogram-display)
 7. [EEG–Music Entrainment Index](#6--eegmusic-entrainment-index)
@@ -19,7 +20,8 @@ A second, independent tab — Multi-Track (§11) — reviews several loaded `.js
 9. [Session Recording — JSONL Export](#8--session-recording--jsonl-export)
 10. [The Data View — Timeline Reconstruction & Scrubbing](#9--the-data-view--timeline-reconstruction--scrubbing)
 11. [Muse Data Simulator](#10--muse-data-simulator)
-12. [The Multi-Track Tab — Independent File Review](#11--the-multi-track-tab--independent-file-review)
+12. [Helix View](#11--helix-view)
+13. [The Multi-Track Tab — Independent File Review](#12--the-multi-track-tab--independent-file-review)
 
 ---
 
@@ -243,7 +245,12 @@ by ~1 bpm at rest, more as beat-to-beat variability grows.
 > Butterworth 0.7–3.5 Hz roughly doubles the tolerable artifact amplitude but
 > does not fix the strong-motion case; a real fix needs accelerometer-referenced
 > adaptive filtering (the IMU is already subscribed) or an explicit
-> motion-gated reject.
+> motion-gated reject. §4b's `PulseTracker` is exactly that fix for the
+> *stored* stream (the helix's pulse): its joint fit with lagged accelerometer
+> regressors keeps the fundamental on the true rate through the same 0.8 Hz /
+> 2.5× artifact (synthetic check: 0.19 rad mean phase error with the
+> accelerometer vs 1.4 rad and a collapse to 0.8 Hz without it). The live
+> `heartRate` readout still comes from MSPTD.
 
 ### Stage 4 — Heartbeat oscillator
 
@@ -255,6 +262,227 @@ heartPulse = s³                         // cubing sharpens the systolic peak
 ```
 
 The cube transform produces a waveform that spikes sharply (simulating the fast systolic peak) and decays slowly (diastolic phase), matching the physiological shape of a PPG waveform.
+
+This oscillator free-runs at the last detected *rate*; it is never re-aligned
+to the beats themselves, so its phase drifts off the real pulse between
+detections. It is used only for the live `heartPulse` field. The helix view's
+pulse comes from §4b instead, which locks phase to the observed cycles.
+
+---
+
+## 4b. Beat-Locked Pulse Phase — Accelerometer-Conditioned Harmonic Separation
+
+**File:** `src/js/managers/PulseTracker.js` — owned by `SessionStore`, exposed
+as `SessionStore.pulseAt(t) → { phase, hz, w } | null`. Consumer: §11 Stage 5.
+
+A closed-form, training-free take on *Physically-Constrained Harmonic
+Separation* (PCHS — Fraihi, Karrakchou & Ghogho, arXiv:2606.30156, 2026),
+which formulates HR estimation from wrist PPG as analysis-by-synthesis: the
+signal is explained by a physics-guided harmonic generator (fundamental f₀
+with K harmonics) plus a motion residual, with the accelerometer *conditioning*
+the artifact separation rather than regressing vital signs, and a per-window
+reliability weight. The paper learns its conditioning with a three-stream CNN
++ FiLM and its residual with a convolutional head; here both are replaced by a
+linear ridge regression on lagged accelerometer channels, fitted **jointly**
+with the harmonics by weighted least squares. That keeps a whole window's fit
+at ~2 ms of plain JS, needs no model, and preserves the properties that
+matter for a visual pulse: the cardiac component is forced into the physical
+band, the motion model can only explain what the accelerometer predicts, and
+the two are orthogonalized by the joint solve (the paper's `L_orth`).
+
+What it outputs is a **phase**, not a rate: `phase` is the cardiac phase at
+`t` with `0 ≡ systolic peak` (cumulative within the local spline segment, so
+callers wrap it), `hz` the instantaneous rate, `w ∈ [0, 1]` the fit
+reliability. Everything is a pure function of the stored `ppg`/`accel`
+streams at absolute times — scrub-correct at ● LIVE, dragged back, and on
+loaded `.jsonl` files — and per-slot results are cached lazily, so seeking
+anywhere costs at most a handful of fits.
+
+### Stage 1 — Window and preprocessing
+
+Fits live on a `HOP_S = 1` s grid; slot `i` fits the window ending at
+`t_i = i·HOP_S`, `WIN_S = 8` s long (shorter down to `MIN_WIN_S = 4` s at the
+session start; nothing before 4 s). A slot is computed only once the PPG grid
+holds one packet past `t_i`, so it is never cached against a half-arrived
+tail. The PPG (raw infrared, 64 Hz) is decimated 2:1 to `FIT_FS = 32` Hz
+(pair averages; a pair with a NaN is missing). More than `MAX_NAN_FRAC = 25 %`
+missing → the slot is invalid (`w = 0`). Otherwise:
+
+```
+x  ← forward-fill NaNs
+x  ← x − movingAverage(x, ±BASELINE_HALF = 24 samples ≈ ±0.75 s)   // baseline b(t): drift + respiration
+w_n = missing ? 0 : RAMP_W0 + (1 − RAMP_W0)·n/(N−1)                // RAMP_W0 = 0.25: recent cycles dominate
+x  ← x / weightedRMS(x)                                             // unit variance, as in the paper
+```
+
+Every column of the regression below (and `x`) is multiplied by `√w_n`, so
+the normal equations solve a weighted LS. The ramp matters because the phase
+is read out at the window's *end*: a rate drifting across the window biases
+an end-phase far less when the last few cycles carry most of the weight.
+
+### Stage 2 — Motion regressors (the accelerometer conditioning)
+
+The 52 Hz accelerometer is linearly resampled onto the fit grid; channels
+`x, y, z` and the rotation-invariant magnitude `|a|` (`ACC_CHANNELS = 4`)
+are each baseline-removed like `x` and scaled to unit RMS, then lagged by
+`ACC_LAGS = {−4, −2, 0, +2, +4}` samples (±125 ms, edge-clamped) → `M = 20`
+regressors `G` (N×M). Fewer than `MIN_ACC_FRAC = 75 %` valid accel samples
+(or no accel stream) → `M = 0` and the fit runs on the harmonic model alone.
+A ridge `RIDGE·N = 0.02·N` on the `G` block keeps the system well posed
+(lags of one axis are highly collinear).
+
+### Stage 3 — Harmonic model and f₀ search (analysis-by-synthesis)
+
+The cardiac component is `K = 3` harmonics with free amplitude and phase:
+
+```
+h(n) = Σ_{k=1..K}  a_k cos(k·θ_n) + b_k sin(k·θ_n),   θ_n = 2π·f₀·τ_n,  τ_n = (2n + 0.5)/64 s
+```
+
+(the paper's `A_k/k · sin(kθ)` with a shared phase is relaxed to per-harmonic
+phases — real PPG harmonics are not phase-aligned; the *frequencies* stay
+locked to integer multiples of f₀, which is the physical constraint that
+matters). `f₀ ∈ [F_MIN, F_MAX] = [0.5, 3.0]` Hz (30–180 bpm).
+
+**Stage A — search.** The motion model is projected out once
+(`x_r = x − G·(GᵀG + λI)⁻¹Gᵀx`), then for every candidate f₀ on a
+`F_COARSE = 0.02` Hz grid the six harmonic columns `H(f₀)` are fitted to `x_r`
+(a 6×6 solve; columns are generated by a rotation recurrence, no per-sample
+trig) and the weighted residual energy `E(f₀) = |x_r|² − βᵀHᵀx_r` recorded;
+the minimum is refined on a `F_FINE = 0.002` Hz grid over `±F_FINE_SPAN =
+0.03` Hz. The harmonic structure disambiguates octaves by itself: a
+candidate at f₀/2 captures only the true fundamental, one at 2f₀ only the
+second harmonic, so the true f₀ has the lowest residual whenever any harmonic
+energy exists.
+
+**Stage B — joint solve.** At the chosen f₀, `[H | G]` (6 + M columns) is
+fitted to `x` in one system, ridge on the `G` block only. The final
+amplitudes, phase and reliability all come from this joint fit — this is
+where the separation is orthogonal rather than sequential (motion regressors
+cannot keep cardiac energy the harmonics explain better, and vice versa).
+
+### Stage 4 — Reliability
+
+With `P_h = |Hβ_H|²`, `P_g = |Gβ_G|²`, `P_r = |x − Hβ_H − Gβ_G|²`:
+
+```
+w = P_h / (P_h + P_r + MOTION_PENALTY·P_g),   MOTION_PENALTY = 0.3
+```
+
+— the cardiac model's share of the window, with the power the accelerometer
+had to explain counting partly against it (a window that needed a large
+motion model is one whose cardiac phase is less certain). Clean simulated
+PPG scores ≈ 0.9; a 2.5× 0.8 Hz sway artifact ≈ 0.35–0.45; the paper's
+learned log-variance head plays the same role.
+
+### Stage 5 — Systolic phase readout
+
+**End-phase refinement.** f₀ is a whole-window estimate, but the phase is
+needed at the window's *end*, and a rate drifting across the window
+(respiratory sinus arrhythmia) makes a single-f₀ fit lag there. So with the
+joint fit's motion part removed (`x − Gβ_G`), the harmonic amplitudes/phases
+are re-fitted at the same f₀ over only the last `PHASE_WIN_S = 3` s (a 6×6
+solve); the read-out below uses those coefficients, so it follows the most
+recent cycles. (In-app check against the simulator, whose rate swings ±4 bpm
+with a 20 s period: worst-case error at true peaks 0.8 → 0.6 rad.)
+
+The synthesized cycle `y(φ) = PPG_SIGN · Σ_k a_k cos kφ + b_k sin kφ` is
+scanned over 128 points for its maximum `φ*` (`PPG_SIGN = +1`: raw infrared
+rises at systole, the same peak convention §4's MSPTD detects on). The slot's
+phase is the model phase at the window end relative to that peak:
+
+```
+phase_i = wrap2π( 2π·f₀·(t_i − t_start) − φ* )
+```
+
+so `phase ≡ 0 (mod 2π)` exactly at systolic peaks.
+
+### Stage 6 — Soft lock and inter-slot spline
+
+A slot with `w ≥ W_ANCHOR = 0.5` is an **anchor**: its own fitted phase and
+rate stand. A weaker slot starts from the last anchor within `LOOKBACK = 6`
+slots integrated forward at the anchor's rate, and moves toward its own fit
+by `gain = smoothstep(W_FLOOR = 0.2, W_ANCHOR, w)`:
+
+```
+held   = wrap2π( phase_r + 2π·f₀_r·(t_i − t_r) )
+phase  = wrap2π( held + gain · wrapπ(phase_i − held) )
+hz     = f₀_r + gain·(f₀_i − f₀_r)
+```
+
+— a confidence-weighted phase-locked loop. An artifact stretch holds its
+course instead of jumping, and the hand-back to clean fits is gradual; a
+hard threshold would flip between two disagreeing phase bases as `w` wavers
+around it (which is what it did before the soft lock: 1.4 rad live-edge
+corrections vs 0.5 rad after). With no anchor in reach the slot's own values
+are used as they are (an invalid slot gives `w = 0`), and amplitude is gated
+on `w` downstream.
+
+Between slots `i` and `i+1` the phase is a cubic Hermite spline: end values
+are the two slot phases, `phase_{i+1}` unwrapped to the 2π multiple nearest
+the rate prediction `phase_i + π·(hz_i + hz_{i+1})·HOP_S`; end slopes are
+`2π·hz_i`, `2π·hz_{i+1}`. `hz` and `w` interpolate linearly. This is C¹
+smooth everywhere and locked to the observed beats — versus §4's oscillator,
+which is only ever rate-correct. At the live edge (slot `i+1` not yet
+computable — the newest fit trails the cursor by up to `EDGE_LOOKBACK = 3`
+slots) the phase is extrapolated from slot `i` at its rate; when the next fit
+lands, the spline replaces the extrapolation, a correction the helix absorbs
+(§11 Stage 5).
+
+Synthetic check (HR ramping 60→78 bpm with respiratory sinus arrhythmia,
+20 s of 0.8 Hz sway at 2.5× pulse amplitude coupled into the PPG): mean
+|phase error| at true peaks 0.20 rad clean / 0.19 rad in motion (1.38 rad in
+motion with the accelerometer withheld — the fundamental then locks to the
+0.8 Hz sway, §4's known failure); max spline rate deviation 0.12 Hz; ~1.7 ms
+per fit.
+
+### Constants
+
+| Constant | Value | Role |
+|---|---|---|
+| `HOP_S` / `WIN_S` / `MIN_WIN_S` | 1 / 8 / 4 s | Fit grid, window, shortest start-up window |
+| `FIT_FS` | 32 Hz | PPG analysis rate (2:1 decimation) |
+| `F_MIN` / `F_MAX` | 0.5 / 3.0 Hz | Physical band for f₀ |
+| `F_COARSE` / `F_FINE` / `F_FINE_SPAN` | 0.02 / 0.002 / ±0.03 Hz | Two-stage f₀ grid |
+| `K` | 3 | Harmonics |
+| `BASELINE_HALF` | 24 samples | ±0.75 s moving-average baseline |
+| `ACC_LAGS` / `ACC_CHANNELS` | {−4,−2,0,2,4} / 4 | Motion regressors: 5 lags × (x, y, z, \|a\|) |
+| `RIDGE` | 0.02·N | Ridge on the motion block |
+| `RAMP_W0` | 0.25 | Row weight at window start |
+| `PHASE_WIN_S` | 3 s | End-phase refinement span (f₀ fixed) |
+| `MAX_NAN_FRAC` / `MIN_ACC_FRAC` | 0.25 / 0.75 | Coverage gates |
+| `MOTION_PENALTY` | 0.3 | Motion power counted against reliability |
+| `W_ANCHOR` / `W_FLOOR` | 0.5 / 0.2 | Soft-lock anchor threshold and correction-gain floor |
+| `LOOKBACK` / `EDGE_LOOKBACK` | 6 / 3 slots | Anchor search; live-edge lag tolerance |
+| `PPG_SIGN` | +1 | Systole = raw-infrared maximum |
+
+### Deviations from the paper
+
+Kept: harmonic generator with bounded f₀ and K = 3; 8 s windows; accelerometer
+as artifact conditioner (not a vitals regressor); joint/orthogonal separation;
+reliability-weighted readout. Replaced: the learned CNN/FiLM conditioning and
+residual head → linear lagged-accelerometer regression; the correlation +
+multi-resolution STFT loss → weighted least squares; the temporal
+total-variation prior on f₀ → the soft lock across slots (per-slot fits are
+kept order-independent so any slot can be computed in isolation, which is
+what makes lazy per-slot caching and scrub-correctness possible). Not
+implemented: respiratory-rate readout; the time-varying `f₀(t)`, `g(t)` within
+a window (the ramp weighting stands in for it at the readout point).
+
+### Graceful degradation
+
+No PPG → `pulseAt` null; PPG but no accel → harmonic model only (the §4
+artifact limitation returns, but reliability still drops on artifacts);
+gaps → missing rows carry zero weight, >25 % missing invalidates the slot
+(`w = 0`, phase held from the last anchor); first 4 s of a session → null.
+
+### References
+
+- Fraihi N., Karrakchou O., Ghogho M. (2026). *Physically-Constrained Harmonic
+  Separation for Robust Heart and Respiratory Rate Estimation from Wrist
+  Photoplethysmography.* arXiv:2606.30156.
+- Reiss A. et al. (2019). *Deep PPG: Large-Scale Heart Rate Estimation with
+  Convolutional Neural Networks* (PPG-DaLiA), Sensors 19(14).
 
 ---
 
@@ -1020,7 +1248,452 @@ one `index` and `timestamp`, which is what `zipSamples` groups on.
 
 ---
 
-## §11 — The Multi-Track Tab — Independent File Review
+## §11 — Helix View
+
+**Files:** `src/js/ui/HelixView.js`; three query methods on `src/js/managers/SessionStore.js` (`headPoseAt`, `pulseAt` — §4b's `PulseTracker` — and `complexityAt`)
+
+An artistic, scrub-correct 3D rendering of the same session timeline the panel
+grid draws — not a second data source. The last `PANEL_WINDOWS.helix` seconds
+of raw EEG are laid along a helical form, one ribbon strand per electrode,
+braided 90° apart around the helix axis; newest data sits at the head and time
+extrudes away at constant speed. By default the form **faces the viewer** —
+the axis points at the camera (`FACE_TILT_X = π/2` base tilt), so the newest
+samples read as a circle of raw waveform up front; tilting the head swings it
+toward the side (profile) view, and both the pose offset and any accumulated
+gyro spin always settle back to that face-on default (Stage 4). Recency is
+emphasized — older coils fade, thin, and recede with perspective while the
+newest few seconds glow (Stage 6). Behind the form, slowly swirling
+palette-tinted clouds fill the frame, their swirl loosely following the EEG's
+multiscale entropy (Stage 8), with a palette-tinted particle field drifting
+through them (Stage 7); clouds, motes and strands all breathe on a
+beat-locked heartbeat (Stage 5). Toggled by the `◉ Helix` button in `#eeg-controls`; it
+replaces the `AnalysisDisplay` panel grid but shares the same `SessionStore`,
+`Scrubber`, and cursor, so it works identically at ● LIVE, scrubbed back, and
+on loaded `.jsonl` files.
+
+**Frozen-history principle**: every visual quantity — spiral tightness, EEG
+displacement, pose, pulse phase — is a pure function of an absolute time `t`,
+never of live manager state or of "how much has been drawn so far." Because a
+segment's shape depends only on `t`, a segment drawn once during live capture
+never re-shapes as later data arrives; scrubbing back re-evaluates the same
+functions at earlier `t` and gets the same picture the live view showed at the
+time. This is also why `headPose` and `heartPulse` — live-only fields on
+`EEGManager` — can't be reused here: replaying history needs their value *at
+each past t*, so `SessionStore` gained `headPoseAt(t)` and `pulseAt(t)`, and
+reuses `complexityAt(t)` (§7) to re-derive them from the stored `accel`/`ppg`
+streams instead.
+
+### Stage 1 — Sampling window
+
+`WINDOW_S = PANEL_WINDOWS.helix = 60` s of history per strand, decimated by
+`HELIX_STRIDE = 4` (256 Hz → `HELIX_FS = 64` Hz effective) for
+`N = WINDOW_S · HELIX_FS = 3840` points per strand (plain stride-4 pick, not
+min/max decimation — a spike-fidelity tweak noted as future work). The window
+end is `t1 = min(cursor, store.eeg.durationS())`, the same clamp-to-written-data
+reasoning as the envelope tail clamp (§9): without it, the helix head would be
+a blank stub while following live, since `cursor` can run slightly ahead of
+the counter-reconstructed EEG grid.
+
+### Stage 2 — Tightness mapping (frozen history)
+
+Each point's spiral tightness is set by MSE complexity *at that point's own
+time*, so history never re-shapes:
+
+```
+n(t) = clamp(complexityAt(t) / MSE_Y_MAX, 0, 1)
+```
+
+`complexityAt(t)` (new `SessionStore` method) linearly interpolates
+`complexity` between the two `store.mse` records straddling `t` and
+clamp-holds at the nearest edge value outside the recorded range; before any
+MSE has arrived, `n = DEFAULT_N = 0.4` (mid-tightness).
+
+From `n`, three quantities follow, computed per-sample for `i = 0…N-1` at
+`t_i = t1 - (N-1-i)/HELIX_FS`:
+
+- **Vertical position** — constant speed regardless of `n`; only the turning
+  rate below varies:
+  ```
+  y(a) = HELIX_HEIGHT/2 - a · (HELIX_HEIGHT / WINDOW_S)     // a = age = t1 - t
+  ```
+  `HELIX_HEIGHT = 6.0` world units spans the full 60 s window.
+- **Turn rate** — turns/second, higher complexity opens the coil:
+  ```
+  f(n) = TURNS_CALM - n · (TURNS_CALM - TURNS_OPEN)
+  ```
+  `TURNS_CALM = 0.28`, `TURNS_OPEN = 0.12` turns/s — 16.8 turns across the
+  window at `n=0` down to 7.2 turns at `n=1`.
+- **Radius**:
+  ```
+  r(n) = R_MIN + n · (R_MAX - R_MIN)          // R_MIN = 0.6, R_MAX = 1.6
+  ```
+
+**θ is integrated anchored at the head**, not the tail: `θ_head = 0` at the
+newest sample (`i = N-1`), walking backward through age with
+`θ_{i-1} = θ_i - 2π·f(n(t_i))·dt` (`dt = 1/HELIX_FS`). Anchoring at the head
+rather than integrating forward from the tail is what makes the newest point
+angularly stable while scrubbing or following live — a tail-anchored
+integration would rotate the entire visible coil every time the window
+advanced. Per-sample `n(t)` is computed with a single O(N) merge-walk over the
+time-sorted `store.mse` array (points are generated in time order, so this
+avoids a per-sample binary search). Strand `k` (TP9/AF7/AF8/TP10) adds a fixed
+phase offset `k·π/2`, producing the 90°-braided appearance.
+
+### Stage 3 — EEG radial displacement & quality ghosting
+
+Each strand's raw EEG (`store.eeg.channelSlice`, stride-4 decimated) displaces
+its centerline radially:
+
+```
+eegNorm = clamp(µV / EEG_SCALE, -1.5, 1.5)     // EEG_SCALE = 200 µV, from §3/§6
+displaced = center + aRadial · eegNorm · EEG_GAIN      // EEG_GAIN = 0.70
+```
+
+A `NaN` sample (pre-session, a gap, or disconnect) forces `eegNorm = 0` and
+alpha to 0 — the strand is simply invisible over that stretch rather than
+snapping to a spike, so a session "grows" visibly from nothing and fades
+across a dropout instead of spiking.
+
+Per-channel signal quality (`store.qualityAt(t)`, §9) maps to an opacity
+weight — `good = 1.0`, `marginal = 0.5`, `poor = 0` (same convention as
+`EntrainmentManager`/`ComplexityManager`) — multiplied into the fragment
+alpha. Quality is cached at one value per second per channel
+(`_qualityWeights`), recomputed only when `floor(cursor·2)` changes, since
+`qualityAt` costs a 1 s RMS scan and would otherwise run `N` times per
+rebuild.
+
+### Stage 4 — Head pose (from stored accelerometer)
+
+`headPoseAt(t)` re-derives the same tilt angles as §5's live pipeline —
+`pitch = atan2(-x, √(y²+z²))`, `roll = atan2(y, z)` — but from a **0.5 s
+trailing mean** of the stored accelerometer (`store.accel`, last 26 samples at
+`IMU_FS = 52`) rather than a running EMA, since scrub playback has no filter
+state to carry forward from one query to the next; the short trailing window
+plays the same "reject vibration/jerk, keep slow head movement" role §5's
+`ACC_ALPHA = 0.08` EMA does live. Returns `null` when the window has no
+samples of any axis.
+
+`HelixView` eases the inner group's rotation toward this target every frame
+rather than snapping to it. The target is an **offset from the face-on base
+tilt**, so a neutral head shows the circle end-on and tilting swings toward
+the profile view — with `POSE_GAIN = 2.0`, ~45° of head pitch
+(`π/2 / POSE_GAIN`) reaches the full side view. The offset is measured not
+from absolute gravity but from a **slowly-adapting neutral-pose baseline**
+(`poseRef`, EMA with `POSE_REF_TAU = 6 s`): a headset worn at an angle, or a
+tilt the user holds, relaxes back to the face-on view over ~6 s instead of
+parking the form off-axis indefinitely, while transient head movement still
+swings the view immediately (the baseline barely moves within `POSE_TAU`):
+
+```
+poseRef += (pose - poseRef) · (1 - exp(-dt / POSE_REF_TAU))
+target   = { rotX: FACE_TILT_X + (pitch - poseRef.pitch) · POSE_GAIN,
+             rotZ: (roll - poseRef.roll) · POSE_GAIN }
+rotation += (target - rotation) · (1 - exp(-dt / POSE_TAU))     // POSE_TAU = 0.25 s
+```
+
+A `null` pose (no accel data) eases the rotation back toward the face-on
+neutral rather than special-cased. On top of pose, an always-on **idle spin**
+(`IDLE_SPIN_RAD_S = 0.05` rad/s, about the helix's own axis — in-plane
+rotation when face-on) keeps the form presentationally alive even with a
+static head.
+
+**Sharp head rotations send the form spinning.** Two damped spin velocities
+live on an *outer* group in screen space: a rapid head turn (gyro **z**, the
+yaw axis when upright) spins it left/right about screen-y, and a quick nod
+(gyro **y**) tumbles it up/down about screen-x. Only sharp movement counts —
+a gyro mean below `SPIN_THRESH_DPS = 100` dps imparts nothing, so slow head
+motion never drifts the form. Impulses integrate over **session time
+traversed** (`dCur = clamp(Δcursor, 0, 0.1)`), not wall-clock time, so a
+paused playhead parked on a sharp movement can't wind the spin up without
+bound and replay reproduces the same kick; the wind-down runs on wall-clock
+`dt` like the idle spin:
+
+```
+spinVel = (spinVel + gate(gyro) · SPIN_GAIN · dCur) · exp(-dt / SPIN_DAMP_TAU)
+rotation += spinVel · dt        // per axis: gyro-z → screen-y, gyro-y → screen-x
+```
+
+`SPIN_GAIN = 0.05` rad/s per degree of sharp rotation, `SPIN_DAMP_TAU = 2.0` s.
+Since an exponentially damped velocity `v₀` sweeps a total angle of `v₀ · τ`,
+a brisk ~60–90° head movement (`v₀ ≈ 3–4.5` rad/s) carries the form through at
+least one full revolution before winding down. Each gyro channel is the mean
+over the 0.25 s before the cursor (0 if none).
+
+**Settling back after a spin.** Only the spin *velocity* decays above — the
+accumulated rotation would otherwise leave the form stranded at whatever
+angle the spin ended on. Once the remaining spin speed
+(`|velX| + |velY|`) drops below `SPIN_SETTLE_VEL = 0.3` rad/s, a return
+spring eases each outer-group axis toward its **nearest multiple of 2π**
+(identity orientation via the shortest arc, ≤ π):
+
+```
+rotation += (round(rotation / 2π) · 2π - rotation) · (1 - exp(-dt / SPIN_RETURN_TAU))
+```
+
+`SPIN_RETURN_TAU = 1.2` s. Together with the pose baseline above, this
+guarantees the view always comes back to the face-on default a few seconds
+after any amount of head movement.
+
+### Stage 5 — Heartbeat pulse propagation
+
+The pulse phase comes from `SessionStore.pulseAt(cursor)` — §4b's
+accelerometer-conditioned harmonic fit of the stored PPG, which returns
+`{ phase, hz, w }` with `phase ≡ 0 (mod 2π)` at systolic peaks, C¹-smooth
+between fits and locked to the observed beats. It is cursor-derived, so the
+pulse **freezes when playback pauses** — scrub-correct, same as everything
+else in this view. Three view-side steps make it read as one clean beat:
+
+- **Reliability gate.** Pulse amplitude is `PULSE_AMP · gain`, with `gain`
+  eased over `PULSE_GAIN_TAU = 1 s` toward `smoothstep(PULSE_W_LO = 0.25,
+  PULSE_W_HI = 0.55, w)`: a clean fit pulses at full depth, a motion-artifact
+  stretch fades the pulse out rather than letting it jitter, and no PPG at
+  all (`pulseAt` null) fades it to zero.
+- **Jump absorber.** During continuous playback (cursor step <
+  `PULSE_SEEK_S = 0.25` s) any discontinuity in the phase source beyond what
+  the rate predicts over the step — in practice the live edge, when the next
+  fit lands and replaces the extrapolation — is folded into an offset that
+  decays with `PULSE_JUMP_TAU = 1.5 s`, so the visible pulse bends rather than
+  skips. A seek resets the offset: the phase snaps to the new position.
+- **One waveform everywhere.** Strands, motes and clouds all use the same
+  cubed-cosine shape, `s = (cos φ + 1)/2`, `pulse = s³` (sharp systolic rise,
+  slow diastolic decay), so the whole scene breathes together.
+
+The strand fragment shader propagates it down the helix from the newest
+point:
+
+```
+ph    = uPulsePhase − (age / PULSE_VEL) · uOmega     // age = seconds since the head
+s     = (cos(ph) + 1) / 2
+pulse = s³ · uPulseAmp
+```
+
+`uOmega = 2π · hz`; `PULSE_VEL = 20.0` seconds-of-helix-age traversed per
+second of phase — at a resting 60 bpm (1 Hz) that puts one full wavelength
+every 20 s of age, so roughly 3 bands are visible across the 60 s window at
+once.
+
+### Stage 6 — Rendering split & rebuild throttle
+
+Work is split between an infrequent CPU pass and a per-frame GPU pass:
+
+- **CPU, throttled to cursor movement** (`_rebuild`): integrates the
+  centerline (θ/y/r per Stage 2), radial and finite-difference tangent
+  vectors, normalized EEG value and quality weight (Stage 3) into the dynamic
+  `BufferAttributes` (`position`, `aRadial`, `aTangent`, `aData`). It reruns
+  only when `|cursor - _builtCursor| > REBUILD_EPS_S = 0.08` s — about 12 Hz
+  while following live, instantly on any seek, and never while paused. A full
+  rebuild of all 4 strands (3840 points each) measures ≈0.5–1.5 ms, so no
+  incremental/ring-shift update is needed for v1 (noted as the escape hatch if
+  a slower device needs it). The static `aStatic` attribute (`side`, `age`)
+  is written once at strand creation — index `i` always means the same age in
+  this right-anchored window, so it never changes.
+- **GPU, every frame**: the vertex shader applies the EEG radial displacement
+  and expands the centerline into a camera-facing ribbon
+  (`± HALF_WIDTH · normalize(cross(tangent, viewDir))`, `HALF_WIDTH = 0.03`,
+  tapered thinner toward the tail); the fragment shader draws the traveling
+  pulse (Stage 5), softens the ribbon edges, and modulates brightness by EEG
+  magnitude and quality (Stage 3).
+
+**Recency emphasis** — the newest data is the subject; history recedes but
+stays legible, and regains prominence when the form swings to the profile
+view:
+
+- *Age fade*: fragment alpha × `mix(1, FADE_MIN, smoothstep(0, 0.9, age/60))`
+  (`FADE_MIN = 0.15`) — the oldest coils sit at 15 % opacity.
+- *Head glow*: brightness + `HEAD_GLOW · smoothstep(HEAD_GLOW_S, 0, age)`
+  (`HEAD_GLOW = 0.35`, `HEAD_GLOW_S = 4 s`) lifts the newest few seconds.
+- *Width taper*: the ribbon taper runs `TAIL_TAPER = 0.3` → 1.0 over age
+  (was 0.6 → 1.0).
+- *Perspective*: the camera is wide and close (FOV 60°, `z = 7.2` vs the
+  original 45°/`z = 9`), so in the face-on view the oldest coils — farthest
+  from the camera along the axis — render ~2.4× smaller than the head.
+
+Blending is additive (`THREE.AdditiveBlending`, `depthWrite: false` — no
+sorting needed) and assumes the near-black `--color-bg` (`#000000`): strands
+and pulses brighten where they overlap instead of occluding each other.
+
+Strand colors come from a themed palette rather than the panel grid's
+per-channel `EEG_TOKENS`: each palette (`PALETTES` in `HelixView.js` —
+Aurora, Ember, Violet, Ocean, Moon) is a family of four close-hue colors, one
+per electrode in TP9/AF7/AF8/TP10 order, related enough to read as one form
+under additive blending but varied enough to follow a single strand. The
+palette button next to `◉ Helix` cycles them live (uniform update only, no
+rebuild); the choice persists per browser in `localStorage`
+(`nouscope-helix-palette`).
+
+`HelixView` owns its own `requestAnimationFrame` loop, started by
+`setVisible(true)` and stopped when hidden — the `Scrubber`'s own loop skips
+frames when nothing is dirty (e.g. while paused), which would freeze the pose
+easing and idle spin along with it. `renderAt(store, cursor)`, called from the
+same scrubber fan-out that feeds `AnalysisDisplay`, only caches the store and
+cursor; all per-frame work happens inside `_frame`.
+
+### Stage 7 — Particle backdrop
+
+A field of `PARTICLE_COUNT = 1400` soft additive motes (`THREE.Points`, one
+draw call) fills the space behind and around the helix. It sits directly on
+the scene — a fixed field the helix rotates *within*, not something that
+swings with head pose. The entire animation is a pure function of each
+mote's static attributes (`position`, `aSeed`) and a `uTime` uniform, so the
+CPU cost per frame is one uniform write:
+
+- **Drift**: constant `PARTICLE_DRIFT = 0.3` world-units/s toward the viewer
+  — the same direction time flows along the helix — wrapping in the vertex
+  shader between `PARTICLE_FAR = −24` and `PARTICLE_NEAR = +5` (world z),
+  with a gentle seeded per-mote x/y sway. Alpha fades in over the 6 units
+  after the far plane and out over the 4 units before the near plane, so
+  motes never pop.
+- **Twinkle**: seeded sinusoidal brightness (0.1–1.0) at 0.3–1.5 rad/s.
+- **Heartbeat breathing**: the same reliability-gated cubed-cosine pulse
+  value the strands use at the cursor (Stage 5) is passed as `uPulse` — motes
+  brighten ~50 % at each systole, and sit at their base level when there's no
+  reliable pulse. This is the one data-driven quantity in the field; drift and
+  twinkle run on wall-clock time like the idle spin (presentational, not
+  scrub-tied).
+- **Color**: each mote mixes between the first and last colors of the active
+  strand palette (`uColorA`/`uColorB`, updated live by the palette button).
+
+Point size attenuates with view depth (clamped), scaled by the device pixel
+ratio; the sprite is a radial `smoothstep` disc. `frustumCulled = false`
+(the shader wraps z past the static positions' bounds).
+
+### Stage 8 — Cloud backdrop
+
+Behind everything, a fullscreen field of slowly swirling clouds — the
+backdrop the motes drift through. It is rendered off-screen into a
+`WebGLRenderTarget` at `CLOUD_RES = 0.4` × the canvas's CSS size (clouds are
+smooth, so the linear upsample is invisible and the fill cost stays small on
+integrated GPUs) and blitted as the first draw of the main scene (no depth),
+with the additive strands and motes composited over it.
+
+**Form.** Quilez-style domain-warped fbm over 3-D value noise (quintic
+interpolation, 5 octaves, time as the third axis so the field evolves rather
+than scrolls, keeping coordinates bounded):
+
+```
+q = R · (fbm(p, t) , fbm(p + o₁, t))            − 0.5
+r = R · (fbm(p + warp·q + o₂, t), fbm(p + warp·q + o₃, t)) − 0.5
+f = fbm(p + warp·r, t)
+```
+
+where `R` is a rotation by `ang = swirlRange · 2·(fbm_low(p·0.3, t·0.02) − 0.5)`
+— a large-scale, slowly evolving rotation field applied to the warp
+direction. That rotation is what turns drifting bands into eddies: with
+`ang ≈ 0` the warp merely stretches the field; as the angle range grows the
+warp curls around the low-frequency noise's extrema.
+
+**Entropy coupling.** `n = clamp(complexityAt(cursor) / MSE_Y_MAX, 0, 1)`
+(the same normalization Stage 2 uses), eased over `CLOUD_SWIRL_TAU = 5 s` —
+"loosely coupled": the form drifts toward a new regime instead of snapping
+with each 5 s MSE update. Every shape parameter is a `mix` on the eased `n`,
+so the coupling is continuous:
+
+| Parameter | calm (n = 0) | complex (n = 1) | Effect |
+|---|---|---|---|
+| horizontal stretch `p.x ×` | 0.55 | 1.0 | long laminar bands → isotropic curls |
+| warp amplitude | 1.0 | 2.8 | gentle drift → strong folding |
+| swirl angle range | ±0.5 rad | ±3.4 rad | bands → tight eddies |
+| octave gain | 0.46 | 0.58 | soft → rough fine detail |
+| pace (cloud-s per wall-s) | `CLOUD_PACE_CALM = 0.7` | `CLOUD_PACE_OPEN = 1.4` | slower → livelier |
+
+Cloud time is accumulated on the CPU (`cloudT += dt·pace(n)`) so a changing
+pace never jumps the field. It runs on the wall clock like the idle spin —
+presentational; only its *shape* is data-tied.
+
+**Heartbeat.** The Stage 5 pulse is applied twice: a brightness lift of
+`CLOUD_PULSE_LIFT = 0.22` at systole, and a radial dilation of the sampling
+coordinates by `CLOUD_PULSE_DILATE = 0.03` from the screen center — the whole
+field breathes outward on each beat. Because the pulse source is beat-locked
+and reliability-gated, this reads as a clean breath rather than a flicker.
+
+**Tone.** Density `body = smoothstep(0.28, 0.80, f)` tinted with the
+palette's second color (×0.42), `bright = smoothstep(0.55, 0.95, f)` blending
+toward the first (×0.55), plus a highlight in the fourth color where the warp
+is strongest (`|r|`, ×0.22). A radial darkening (×0.35 at the center) keeps
+the helix the subject, and a soft vignette fades the corners. Colors follow
+the palette button live.
+
+### View toggle & context budget
+
+`◉ Helix` swaps the panel grid for the helix view in place — same store,
+scrubber, and cursor throughout. Because `AnalysisDisplay` alone holds 5 WebGL2
+contexts and browsers cap live contexts at roughly 8–16 total (§12's per-track
+panel cap hits the same ceiling from a different direction), the hidden
+renderer's contexts are suspended while the other is shown: `suspend()`
+disposes the renderer, forces context loss, and replaces the canvas with a
+clone (a lost WebGL context can never be revived on the same canvas) — the
+same pattern `AnalysisDisplay.suspend()`/`resume()` already used. `resume()`
+recreates the GL state lazily the next time that view is shown.
+
+### Constants
+
+| Constant | Value | Role |
+|---|---|---|
+| `HELIX_STRIDE` | 4 | EEG decimation, 256 → 64 Hz |
+| `HELIX_HEIGHT` | 6.0 | World units spanned by the 60 s window |
+| `R_MIN` / `R_MAX` | 0.6 / 1.6 | Radius at `n=0` / `n=1` |
+| `TURNS_CALM` / `TURNS_OPEN` | 0.28 / 0.12 turns/s | Turn rate at `n=0` / `n=1` |
+| `DEFAULT_N` | 0.4 | Normalized complexity before any MSE exists |
+| `EEG_GAIN` | 0.70 | World units of radial deflection per `EEG_SCALE` µV |
+| `HALF_WIDTH` | 0.03 | Ribbon half-width, world units |
+| `BASE_OPACITY` | 0.85 | Base fragment alpha before quality/pulse |
+| `POSE_GAIN` | 2.0 | Head pitch/roll offset → form rotation |
+| `POSE_TAU` | 0.25 s | Easing time constant toward target pose |
+| `POSE_REF_TAU` | 6.0 s | Neutral-pose baseline adaptation |
+| `IDLE_SPIN_RAD_S` | 0.05 rad/s | Always-on presentational spin |
+| `SPIN_THRESH_DPS` | 100 dps | Gyro gate below which head motion imparts no spin |
+| `SPIN_GAIN` | 0.05 | Degrees of sharp rotation → rad/s of spin velocity |
+| `SPIN_DAMP_TAU` | 2.0 s | Spin velocity decay |
+| `SPIN_SETTLE_VEL` | 0.3 rad/s | Remaining spin below which the return spring engages |
+| `SPIN_RETURN_TAU` | 1.2 s | Easing back to face-on after a spin |
+| `PULSE_VEL` | 20.0 | Seconds-of-helix-age traversed per second of phase |
+| `PULSE_AMP` | 0.5 | Brightness modulation depth |
+| `FADE_MIN` | 0.15 | Strand alpha multiplier at the oldest sample |
+| `TAIL_TAPER` | 0.3 | Ribbon width multiplier at the oldest sample |
+| `HEAD_GLOW` / `HEAD_GLOW_S` | 0.35 / 4 s | Brightness lift at the head and its span |
+| `PARTICLE_COUNT` | 1400 | Backdrop motes |
+| `PARTICLE_SPREAD` | 9 | x/y half-extent of the particle field |
+| `PARTICLE_NEAR` / `PARTICLE_FAR` | +5 / −24 | z wrap planes of the drift |
+| `PARTICLE_DRIFT` | 0.3 | World units/s toward the viewer |
+| `PULSE_W_LO` / `PULSE_W_HI` | 0.25 / 0.55 | Reliability range over which pulse amplitude ramps 0 → 1 |
+| `PULSE_GAIN_TAU` | 1.0 s | Pulse amplitude easing |
+| `PULSE_JUMP_TAU` / `PULSE_SEEK_S` | 1.5 s / 0.25 s | Phase-jump absorber decay; cursor step that counts as a seek |
+| `CLOUD_RES` | 0.4 | Cloud render-target scale vs CSS size |
+| `CLOUD_SWIRL_TAU` | 5.0 s | Entropy → swirl easing |
+| `CLOUD_PACE_CALM` / `CLOUD_PACE_OPEN` | 0.7 / 1.4 | Cloud time rate at n = 0 / 1 |
+| `CLOUD_PULSE_LIFT` / `CLOUD_PULSE_DILATE` | 0.22 / 0.03 | Cloud brightness lift / radial dilation at systole |
+| `REBUILD_EPS_S` | 0.08 s | Cursor movement that triggers a CPU rebuild |
+
+These are isolated aesthetic knobs — tuning them never touches the structural
+formulas above.
+
+### Graceful degradation
+
+All fall out of the design above rather than being special-cased: no MSE yet
+→ `DEFAULT_N` mid-tightness; `NaN` EEG (pre-session, a gap, or disconnect) →
+invisible, so a strand visibly grows as the session lengthens and fades across
+a dropout rather than spiking; no PPG, or a fit too unreliable (motion
+artifact) → the pulse gain eases to 0: flat strand brightness, and clouds and
+motes stop breathing but keep swirling, drifting and twinkling; no MSE yet →
+clouds sit at the `DEFAULT_N` mid-swirl; no
+accel → rotation eases toward neutral instead of a stale pose (and the pulse
+fit runs without its motion model); loaded `.jsonl`
+files take the identical path, since every quantity is derived from
+store + cursor with no live-manager dependency.
+
+### Cross-references
+
+- §4b (`PulseTracker`) for the beat-locked phase, rate and reliability
+  `pulseAt` supplies to Stage 5; §4 for the live oscillator's cubed pulse
+  shape this view's shaders share (cosine form, peak at phase 0).
+- §7 (MSE) for the `complexity` scalar Stage 2 and Stage 8 both normalize by
+  `MSE_Y_MAX`.
+- §5 (IMU/head pose) for the atan2 tilt formulas `headPoseAt` re-derives from
+  stored accelerometer data.
+
+---
+
+## §12 — The Multi-Track Tab — Independent File Review
 
 A second tab (`Session` / `Multi-Track` switcher at the top of the page) for
 reviewing several loaded `.jsonl` recordings side by side, GarageBand-style: a
@@ -1029,7 +1702,7 @@ one shared master transport. It is a **separate, independent feature** from
 the single-session view documented above — **file-review only, no live EEG
 connection** (an explicit product decision: this tab never touches
 `EEGManager`/`RecordingManager`/`AudioManager`), and shares no DOM ids, no
-CSS classes, and no runtime state with §1–§10's view. Switching tabs only
+CSS classes, and no runtime state with §1–§11's view. Switching tabs only
 toggles which `<main>` is visible; the original tab's live connection (if any)
 keeps running underneath exactly as it always has.
 

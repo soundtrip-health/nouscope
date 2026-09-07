@@ -25,6 +25,7 @@
 // Spectrogram bin counts are shared with the renderers (bioRender) so the
 // file-path recompute and the analysis blit can never disagree on column length.
 import { SPEC_BINS as SPEC_MAIN_BINS, SPEC_LO_BINS } from '../ui/bioRender'
+import PulseTracker from './PulseTracker'
 
 const COUNTER_MODULUS = 1 << 16   // muse-js index/sequenceId counters are 16-bit
 
@@ -309,6 +310,9 @@ class GriddedStream {
 
 export default class SessionStore {
   constructor() {
+    // Beat-locked cardiac phase from the stored ppg/accel streams (§4b);
+    // lazily fits and caches per-second windows, so it is reset with the data.
+    this._pulse = new PulseTracker(this)
     this.reset()
   }
 
@@ -347,6 +351,8 @@ export default class SessionStore {
 
     // Recording-gap scan state (see `gaps()`/`_scanGaps()`) — incremental like above.
     this._gapList = []; this._gapScanned = 0; this._gapRunStart = null
+
+    this._pulse.reset()
 
     this._empty = true
   }
@@ -741,6 +747,70 @@ export default class SessionStore {
       q.push(rms < 50 ? 'good' : rms < 100 ? 'marginal' : 'poor')
     }
     return q
+  }
+
+  /**
+   * Head tilt angles (radians) derived from a 0.5 s mean of the stored
+   * accelerometer, at time t. Stands in for the live EMA (`ACC_ALPHA = 0.08`
+   * in EEGManager) — a short trailing mean plays the same "reject vibration/
+   * jerk, keep slow head movement" role for scrub playback, where there is no
+   * running filter state to carry forward. Formulas match EEGManager.js
+   * `_processAccel` (:1059-1063) exactly.
+   * @returns {{pitch:number, roll:number}|null} null if no accel samples in range
+   */
+  headPoseAt(t) {
+    const s1 = Math.min(this.accel.length, Math.floor(t * IMU_FS))
+    const s0 = s1 - 26   // 0.5 s at IMU_FS=52
+    let x = 0, y = 0, z = 0
+    let cx = 0, cy = 0, cz = 0
+    const xs = this.accel.channelSlice(0, s0, s1)
+    const ys = this.accel.channelSlice(1, s0, s1)
+    const zs = this.accel.channelSlice(2, s0, s1)
+    for (let i = 0; i < xs.length; i++) if (!Number.isNaN(xs[i])) { x += xs[i]; cx++ }
+    for (let i = 0; i < ys.length; i++) if (!Number.isNaN(ys[i])) { y += ys[i]; cy++ }
+    for (let i = 0; i < zs.length; i++) if (!Number.isNaN(zs[i])) { z += zs[i]; cz++ }
+    if (!cx || !cy || !cz) return null
+    x /= cx; y /= cy; z /= cz
+    return {
+      pitch: Math.atan2(-x, Math.sqrt(y * y + z * z)),
+      roll:  Math.atan2(y, z),
+    }
+  }
+
+  /**
+   * Beat-locked cardiac phase at time t, derived from the stored PPG with the
+   * stored accelerometer conditioning the motion split (`PulseTracker`, §4b):
+   * `{ phase, hz, w }` — phase in radians with 0 ≡ systolic peak (cumulative
+   * within the local spline segment, so consumers wrap it themselves), the
+   * instantaneous rate in Hz, and the fit reliability 0–1 (gate pulse
+   * amplitude on it). Cursor-derived, so it freezes when playback pauses.
+   * Null before the first fit is possible (~4 s in) or with no PPG at all.
+   * @returns {{phase:number, hz:number, w:number}|null}
+   */
+  pulseAt(t) {
+    return this._pulse.at(t)
+  }
+
+  /**
+   * MSE `complexity` scalar at time t, linearly interpolated between the two
+   * neighboring `this.mse` records straddling t; clamp-held at the nearest
+   * edge value outside the recorded range. Null if `this.mse` is empty.
+   * @returns {number|null}
+   */
+  complexityAt(t) {
+    const arr = this.mse
+    if (!arr.length) return null
+    // Binary search for the last entry with entry.t <= t (same shape as `sampleAt`).
+    let lo = 0, hi = arr.length - 1, ans = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (arr[mid].t <= t) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+    }
+    if (ans < 0) return arr[0].complexity
+    if (ans === arr.length - 1) return arr[ans].complexity
+    const a = arr[ans], b = arr[ans + 1]
+    const frac = (t - a.t) / (b.t - a.t)
+    return a.complexity + (b.complexity - a.complexity) * frac
   }
 
   /**
