@@ -1,0 +1,15 @@
+# Keep the build context to source only: no deps, builds, secrets, data or VCS.
+.git
+node_modules
+dist
+.env
+.env.*
+analysis
+test
+graphify-out
+.playwright-mcp
+.claude
+*.log
+screenshot.png
+compose.*.yml
+Dockerfile
