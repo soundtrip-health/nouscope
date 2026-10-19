@@ -1,0 +1,31 @@
+# nouscope dev: Vite with hot reload on the live checkout. Start with `~/git/it/bin/dev nouscope`.
+# Published on DEV_BIND (the tailnet IP) only, never the tunnel. Web Bluetooth needs a secure
+# context: use http://localhost:5173 through `ssh -L 5173:100.121.203.40:5173 solaris`.
+name: nouscope-dev
+services:
+  vite:
+    image: node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      npm_config_cache: /tmp/.npm
+      # muse-js is locked as git+ssh; fetch the public repo over https (no SSH keys in the container)
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: url.https://github.com/.insteadOf
+      GIT_CONFIG_VALUE_0: ssh://git@github.com/
+    command: sh -c 'npm ci --no-audit --no-fund && exec npx vite --host 0.0.0.0 --port 5173'
+    volumes:
+      - .:/app
+      - ./.git:/app/.git:ro                # dev code can't plant git hooks that later run on the host
+      - ${DEV_CACHE:?}/node_modules:/app/node_modules   # container-built deps; host node_modules untouched
+    tmpfs: ["/tmp:exec"]                     # npm prepares git deps under /tmp (docker defaults to noexec)
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 2g
+    ports: ["${DEV_BIND:?set DEV_BIND (bin/dev does)}:5173:5173"]
+networks:
+  default:
+    driver_opts:
+      com.docker.network.bridge.name: sol-nouscope-d
