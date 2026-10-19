@@ -23,6 +23,6 @@ COPY --chown=root:root --from=build /src/dist ./dist
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080
 USER node
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --start-interval=1s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8080/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "server.js"]
