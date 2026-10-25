@@ -1,0 +1,25 @@
+# nouscope prod. Deploy with `~/git/it/bin/deploy nouscope` (never `up --build` from a working tree).
+# Hardening baseline: ~/git/it/standards/container.md
+name: nouscope
+services:
+  web:
+    image: ${IMAGE:-nouscope:local}
+    build:
+      context: .
+      args: { GIT_SHA: "${GIT_SHA:-unknown}" }
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    ports: ["127.0.0.1:${PUBLISH_PORT:-8080}:8080"]   # loopback only; cloudflared → localhost:8080
+    restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
+networks:
+  default:
+    driver_opts:
+      # The sol-* bridge name puts this app under the host egress rules (it/bin/docker-egress.sh).
+      com.docker.network.bridge.name: ${BRIDGE:-sol-nouscope}
